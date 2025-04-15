@@ -1,10 +1,14 @@
 from ...config import CommonConfig
-from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp
+from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp,_get_std_for_linear
 from .moe import MoE, ParameterizedExperts
 
 
-def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, layer_idx: int) -> MLP | MoE:
-    block = config.mlp_blocks[layer_idx]
+def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, layer_idx: int,is_mtp_block: bool = False) -> MLP | MoE:
+    if is_mtp_block:
+        block = config.mtp_blocks[layer_idx].mlp_block
+    else:
+        block = config.mlp_blocks[layer_idx]
+    
     mlp_type = block.mlp_type
 
     kwargs = dict(
