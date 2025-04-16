@@ -129,10 +129,10 @@ class GPTDolomiteMTPBlock(GPTDolomiteBlock):
             layer_idx=layer_idx,
         )
 
-        self.ln_3 = get_normalization_function(
+        self.ln_1 = get_normalization_function(
             config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
         )
-        self.ln_4 = get_normalization_function(
+        self.ln_2 = get_normalization_function(
             config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
         )
 
