@@ -59,21 +59,24 @@ _NAKED_DISALLOWED_ARGS = [
 
 class _MtpBlockArgs(BaseArgs):
     normalization_function: str = "rmsnorm"  # Default value
-    add_bias : bool = False
-    mlp_block: _MoEArgs | _MLPArgs # MoE or MLP
-    sequence_mixer:  _SoftmaxAttentionArgs | _Mamba2Args | _MultiHeadLatentAttentionArgs | _StickbreakingAttentionArgs 
-    
+    add_bias: bool = False
+    mlp_block: _MoEArgs | _MLPArgs  # MoE or MLP
+    sequence_mixer: _SoftmaxAttentionArgs | _Mamba2Args | _MultiHeadLatentAttentionArgs | _StickbreakingAttentionArgs
+
     def model_post_init(self, __context: Any) -> None:
-        assert self.normalization_function in ["rmsnorm", "layernorm"], f"Unexpected normalization_function {self.normalization_function}"
-        
-        assert isinstance(self.mlp_block, (_MoEArgs, _MLPArgs)), f"Expected MLP or MoE block, got {type(self.mlp_block)}"
-        
-        assert isinstance(self.sequence_mixer, ( 
-            _SoftmaxAttentionArgs, 
-            _MultiHeadLatentAttentionArgs, 
-            _StickbreakingAttentionArgs, 
-            _Mamba2Args
-        )), f"Expected sequence_mixer to be one of the supported types, got {type(self.sequence_mixer)}"
+        assert self.normalization_function in [
+            "rmsnorm",
+            "layernorm",
+        ], f"Unexpected normalization_function {self.normalization_function}"
+
+        assert isinstance(
+            self.mlp_block, (_MoEArgs, _MLPArgs)
+        ), f"Expected MLP or MoE block, got {type(self.mlp_block)}"
+
+        assert isinstance(
+            self.sequence_mixer,
+            (_SoftmaxAttentionArgs, _MultiHeadLatentAttentionArgs, _StickbreakingAttentionArgs, _Mamba2Args),
+        ), f"Expected sequence_mixer to be one of the supported types, got {type(self.sequence_mixer)}"
 
 
 class CommonConfig(PretrainedConfig):
@@ -105,7 +108,7 @@ class CommonConfig(PretrainedConfig):
         router_aux_loss_coef: float = 0.001,
         tie_word_embeddings: bool = True,
         rope_dim: int | None = None,
-        mtp_loss_weight: int = 0 , 
+        mtp_loss_weight: int = 0,
         num_nextn_predict_layers: int = 0,
         mtp_blocks: list[dict] = None,
         **kwargs,
@@ -128,7 +131,7 @@ class CommonConfig(PretrainedConfig):
         self.init_method = init_method
 
         self.num_nextn_predict_layers = num_nextn_predict_layers
-        self.mtp_loss_weight =mtp_loss_weight 
+        self.mtp_loss_weight = mtp_loss_weight
 
         # check if enums are valid
         assert init_method in ["normal", "mup"]
@@ -154,7 +157,6 @@ class CommonConfig(PretrainedConfig):
         self.mlp_blocks = mlp_blocks
         self._set_mlp_blocks()
         assert len(self.mlp_blocks) == self.num_layers
-
 
         self.mtp_blocks = mtp_blocks
         self._set_mtp_blocks()
@@ -313,7 +315,6 @@ class CommonConfig(PretrainedConfig):
 
         self.mlp_blocks = mlp_blocks
 
-
     def _set_mtp_blocks(self) -> None:
         if self.mtp_blocks is None:
             self.mtp_blocks = [{} for _ in range(self.num_nextn_predict_layers)]
@@ -325,8 +326,7 @@ class CommonConfig(PretrainedConfig):
 
             # MTP Block
             normalization_function = mtp_block.pop("normalization_function", "rmsnorm")
-            add_bias_down = mtp_block.pop("add_bias","false")
-
+            add_bias_down = mtp_block.pop("add_bias", "false")
 
             mlp_block = mtp_block.pop("mlp_block", {})
             sequence_mixer = mtp_block.pop("sequence_mixer", {})
@@ -338,7 +338,7 @@ class CommonConfig(PretrainedConfig):
             for key in ["activation_function", "dropout", "add_bias"]:
                 _update_with_key_value(mlp_block, mlp_kwargs, key)
 
-            if mlp_type =="MLP":
+            if mlp_type == "MLP":
                 mlp_class = _MLPArgs
             elif mlp_type == "MoE":
                 for key in ["shared_intermediate_size", "num_experts", "num_experts_per_tok"]:
@@ -425,15 +425,12 @@ class CommonConfig(PretrainedConfig):
             else:
                 raise ValueError(f"unexpected sequence_mixer_type ({sequence_mixer_type})")
 
-            assert (
-                        len(sequence_mixer) == 0
-                    ), f"leftover keys in the sequence_mixer ({sequence_mixer}) at position {i}"
-
+            assert len(sequence_mixer) == 0, f"leftover keys in the sequence_mixer ({sequence_mixer}) at position {i}"
 
             # Create the mtp block argument
             mtp_kwargs = {
                 "normalization_function": normalization_function,
-                "add_bias" : add_bias_down ,
+                "add_bias": add_bias_down,
                 "mlp_block": mlp_class(**mlp_kwargs),
                 "sequence_mixer": sequence_mixer_class(**sequence_mixer_kwargs),
             }

@@ -104,8 +104,8 @@ def wrap_model_container_for_distributed_training(
 
     block_names = model_container[0].model._no_split_modules
 
-   # Note : Needed for wrapping MTP Block with FSDP wrapper, Better way to do this ?
-    if args.model_args.pretrained_config['num_nextn_predict_layers'] > 0:
+    # Note : Needed for wrapping MTP Block with FSDP wrapper, Better way to do this ?
+    if args.model_args.pretrained_config["num_nextn_predict_layers"] > 0:
         block_names.append("GPTDolomiteMTPBlock")
 
     teacher_block_names = (

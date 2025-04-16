@@ -63,7 +63,7 @@ class CausalLMModelMixin(PreTrainedModelMixin, GenerationMixin):
         reduction: str = "mean",
         is_mtp_block: bool = False,
         prev_hidden_state_mtp: torch.Tensor = None,
-        mtp_block_idx : int = -1 ,
+        mtp_block_idx: int = -1,
     ) -> CausalLMOutputWithPast:
         assert return_dict
 
@@ -95,20 +95,20 @@ class CausalLMModelMixin(PreTrainedModelMixin, GenerationMixin):
 
         if is_mtp_block:
             mtp_outputs: CausalLMOutputWithPast = self.forward_mtp(
-                        input_ids,
-                        past_key_values,
-                        attention_mask,
-                        token_type_ids,
-                        position_ids,
-                        inputs_embeds,
-                        labels,
-                        use_cache,
-                        return_dict,
-                        cu_seqlens,
-                        max_seqlen,
-                        reduction,
-                        prev_hidden_state_mtp,
-                        mtp_block_idx,
+                input_ids,
+                past_key_values,
+                attention_mask,
+                token_type_ids,
+                position_ids,
+                inputs_embeds,
+                labels,
+                use_cache,
+                return_dict,
+                cu_seqlens,
+                max_seqlen,
+                reduction,
+                prev_hidden_state_mtp,
+                mtp_block_idx,
             )
 
             return mtp_outputs
@@ -174,8 +174,6 @@ class CausalLMModelMixin(PreTrainedModelMixin, GenerationMixin):
                 last_hidden_state=hidden_states,
             )
 
-
-
     def forward_mtp(
         self,
         input_ids: torch.Tensor | list[list[int]] | None = None,
@@ -191,10 +189,9 @@ class CausalLMModelMixin(PreTrainedModelMixin, GenerationMixin):
         max_seqlen: torch.Tensor | None = None,
         reduction: str = "mean",
         prev_hidden_state_mtp: torch.Tensor = None,
-        mtp_block_idx : int = -1 ,
+        mtp_block_idx: int = -1,
     ) -> CausalLMOutputWithPast:
         assert return_dict
-
 
         mtp_outputs: BaseModelOutputWithPast = self.transformer(
             input_ids,
@@ -207,9 +204,8 @@ class CausalLMModelMixin(PreTrainedModelMixin, GenerationMixin):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             prev_hidden_state_mtp=prev_hidden_state_mtp,
-            mtp_block_idx=mtp_block_idx ,
-            is_mtp_block = True ,
-
+            mtp_block_idx=mtp_block_idx,
+            is_mtp_block=True,
         )
 
         hidden_states = mtp_outputs.last_hidden_state

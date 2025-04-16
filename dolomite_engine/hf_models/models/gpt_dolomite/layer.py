@@ -2,7 +2,13 @@ import torch
 import torch.nn as nn
 from transformers import DynamicCache
 
-from ...modeling_utils import get_mlp_block, get_normalization_function, get_sequence_mixer,ParameterizedLinear, _get_std_for_linear
+from ...modeling_utils import (
+    ParameterizedLinear,
+    _get_std_for_linear,
+    get_mlp_block,
+    get_normalization_function,
+    get_sequence_mixer,
+)
 from .config import GPTDolomiteConfig
 
 
@@ -95,16 +101,13 @@ class GPTDolomiteBlock(nn.Module):
         return hidden_states
 
 
-
-
-
 class GPTDolomiteMTPBlock(nn.Module):
     def __init__(
-        self, config: GPTDolomiteConfig, use_padding_free_transformer: bool ,layer_idx: int| None = None
+        self, config: GPTDolomiteConfig, use_padding_free_transformer: bool, layer_idx: int | None = None
     ) -> None:
         super().__init__()
         self.is_mtp_block = True
-        
+
         hidden_size = config.hidden_size
         self.m_residual = config.m_residual
         self.sequence_mixer_type = config.mtp_blocks[layer_idx].sequence_mixer.sequence_mixer_type
@@ -112,12 +115,17 @@ class GPTDolomiteMTPBlock(nn.Module):
         self.ln_1 = get_normalization_function(
             config.mtp_blocks[layer_idx].normalization_function, hidden_size, eps=config.layer_norm_epsilon
         )
-        self.sequence_mixer = get_sequence_mixer(config, True, use_padding_free_transformer, layer_idx=layer_idx,is_mtp_block = self.is_mtp_block)
+        self.sequence_mixer = get_sequence_mixer(
+            config, True, use_padding_free_transformer, layer_idx=layer_idx, is_mtp_block=self.is_mtp_block
+        )
         self.ln_2 = get_normalization_function(
             config.mtp_blocks[layer_idx].normalization_function, hidden_size, eps=config.layer_norm_epsilon
         )
         self.mlp_block = get_mlp_block(
-            config, use_padding_free_transformer=use_padding_free_transformer, is_mtp_block=self.is_mtp_block,layer_idx= layer_idx
+            config,
+            use_padding_free_transformer=use_padding_free_transformer,
+            is_mtp_block=self.is_mtp_block,
+            layer_idx=layer_idx,
         )
 
         self.ln_3 = get_normalization_function(
@@ -127,12 +135,12 @@ class GPTDolomiteMTPBlock(nn.Module):
             config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
         )
 
-        std = _get_std_for_linear(init_method=config.init_method,
-        initializer_range=config.initializer_range,
-        m_width=config.m_width)
-        
+        std = _get_std_for_linear(
+            init_method=config.init_method, initializer_range=config.initializer_range, m_width=config.m_width
+        )
+
         self.down_proj = ParameterizedLinear(
-            2*hidden_size,
+            2 * hidden_size,
             hidden_size,
             bias=config.mtp_blocks[layer_idx].add_bias,
             std=std,
@@ -148,11 +156,10 @@ class GPTDolomiteMTPBlock(nn.Module):
         past_hidden_norm = self.ln_2(past_hidden_layer)
 
         # concatenate
-        fused_ip = torch.cat([past_hidden_norm, x_emb_norm], dim=-1) # (B,L,2D)
-        # Down proj 
-        hidden_states = self.down_proj(fused_ip) # (B,L,D)
-        return hidden_states        
-
+        fused_ip = torch.cat([past_hidden_norm, x_emb_norm], dim=-1)  # (B,L,2D)
+        # Down proj
+        hidden_states = self.down_proj(fused_ip)  # (B,L,D)
+        return hidden_states
 
     def forward(
         self,
@@ -164,9 +171,8 @@ class GPTDolomiteMTPBlock(nn.Module):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
-    
-        
-        hidden_states = self.prepare_for_trm_block(x_emb,past_hidden_layer)
+
+        hidden_states = self.prepare_for_trm_block(x_emb, past_hidden_layer)
 
         residual = hidden_states
         hidden_states = self.ln_3(hidden_states)
@@ -196,7 +202,6 @@ class GPTDolomiteMTPBlock(nn.Module):
         hidden_states = hidden_states + residual
 
         return hidden_states
-
 
     def _sequence_mixer_forward(
         self,
