@@ -18,9 +18,14 @@ def _hold_base_args(key: str) -> Callable:
     def _holded_function(function: Callable) -> Callable:
         def _run(self, *args, **kwargs):
             value: list[BaseArgs] = getattr(self, key)
-            setattr(self, key, [i.to_dict() if isinstance(i, BaseArgs) else i for i in value])
+            if value is not None:
+                setattr(self, key, [i.to_dict() if isinstance(i, BaseArgs) else i for i in value])
+
             output = function(self, *args, **kwargs)
-            setattr(self, key, value)
+
+            if value is not None:
+                setattr(self, key, value)
+
             return output
 
         return _run
