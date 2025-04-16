@@ -204,7 +204,7 @@ class ModelWrapperForPretraining(ModelWrapper):
             else:
                 output = self.get_loss(output, labels, lm_loss_multiplier=lm_loss_multiplier)
 
-            return output
+        return output
 
     def get_loss(
         self, model_outputs: CausalLMOutputWithPast, labels: torch.Tensor, lm_loss_multiplier: float = 1
