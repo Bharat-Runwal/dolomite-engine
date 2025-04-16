@@ -101,11 +101,12 @@ class GPTDolomiteBlock(nn.Module):
         return hidden_states
 
 
-class GPTDolomiteMTPBlock(nn.Module):
+class GPTDolomiteMTPBlock(GPTDolomiteBlock):
     def __init__(
         self, config: GPTDolomiteConfig, use_padding_free_transformer: bool, layer_idx: int | None = None
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
+
         self.is_mtp_block = True
 
         hidden_size = config.hidden_size
@@ -200,32 +201,5 @@ class GPTDolomiteMTPBlock(nn.Module):
             hidden_states = hidden_states * self.m_residual
 
         hidden_states = hidden_states + residual
-
-        return hidden_states
-
-    def _sequence_mixer_forward(
-        self,
-        hidden_states: torch.Tensor,
-        past_key_values: DynamicCache | None = None,
-        attention_mask: torch.Tensor | None = None,
-        rope_cos_sin: torch.Tensor | None = None,
-        cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if self.sequence_mixer_type in ["softmax_attention", "stickbreaking_attention", "multihead_latent_attention"]:
-            hidden_states = self.sequence_mixer(
-                hidden_states,
-                past_key_values=past_key_values,
-                attention_mask=attention_mask,
-                rope_cos_sin=rope_cos_sin,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            )
-        elif self.sequence_mixer_type == "mamba2":
-            hidden_states = self.sequence_mixer(
-                hidden_states, cache_params=past_key_values, attention_mask=attention_mask
-            )
-        else:
-            raise ValueError(f"unexpected sequence_mixer_type ({self.sequence_mixer_type})")
 
         return hidden_states
