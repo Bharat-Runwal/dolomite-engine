@@ -113,13 +113,13 @@ class GPTDolomiteMTPBlock(GPTDolomiteBlock):
         self.m_residual = config.m_residual
         self.sequence_mixer_type = config.mtp_blocks[layer_idx].sequence_mixer.sequence_mixer_type
 
-        self.ln_1 = get_normalization_function(
+        self.ln_3 = get_normalization_function(
             config.mtp_blocks[layer_idx].normalization_function, hidden_size, eps=config.layer_norm_epsilon
         )
         self.sequence_mixer = get_sequence_mixer(
             config, True, use_padding_free_transformer, layer_idx=layer_idx, is_mtp_block=self.is_mtp_block
         )
-        self.ln_2 = get_normalization_function(
+        self.ln_4 = get_normalization_function(
             config.mtp_blocks[layer_idx].normalization_function, hidden_size, eps=config.layer_norm_epsilon
         )
         self.mlp_block = get_mlp_block(
@@ -153,8 +153,8 @@ class GPTDolomiteMTPBlock(GPTDolomiteBlock):
         past_hidden_layer: torch.Tensor,
     ) -> torch.Tensor:
 
-        x_emb_norm = self.ln_1(x_emb)
-        past_hidden_norm = self.ln_2(past_hidden_layer)
+        x_emb_norm = self.ln_3(x_emb)
+        past_hidden_norm = self.ln_4(past_hidden_layer)
 
         # concatenate
         fused_ip = torch.cat([past_hidden_norm, x_emb_norm], dim=-1)  # (B,L,2D)
@@ -172,13 +172,8 @@ class GPTDolomiteMTPBlock(GPTDolomiteBlock):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
-
         hidden_states = self.prepare_for_trm_block(x_emb, past_hidden_layer)
-
-        residual = hidden_states
-        hidden_states = self.ln_3(hidden_states)
-
-        hidden_states = self._sequence_mixer_forward(
+        hidden_states = super().forward(
             hidden_states=hidden_states,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
@@ -186,20 +181,4 @@ class GPTDolomiteMTPBlock(GPTDolomiteBlock):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
-
-        if self.m_residual is not None:
-            hidden_states = hidden_states * self.m_residual
-
-        hidden_states = hidden_states + residual
-
-        residual = hidden_states
-        hidden_states = self.ln_4(hidden_states)
-
-        hidden_states = self.mlp_block(hidden_states)
-
-        if self.m_residual is not None:
-            hidden_states = hidden_states * self.m_residual
-
-        hidden_states = hidden_states + residual
-
         return hidden_states
