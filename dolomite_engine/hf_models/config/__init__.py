@@ -69,15 +69,6 @@ class _MtpBlockArgs(BaseArgs):
             "layernorm",
         ], f"Unexpected normalization_function {self.normalization_function}"
 
-        assert isinstance(
-            self.mlp_block, (_MoEArgs, _MLPArgs)
-        ), f"Expected MLP or MoE block, got {type(self.mlp_block)}"
-
-        assert isinstance(
-            self.sequence_mixer,
-            (_SoftmaxAttentionArgs, _MultiHeadLatentAttentionArgs, _StickbreakingAttentionArgs, _Mamba2Args),
-        ), f"Expected sequence_mixer to be one of the supported types, got {type(self.sequence_mixer)}"
-
 
 class CommonConfig(PretrainedConfig):
     keys_to_ignore_at_inference = ["past_key_values"]
