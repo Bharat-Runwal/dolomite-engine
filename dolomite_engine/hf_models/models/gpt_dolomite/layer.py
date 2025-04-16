@@ -2,13 +2,8 @@ import torch
 import torch.nn as nn
 from transformers import DynamicCache
 
-from ...modeling_utils import (
-    ParameterizedLinear,
-    _get_std_for_linear,
-    get_mlp_block,
-    get_normalization_function,
-    get_sequence_mixer,
-)
+from ...modeling_utils import ParameterizedLinear, get_mlp_block, get_normalization_function, get_sequence_mixer
+from ...modeling_utils.mlp_blocks.mlp import _get_std_for_linear
 from .config import GPTDolomiteConfig
 
 
