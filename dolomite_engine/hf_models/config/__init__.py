@@ -144,8 +144,9 @@ class CommonConfig(PretrainedConfig):
         assert len(self.mlp_blocks) == self.num_layers
 
         self.mtp_blocks = mtp_blocks
-        self._set_mtp_blocks()
-        assert len(self.mtp_blocks) == self.num_nextn_predict_layers
+        if mtp_blocks is not None:
+            self._set_mtp_blocks()
+            assert len(self.mtp_blocks) == self.num_nextn_predict_layers
 
         self.router_aux_loss_coef = router_aux_loss_coef
 
