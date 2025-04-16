@@ -63,12 +63,6 @@ class _MtpBlockArgs(BaseArgs):
     mlp_block: _MoEArgs | _MLPArgs  # MoE or MLP
     sequence_mixer: _SoftmaxAttentionArgs | _Mamba2Args | _MultiHeadLatentAttentionArgs | _StickbreakingAttentionArgs
 
-    def model_post_init(self, __context: Any) -> None:
-        assert self.normalization_function in [
-            "rmsnorm",
-            "layernorm",
-        ], f"Unexpected normalization_function {self.normalization_function}"
-
 
 class CommonConfig(PretrainedConfig):
     keys_to_ignore_at_inference = ["past_key_values"]
