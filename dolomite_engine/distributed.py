@@ -117,6 +117,7 @@ def wrap_model_container_for_distributed_training(
     block_classes = [
         get_module_class_from_name(model_container[0], name) for name in block_names + teacher_block_names
     ]
+    block_classes = filter(lambda i: i is not None, block_classes)
 
     if args.distributed_args.gradient_checkpointing_method is not None:
         assert len(block_names) == 1
