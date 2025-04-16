@@ -58,9 +58,9 @@ _NAKED_DISALLOWED_ARGS = [
 
 
 class _MtpBlockArgs(BaseArgs):
-    normalization_function: str = "rmsnorm"  # Default value
+    normalization_function: str = "rmsnorm"
     add_bias: bool = False
-    mlp_block: _MoEArgs | _MLPArgs  # MoE or MLP
+    mlp_block: _MoEArgs | _MLPArgs
     sequence_mixer: _SoftmaxAttentionArgs | _Mamba2Args | _MultiHeadLatentAttentionArgs | _StickbreakingAttentionArgs
 
 
