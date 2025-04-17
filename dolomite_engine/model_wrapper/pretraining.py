@@ -181,6 +181,7 @@ class ModelWrapperForPretraining(ModelWrapper):
                 "avg_mtp_lm_loss": avg_mtp_lm_loss,
                 "mtp_aux_loss": mtp_aux_loss,
             }
+            return output
         else:
             output: CausalLMOutputWithPast | PipelineParallelOutput = self.model(**batch, return_dict=True)
 
