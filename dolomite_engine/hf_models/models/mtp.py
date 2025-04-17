@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 from transformers import DynamicCache
 
+from ..mixins import BaseBlock
 from ..modeling_utils import ParameterizedLinear, get_mlp_block, get_normalization_function, get_sequence_mixer
 from ..modeling_utils.mlp_blocks.mlp import _get_std_for_linear
 from .gpt_dolomite import GPTDolomiteConfig
-from .gpt_dolomite.layer import GPTDolomiteBlock
 
 
-class MTPBlock(GPTDolomiteBlock):
+class MTPBlock(BaseBlock):
     def __init__(
         self, config: GPTDolomiteConfig, use_padding_free_transformer: bool, layer_idx: int | None = None
     ) -> None:
