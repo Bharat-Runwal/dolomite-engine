@@ -102,7 +102,7 @@ def wrap_model_container_for_distributed_training(
 
         dtype = "bf16"
 
-    block_names = model_container[0].model._no_split_modules + ["GPTDolomiteMTPBlock"]
+    block_names = model_container[0].model._no_split_modules + ["MTPBlock"]
 
     teacher_block_names = (
         model_container[0].teacher_model._no_split_modules if model_container[0].has_teacher_model() else []
