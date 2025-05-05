@@ -1,11 +1,11 @@
 from ...mixins import BaseModelMixin, PreTrainedModelMixin
-from .config import DolomiteMMConfig
-from .layer import DolomiteMMBlock
+from .config import DolomiteMmConfig
+from .layer import DolomiteMmBlock
 import torch.nn as nn
 
-class DolomiteMMPreTrainedModel(PreTrainedModelMixin):
-    config_class = DolomiteMMConfig
-    layer_class = DolomiteMMBlock
-    _no_split_modules = ["DolomiteMMBlock"]
+class DolomiteMmPreTrainedModel(PreTrainedModelMixin):
+    config_class = DolomiteMmConfig
+    layer_class = DolomiteMmBlock
+    _no_split_modules = ["DolomiteMmBlock"]
 
-class DolomiteMMModel(DolomiteMMPreTrainedModel, BaseModelMixin): ...
+class DolomiteMmModel(DolomiteMmPreTrainedModel, BaseModelMixin): ...

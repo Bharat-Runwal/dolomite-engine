@@ -5,7 +5,7 @@ from ....utils import ProcessGroupManager, divide_if_divisible
 from ...cache import GenerationCache
 from ...config import CommonConfig
 from ...modeling_utils import RoPE, YaRNScaledRoPE
-from ...modeling_utils_TP import Dropout_TP, Embedding_TP, get_normalization_function_TP
+from ...modeling_utils_TP import Dropout_TP, Embedding_TP, get_normalization_function_TP, ReplicatedLinear
 from ...utils import is_generation_cache_enabled
 from ..dense import BaseModelMixin, PreTrainedModelMixin
 from ..modeling_outputs import BaseModelOutputWithPast
@@ -90,6 +90,17 @@ class BaseModelMixin_TP(PreTrainedModelMixin_TP, BaseModelMixin):
         self.position_embedding_type = config.position_embedding_type
         self._setup_positional_encoding()
 
+
+
+        if config.vision_ps is not None:
+            # TODO :ReplicatedLinear or other class / use mup for this or not  ?
+            self.vision_embed = ReplicatedLinear(
+                config.vision_ps * config.vision_ps * 3 , # ps x ps x 3
+                config.hidden_size,
+                bias = False, 
+            )  
+        
+        
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -104,6 +115,8 @@ class BaseModelMixin_TP(PreTrainedModelMixin_TP, BaseModelMixin):
         use_cache: bool | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        vision_patch_ind: torch.LongTensor = None , # (BS, Seq_len) -1 for text tokens
+        vision_patches : torch.FloatTensor = None , # (num_patches, ps x ps x 3)  
     ) -> BaseModelOutputWithPast:
         if self.is_first_stage:
             (
@@ -123,6 +136,8 @@ class BaseModelMixin_TP(PreTrainedModelMixin_TP, BaseModelMixin):
                 use_cache=use_cache,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
+                vision_patch_ind= vision_patch_ind,
+                vision_patches=vision_patches
             )
         else:
             assert past_key_values is None

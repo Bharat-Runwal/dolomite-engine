@@ -3,12 +3,12 @@ import torch.nn as nn
 from transformers import DynamicCache
 
 from ...modeling_utils import get_mlp_block, get_normalization_function, get_sequence_mixer
-from .config import DolomiteMMConfig
+from .config import DolomiteMmConfig
 
 
-class DolomiteMMBlock(nn.Module):
+class DolomiteMmBlock(nn.Module):
     def __init__(
-        self, config: DolomiteMMConfig, use_padding_free_transformer: bool, layer_idx: int | None = None
+        self, config: DolomiteMmConfig, use_padding_free_transformer: bool, layer_idx: int | None = None
     ) -> None:
         super().__init__()
 
