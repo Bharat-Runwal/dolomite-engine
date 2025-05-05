@@ -122,6 +122,13 @@ class BaseModelMixin(PreTrainedModelMixin):
         self.position_embedding_type = config.position_embedding_type
         self._setup_positional_encoding()
 
+        if config.vision_ps is not None:
+            self.vision_embed = nn.Linear(
+                config.vision_ps * config.vision_ps * 3 , # ps x ps x 3
+                config.hidden_size,
+                bias = False, 
+            )
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -142,6 +149,8 @@ class BaseModelMixin(PreTrainedModelMixin):
         use_cache: bool | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        vision_patch_ind: torch.LongTensor = None , # (BS, Seq_len) -1 for text tokens
+        vision_patches : torch.FloatTensor = None , # (num_patches, ps x ps x 3)  
     ) -> BaseModelOutputWithPast:
         (
             use_cache,
@@ -160,6 +169,9 @@ class BaseModelMixin(PreTrainedModelMixin):
             use_cache=use_cache,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            vision_patch_ind= vision_patch_ind,
+            vision_patches=vision_patches
+
         )
 
         # ==========================================================================================
@@ -280,9 +292,20 @@ class BaseModelMixin(PreTrainedModelMixin):
         inputs_embeds: torch.Tensor | None,
         position_ids: torch.Tensor | None,
         token_type_ids: torch.Tensor | None,
+        vision_patch_ind: torch.LongTensor = None , # (BS, Seq_len) -1 for text tokens
+        vision_patches : torch.FloatTensor = None , # (num_patches, ps x ps x 3)  
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.wte(input_ids)
+            if vision_patch_ind is not None and vision_patches is not None:
+                assert (vision_patch_ind.shape == input_ids.shape) , "Vision patch Indices should have the same shape as Input Ids"
+                vision_embeds = self.vision_embed(vision_patches) # (num_ps, psxpsx3) - > (num_ps, hid_dim)
+                vision_embeds =  torch.cat([vision_embeds, torch.zeros(1,self.config.hidden_size).to(vision_embeds.device)]) # dummy for text token
+
+                vision_embeds = vision_embeds[vision_patch_ind] # (num_ps+1, hid_dim) - > (BS, Seq_len, hid_dim)                
+
+                inputs_embeds += vision_embeds
+
 
         if self.position_embedding_type == "learned_absolute":
             inputs_embeds = inputs_embeds + self.wpe(position_ids)
@@ -308,6 +331,8 @@ class BaseModelMixin(PreTrainedModelMixin):
         use_cache: bool | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        vision_patch_ind: torch.LongTensor = None , # (BS, Seq_len) -1 for text tokens
+        vision_patches : torch.FloatTensor = None , # (num_patches, ps x ps x 3)  
     ) -> tuple[
         bool,
         bool,
@@ -392,7 +417,7 @@ class BaseModelMixin(PreTrainedModelMixin):
         #     position_ids -> (batch_size, query_length)
         # ==========================================================================================
 
-        hidden_states = self._get_initial_hidden_state(input_ids, inputs_embeds, position_ids, token_type_ids)
+        hidden_states = self._get_initial_hidden_state(input_ids, inputs_embeds, position_ids, token_type_ids,vision_patch_ind,vision_patches)
 
         # ==========================================================================================
         # padding_free:

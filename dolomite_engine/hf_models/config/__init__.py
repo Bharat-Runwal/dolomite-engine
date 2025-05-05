@@ -98,6 +98,7 @@ class CommonConfig(PretrainedConfig):
         router_aux_loss_coef: float = 0.001,
         tie_word_embeddings: bool = True,
         rope_dim: int | None = None,
+        vision_ps: int | None = None,
         **kwargs,
     ) -> None:
         self.vocab_size = vocab_size
@@ -147,6 +148,10 @@ class CommonConfig(PretrainedConfig):
         for i in _NAKED_DISALLOWED_ARGS:
             assert i not in kwargs, f"found naked argument ({i})"
 
+
+        # Patch size for multimodal support 
+        self.vision_ps = vision_ps
+        
         super().__init__(
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
