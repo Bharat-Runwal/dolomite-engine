@@ -67,6 +67,8 @@ class CausalLMModelMixin_TP(PreTrainedModelMixin_TP, CausalLMModelMixin):
         max_seqlen: int | None = None,
         reduction: str = "mean",
         pipeline_parallel_input: PipelineParallelInput | None = None,
+        vision_patch_ind: torch.LongTensor = None , # (BS, Seq_len) -1 for text tokens
+        vision_patches : torch.FloatTensor = None , # (num_patches, ps x ps x 3)  
     ) -> CausalLMOutputWithPast | PipelineParallelOutput:
         assert return_dict
 
@@ -88,6 +90,8 @@ class CausalLMModelMixin_TP(PreTrainedModelMixin_TP, CausalLMModelMixin):
                 past_key_values=past_key_values,
                 attention_mask=attention_mask,
                 use_cache=use_cache,
+                vision_patch_ind= vision_patch_ind,
+                vision_patches = vision_patches,
             )
         else:
             assert input_ids is None
