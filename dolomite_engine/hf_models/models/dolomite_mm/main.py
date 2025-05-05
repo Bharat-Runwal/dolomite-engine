@@ -1,6 +1,6 @@
 from ...mixins import CausalLMModelMixin
-from .base import DolomiteMMModel, DolomiteMMPreTrainedModel
+from .base import DolomiteMmModel, DolomiteMmPreTrainedModel
 
 
-class DolomiteMMForCausalLM(DolomiteMMPreTrainedModel, CausalLMModelMixin):
-    base_model_class = DolomiteMMModel
+class DolomiteMmForCausalLM(DolomiteMmPreTrainedModel, CausalLMModelMixin):
+    base_model_class = DolomiteMmModel

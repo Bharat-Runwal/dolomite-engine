@@ -7,7 +7,7 @@ from ....kernels import is_kernel_allowed
 from ....utils import divide_if_divisible
 from ...cache import HybridMambaAttentionDynamicCache
 from ...config import CommonConfig
-from ...modeling_utils import ParameterizedEmbedding, RoPE, YaRNScaledRoPE, get_normalization_function
+from ...modeling_utils import ParameterizedEmbedding, RoPE, YaRNScaledRoPE, get_normalization_function, ParameterizedLinear
 from ...utils import convert_padding_free_lists_to_tensors, is_generation_cache_enabled
 from ..modeling_outputs import BaseModelOutputWithPast
 
@@ -123,12 +123,14 @@ class BaseModelMixin(PreTrainedModelMixin):
         self._setup_positional_encoding()
 
         if config.vision_ps is not None:
-            self.vision_embed = nn.Linear(
+            # TODO : use mup for this or not  ?
+            self.vision_embed = ParameterizedLinear(
                 config.vision_ps * config.vision_ps * 3 , # ps x ps x 3
                 config.hidden_size,
                 bias = False, 
-            )
-
+            )  
+        
+        
         # Initialize weights and apply final processing
         self.post_init()
 

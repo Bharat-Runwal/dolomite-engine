@@ -1,3 +1,3 @@
-from .base import GPTDolomiteModel
-from .config import GPTDolomiteConfig
-from .main import GPTDolomiteForCausalLM
+from .base import DolomiteMmModel
+from .config import DolomiteMmConfig
+from .main import DolomiteMmForCausalLM
