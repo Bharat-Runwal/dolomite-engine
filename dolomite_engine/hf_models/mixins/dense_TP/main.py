@@ -40,7 +40,7 @@ class CausalLMModelMixin_TP(PreTrainedModelMixin_TP, CausalLMModelMixin):
                     self.vocab_size,
                     config.hidden_size,
                     std=config.initializer_range,
-                    use_padding_free_transformer=self._use_padding_free_transformer,
+                    use_padding_free_transformer=self.use_padding_free_transformer,
                     sequence_parallel=self.sequence_parallel,
                 )
 
@@ -144,7 +144,7 @@ class CausalLMModelMixin_TP(PreTrainedModelMixin_TP, CausalLMModelMixin):
                     hidden_states=None,
                     vocab_weight=None,
                     cu_seqlens=cu_seqlens,
-                    use_padding_free_transformer=self._use_padding_free_transformer,
+                    use_padding_free_transformer=self.use_padding_free_transformer,
                     reduction=reduction,
                     shift_logits_and_labels=True,
                     tensor_parallel_enabled=ProcessGroupManager.is_tensor_parallel_enabled(),
@@ -175,7 +175,7 @@ class CausalLMModelMixin_TP(PreTrainedModelMixin_TP, CausalLMModelMixin):
             LMHead_TP.compute_with_weight(
                 hidden_states,
                 weight=self.transformer.wte.weight,
-                use_padding_free_transformer=self._use_padding_free_transformer,
+                use_padding_free_transformer=self.use_padding_free_transformer,
                 sequence_parallel=self.sequence_parallel,
                 tp_mesh=self.tp_mesh,
             )
@@ -249,7 +249,7 @@ class CausalLMModelMixin_TP(PreTrainedModelMixin_TP, CausalLMModelMixin):
             if output_parallel_lm_logits_if_possible:
                 vocab_size = divide_if_divisible(vocab_size, ProcessGroupManager.get_tensor_parallel_world_size(), "")
 
-            if self._use_padding_free_transformer:
+            if self.use_padding_free_transformer:
                 tensor = torch.empty(
                     micro_batch_size * sequence_length,
                     vocab_size,
@@ -284,7 +284,7 @@ class CausalLMModelMixin_TP(PreTrainedModelMixin_TP, CausalLMModelMixin):
 
         hidden_size = self.config.hidden_size
 
-        if self._use_padding_free_transformer:
+        if self.use_padding_free_transformer:
             tensor = torch.empty(
                 micro_batch_size * sharded_sequence_length,
                 hidden_size,
