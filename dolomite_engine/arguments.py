@@ -381,6 +381,27 @@ class TeacherArgs(BaseArgs):
         _check_not_None([(self.kl_divergence_method, "kl_divergence_method")])
 
 
+
+class MultiModalArgs(BaseArgs):
+    # Multimodal flag
+    is_multimodal: bool = False
+    
+    # Instruction-tuning argument: Scalar to multiply the 
+    # loss of the "masked out" tokens (usually the user '
+    # tokens, not assistant ones). Set to zero (default) '
+    # to completely remove the loss of said tokens
+    scalar_loss_mask: int | None = None
+
+    # choices={"assistant", "user", "all"}
+    loss_role: str = "assistant"
+    # No loss is applied beyon this token id
+    no_loss_beyond_token_id: int | None = None
+    # no_loss_on_token_ids
+    no_loss_on_token_ids : str | None = None 
+    # Patch size for Visual inputs
+    vision_patch_size : int  = 32 
+
+
 class TrainingArgs(BaseArgs):
     # randomization related arguments
     random_args: RandomArgs = RandomArgs()
@@ -410,6 +431,8 @@ class TrainingArgs(BaseArgs):
     distributed_args: DistributedArgs = DistributedArgs()
     # kernel args
     kernel_args: KernelArgs = KernelArgs()
+    # multimodal args
+    multimodal_args: MultiModalArgs = MultiModalArgs()
 
     def model_post_init(self, __context: Any) -> None:
         _check_not_None(
@@ -521,6 +544,8 @@ class DistillationArgs(TrainingArgs):
         _check_not_None([(self.teacher_args, "teacher_args")])
 
         super().model_post_init(__context)
+
+
 
 
 _MODE_ARGS_MAP = {

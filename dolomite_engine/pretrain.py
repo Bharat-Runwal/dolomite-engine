@@ -146,6 +146,7 @@ def train_step_without_pipeline_parallel(
     backward_context: AbstractContextManager,
     sync_every_gradient_accumulation_step: bool,
     lm_loss_multiplier: float,
+    is_multimodal : bool,
 ) -> MetricsTrackingDict:
     """runs backpropagation and applies the gradient if at the edge of gradient accumulation boundary
 
@@ -159,6 +160,7 @@ def train_step_without_pipeline_parallel(
         backward_context (AbstractContextManager): a context that is used for every model backward call
         sync_every_gradient_accumulation_step (bool): whether to sync on every gradient accumulation step
         lm_loss_multiplier (int): lm loss multiplier
+        is_multimodal (bool) : for multimodal training
 
     Returns:
         MetricsTrackingDict: metrics to track
@@ -185,7 +187,7 @@ def train_step_without_pipeline_parallel(
         for _ in range(gradient_accumulation_steps - 1):
             batch = get_next_batch(train_dataloader)
             with forward_context():
-                loss_micro_step_dict = model(batch, lm_loss_multiplier=lm_loss_multiplier)
+                loss_micro_step_dict = model(batch, lm_loss_multiplier=lm_loss_multiplier,is_multimodal=is_multimodal)
 
             # compute gradients
             with backward_context():
@@ -200,7 +202,7 @@ def train_step_without_pipeline_parallel(
 
     batch = get_next_batch(train_dataloader)
     with forward_context():
-        loss_micro_step_dict = model(batch, lm_loss_multiplier=lm_loss_multiplier)
+        loss_micro_step_dict = model(batch, lm_loss_multiplier=lm_loss_multiplier, is_multimodal=is_multimodal)
 
     # compute gradients
     with backward_context():
@@ -390,6 +392,7 @@ def train(
                 backward_context=backward_context,
                 sync_every_gradient_accumulation_step=args.distributed_args.sync_every_gradient_accumulation_step,
                 lm_loss_multiplier=1 / (micro_batch_size * sequence_length),
+                is_multimodal = args.multimodal_args.is_multimodal
             )
 
         metrics_tracker = metrics_tracker + loss_step_dict

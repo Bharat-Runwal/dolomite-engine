@@ -138,7 +138,17 @@ def get_pretraining_dataloaders(
     elif args.datasets[0].class_name == "IBMDataset":
         dataloaders = get_ibm_dataloaders(args, tokenizer)
     elif args.datasets[0].class_name == "MultimodalMegatron":
-        dataloaders = get_megatron_multimodal_dataloaders(args,tokenizer,consumed_samples=consumed_samples,collator_fn=multimodal_collator)
+        collate_fn_mm = partial(
+                    multimodal_collator,
+                    scalar_loss_mask=args.multimodal_args.scalar_loss_mask,
+                    loss_role=args.multimodal_args.loss_role,
+                    no_loss_beyond_token_id=args.multimodal_args.no_loss_beyond_token_id,
+                    no_loss_on_token_ids=list(map(int, args.multimodal_args.no_loss_on_token_ids.split(","))) if args.multimodal_args.no_loss_on_token_ids else [],
+                    tokenizer = tokenizer, 
+                    seq_len = args.datasets[0].class_args.get("sequence_length"),
+                    vision_patch_size = args.multimodal_args.vision_patch_size
+                )
+        dataloaders = get_megatron_multimodal_dataloaders(args,tokenizer,consumed_samples=consumed_samples,collator_fn=collate_fn_mm)
     return dataloaders
 
 

@@ -62,7 +62,7 @@ class CausalLMModelMixin(PreTrainedModelMixin, GenerationMixin):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
         reduction: str = "mean",
-        vision_patch_ind: torch.LongTensor = None , # (BS, Seq_len) -1 for text tokens
+        vision_patch_indices: torch.LongTensor = None , # (BS, Seq_len) -1 for text tokens
         vision_patches : torch.FloatTensor = None , # (num_patches, ps x ps x 3)  
     ) -> CausalLMOutputWithPast:
         assert return_dict
@@ -103,7 +103,7 @@ class CausalLMModelMixin(PreTrainedModelMixin, GenerationMixin):
             use_cache=use_cache,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            vision_patch_ind= vision_patch_ind,
+            vision_patch_ind= vision_patch_indices,
             vision_patches = vision_patches,
         )
 

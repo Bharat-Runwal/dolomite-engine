@@ -132,24 +132,26 @@ def round_to_multiple_of(x: int, y: int) -> int:
 
 
 def multimodal_collator(
-    args,
-    tokenizer,
     data,
     scalar_loss_mask=0.0,
-    return_attention_mask_in_length: bool = False,
     loss_role: str = "assistant",
     no_loss_beyond_token_id: int = None,
     no_loss_on_token_ids: list = [],
     vision_patch_size: int = 32,
+    packed_input: bool = False,
+    use_flash_attn : bool = False ,
+    seq_len : int = None,
+    tokenizer = None ,
 ):
     assert loss_role in ["assistant", "user", "all"]
-    pad_id = tokenizer.pad
-    seq_len = args.seq_length
+    
+    return_attention_mask_in_length = packed_input and use_flash_attn
 
-    if args.variable_seq_lengths:
-        max_sample_length = max(len(x["text"]) for x in data)
-        seq_len = min(args.seq_length, round_to_multiple_of(max_sample_length, 16))
-    seq_len += 1  # +1 to get seq_len tokens after shifting (token[t+1] is label for token[t])
+    pad_id = tokenizer.pad
+    # if args.variable_seq_lengths:
+    #     max_sample_length = max(len(x["text"]) for x in data)
+    #     seq_len = min(args.seq_length, round_to_multiple_of(max_sample_length, 16))
+    seq_len += 1  # +1 to get seq_len tokens after shifting (token[t+1] is label for token[t]) # TODO: Is this needed as already done in data processing  ?
 
     # pad data to seq_len, create attention mask
     batch_size = len(data)
