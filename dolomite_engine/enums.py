@@ -7,7 +7,7 @@ from enum import Enum
 
 class ParamsGroupMethod(Enum):
     mup = "mup"
-
+    muon_no_mup = "muon_no_mup"
 
 class GradientCheckpointingMethod(Enum):
     block = "block"

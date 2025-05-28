@@ -9,6 +9,7 @@ import torch.nn as nn
 from ..containers import ModelContainer
 from ..enums import ParamsGroupMethod
 from ..hf_models import is_parameter_with_mup_learning_rate, is_parameter_with_no_weight_decay
+from ..hf_models.modeling_utils import ParameterizedExperts
 from ..model_wrapper import ModelWrapper
 from ..utils import BaseArgs, log_rank_0
 
@@ -48,6 +49,41 @@ class _ParamsGroupsList(BaseArgs):
 
     def get_param_names(self) -> list[str]:
         return {group.name: group.get_param_names() for group in self.params_groups}
+
+
+
+
+def get_muon_nomup_group_with_names(model: ModelWrapper, optimizer_class_args: dict) -> dict:
+    if model.has_teacher_model():
+        log_rank_0(logging.WARN, "found a teacher model in the ModelWrapper")
+        # this is the student model
+        model = model.model
+
+
+    muon_params = []
+    adamw_params = []
+
+
+    # expert_params = []
+    for name, module in model.named_modules():
+        if isinstance(module, ParameterizedExperts):
+            for _, param in module.named_parameters():
+                setattr(param, "_is_expert_weight", True) # Set the flag for expert weights
+                muon_params.append(param)
+
+
+    # Handle other parameters 
+    for name, p in model.named_parameters():
+        if getattr(p, "_is_expert_weight", False):
+            continue
+        
+        if p.ndim >= 2 and "wte" not in name and "lm_head" not in name: 
+            if not hasattr(p, "_is_expert_weight"):  
+                setattr(p, "_is_expert_weight", False)  # Mark it explicitly as non-expert weight
+            muon_params.append(p)
+        else:
+            adamw_params.append(p)
+    return {"muon_params":muon_params , "adamw_params":adamw_params}
 
 
 def get_normal_group_with_names(model: ModelWrapper, optimizer_class_args: dict) -> _ParamsGroupsList:
@@ -123,6 +159,7 @@ def get_mup_group_with_names(model: ModelWrapper, optimizer_class_args: dict) ->
 _PARAM_GROUPS = {
     None: get_normal_group_with_names,
     ParamsGroupMethod.mup: get_mup_group_with_names,
+    ParamsGroupMethod.muon_no_mup : get_muon_nomup_group_with_names,
 }
 
 
