@@ -16,6 +16,27 @@ class Split(Enum):
     test = 2
 
 
+import os
+import sys
+import importlib.util
+
+# load compiled helpers.so via full path, so Python finds it robustly
+_build_dir = os.path.join(os.path.dirname(__file__), "build")
+_so_path = os.path.join(_build_dir, "helpers.so")
+
+if os.path.isfile(_so_path):
+    # load the .so module by location
+    spec = importlib.util.spec_from_file_location("lm_engine.data.megatron.utils.helpers", _so_path)
+    helpers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helpers)
+    # make it importable as “helpers” and fully qualified (so 'import helpers' works)
+    sys.modules["helpers"] = helpers
+    sys.modules["lm_engine.data.megatron.utils.helpers"] = helpers
+else:
+    # fallback if someone tries to import before compilation
+    helpers = None
+    
+
 def compile_helpers() -> None:
     """Compile C++ helper functions at runtime. Make sure this is invoked on a single process."""
 
