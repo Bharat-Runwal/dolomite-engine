@@ -260,7 +260,12 @@ def load_checkpoint_for_training(
             if load_optimizer:
                 saver = _OptimizerSaver(model_container, optimizer_container)
                 state_dict = {"state": saver.state_dict()}
-                dcp.load(state_dict, checkpoint_id=_get_optimizer_path(load_path))
+                # dcp.load(state_dict, checkpoint_id=_get_optimizer_path(load_path))
+                dcp.load(
+                state_dict,
+                checkpoint_id=_get_optimizer_path(load_path),
+                planner=dcp.DefaultLoadPlanner(allow_partial_load=True),
+                    )
                 saver.load_state_dict(state_dict["state"])
 
         del saver, state_dict

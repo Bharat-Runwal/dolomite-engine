@@ -109,6 +109,9 @@ class CommonConfig(PretrainedConfig):
         router_aux_loss_coef: float = 0.001,
         tie_word_embeddings: bool = True,
         rope_dim: int | None = None,
+        num_pre_layers: int = 8,
+        num_post_layers: int = 8,
+        num_iterations: int = 1,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -127,6 +130,13 @@ class CommonConfig(PretrainedConfig):
         self.m_width = m_width
         self.m_residual = m_residual
         self.init_method = init_method
+
+
+
+        self.num_pre_layers = num_pre_layers
+        self.num_post_layers = num_post_layers
+        self.num_iterations = num_iterations
+        
 
         # check if enums are valid
         assert init_method in ["normal", "mup"]

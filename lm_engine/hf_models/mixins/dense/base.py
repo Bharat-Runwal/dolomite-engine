@@ -35,6 +35,11 @@ class PreTrainedModelMixin(PreTrainedModel):
     def __init__(self, config: CommonConfig, *args, **kwargs) -> PreTrainedModelMixin:
         super().__init__(config, *args, **kwargs)
 
+
+        self.num_pre_layers = config.num_pre_layers  # 8
+        self.num_post_layers = config.num_post_layers  # 8
+        self.num_iterations = config.num_iterations  # 1
+        
         assert self.config_class is not None
         self.generation_config = GenerationConfig.from_model_config(self.config)
 
@@ -97,6 +102,18 @@ class BaseModelMixin(PreTrainedModelMixin):
         super().__init__(config, **kwargs)
         self._init_model(config, **kwargs)
 
+
+
+        self.num_post_layers = config.num_post_layers  # default 8
+        self.num_iterations = config.num_iterations  # default 1
+        num_layers = len(self.h)
+        layer_idxs = list(range(num_layers))
+        self.pre_layer_idxs = layer_idxs[: self.num_pre_layers]
+        self.loop_layer_idxs = layer_idxs[self.num_pre_layers : -self.num_post_layers]
+        self.post_layer_idxs = layer_idxs[-self.num_post_layers :]
+
+
+
     def _init_model(self, config: CommonConfig, **kwargs) -> None:
         self.embed_dim = config.hidden_size
         self.m_emb = config.m_emb
@@ -158,29 +175,120 @@ class BaseModelMixin(PreTrainedModelMixin):
                 GenerationCache(self.config) if use_cache and past_key_values is None else past_key_values
             )
 
-        mamba_mask = None
+        # mamba_mask = None
+        # mamba_mask_computed = False
+        # mamba_mask = None
         mamba_mask_computed = False
 
-        for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
-            is_linear_layer = sequence_mixer_type in ["mamba2", "rnn", "gru"]
+        layer_id=0
+        # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
 
-            if is_linear_layer and not mamba_mask_computed:
-                mamba_mask = self._get_mamba_mask(attention_mask, past_key_values)
-                mamba_mask_computed = True
-
-            hidden_states = block(
+        for i in self.pre_layer_idxs:
+            hidden_states = self._run_block(
                 hidden_states,
-                past_key_values=past_key_values,
-                attention_mask=mamba_mask if is_linear_layer else causal_mask,
-                rope_cos_sin=rope_cos_sin,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
+                past_key_values,
+                attention_mask,
+                cu_seqlens,
+                max_seqlen,
+                causal_mask,
+                rope_cos_sin,
+                mamba_mask_computed,
+                i,
+                layer_id= layer_id
             )
+            layer_id += 1
+
+        for j in range(self.num_iterations):
+
+            # Perform looped layers
+            for i in self.loop_layer_idxs:
+                hidden_states = self._run_block(
+                    hidden_states,
+                    past_key_values,
+                    attention_mask,
+                    cu_seqlens,
+                    max_seqlen,
+                    causal_mask,
+                    rope_cos_sin,
+                    mamba_mask_computed,
+                    i,
+                    layer_id=layer_id,
+                )
+                layer_id += 1
+
+        for i in self.post_layer_idxs:
+            hidden_states = self._run_block(
+                hidden_states,
+                past_key_values,
+                attention_mask,
+                cu_seqlens,
+                max_seqlen,
+                causal_mask,
+                rope_cos_sin,
+                mamba_mask_computed,
+                i,
+                layer_id=layer_id,
+            )
+            layer_id += 1
+
+
+
+        # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
+        #     is_linear_layer = sequence_mixer_type in ["mamba2", "rnn", "gru"]
+
+        #     if is_linear_layer and not mamba_mask_computed:
+        #         mamba_mask = self._get_mamba_mask(attention_mask, past_key_values)
+        #         mamba_mask_computed = True
+
+        #     hidden_states = block(
+        #         hidden_states,
+        #         past_key_values=past_key_values,
+        #         attention_mask=mamba_mask if is_linear_layer else causal_mask,
+        #         rope_cos_sin=rope_cos_sin,
+        #         cu_seqlens=cu_seqlens,
+        #         max_seqlen=max_seqlen,
+        #     )
 
         hidden_states = self.ln_f(hidden_states)
 
         return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
 
+
+    def _run_block(
+        self,
+        hidden_states,
+        past_key_values,
+        attention_mask,
+        cu_seqlens,
+        max_seqlen,
+        causal_mask,
+        rope_cos_sin,
+        mamba_mask_computed,
+        i,
+        layer_id = None,
+):
+        sequence_mixer_type = self.sequence_mixer_block_types[i]
+        block = self.h[i]
+
+        is_linear_layer = sequence_mixer_type in ["mamba2", "rnn", "gru"]
+
+        if is_linear_layer and not mamba_mask_computed:
+            mamba_mask = self._get_mamba_mask(attention_mask, past_key_values)
+            mamba_mask_computed = True
+
+        hidden_states = block(
+            hidden_states,
+            past_key_values=past_key_values,
+            attention_mask=mamba_mask if is_linear_layer else causal_mask,
+            rope_cos_sin=rope_cos_sin,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            layer_id = layer_id
+        )
+
+        return hidden_states
+    
+    
     def _get_position_ids(
         self, attention_mask: torch.Tensor, past_length: int, query_length: int, key_length: int, device: torch.device
     ) -> torch.Tensor:

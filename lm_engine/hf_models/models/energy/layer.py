@@ -1,0 +1,101 @@
+# **************************************************
+# Copyright (c) 2025, Mayank Mishra
+# **************************************************
+
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+from ...cache import GenerationCache
+from ...modeling_utils import get_mlp_block, get_normalization_function, get_sequence_mixer
+from .config import EnergyConfig
+
+
+
+class EnergyBlock(nn.Module):
+    """Energy Transformer block with customizable attention and feedforward.
+
+    Unlike standard Transformer blocks that use additive residual connections,
+    EnergyBlock uses a subtractive update inspired by energy-based models:
+        x = x - proj(attn(ln(x)) + scale_ff * ffwd(ln(x)))
+    """
+
+    def __init__(
+        self,
+        config: EnergyConfig,
+        use_padding_free_transformer: bool = False,
+        layer_idx: int | None = None,
+    ) -> None:
+        super().__init__()
+        hidden_size = config.hidden_size
+
+
+        self.sequence_mixer_type = config.sequence_mixer_blocks[layer_idx].sequence_mixer_type
+
+        self.ln = get_normalization_function(
+            config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
+        )
+        self.attn = get_sequence_mixer(config, True, use_padding_free_transformer, layer_idx)
+
+
+        self.ffwd = get_mlp_block(
+            config, use_padding_free_transformer=use_padding_free_transformer, layer_idx=layer_idx
+        )
+
+        self.scale_ff = nn.Parameter(torch.ones(1) * 4, requires_grad=True)
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        past_key_values: GenerationCache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        rope_cos_sin: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: int | None = None,
+        layer_id: int | None = None, #TODO: Handle KV Caching for Energy Models
+    ) -> torch.Tensor:
+        ln_x = self.ln(hidden_states)
+        attn_out = self.attn(
+            ln_x,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            rope_cos_sin=rope_cos_sin,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        ffwd_out = self.ffwd(ln_x)
+        hidden_states = hidden_states - self.proj(attn_out + self.scale_ff * ffwd_out)
+        return hidden_states
+
+    def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute total energy per token."""
+        ln_x = self.ln(x)
+        return self.attn.energy_per_token(ln_x) + self.scale_ff * self.ffwd.energy_per_token(ln_x)
+
+
+# class EnergyBlock_QK_FF2W_manual(EnergyBlock):
+#     """Energy Transformer block with standard QK attention and GradFF_2W_manual.
+
+#     This is the main energy-based block combining:
+#     - EnergyAttention_QK: Energy-based Q/K attention
+#     - GradFF_2W_manual: Feedforward with manual gradient computation
+#     - BareLayerNorm: LayerNorm without learnable weights
+#     """
+
+#     def __init__(
+#         self,
+#         config: CommonConfig,
+#         use_padding_free_transformer: bool = False,
+#         layer_idx: int | None = None,
+#     ) -> None:
+
+#         super().__init__(
+#             config,
+#             use_padding_free_transformer=use_padding_free_transformer,
+#             layer_idx=layer_idx,
+#         )
+
+
