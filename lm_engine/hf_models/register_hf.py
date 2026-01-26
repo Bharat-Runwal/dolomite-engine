@@ -18,6 +18,10 @@ from .models import (
     PaLMConfig,
     PaLMForCausalLM,
     PaLMModel,
+    EnergyConfig,
+    EnergyForCausalLM,
+    EnergyModel,
+
 )
 
 
@@ -27,6 +31,7 @@ _CUSTOM_MODEL_REGISTRY = [
     (GPTCrossLayerConfig, GPTCrossLayerModel, GPTCrossLayerForCausalLM),
     (LadderResidualConfig, LadderResidualModel, LadderResidualForCausalLM),
     (PaLMConfig, PaLMModel, PaLMForCausalLM),
+    (EnergyConfig, EnergyModel, EnergyForCausalLM),
 ]
 _CUSTOM_MODEL_TYPES = []
 _CUSTOM_MODEL_CLASSES = []

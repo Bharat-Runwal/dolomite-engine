@@ -3,11 +3,12 @@
 # **************************************************
 
 from ...config import CommonConfig
-from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp
+from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp, Energy_MLP
 from .moe import MoE, ParameterizedExperts
 
 
-def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, layer_idx: int) -> MLP | MoE:
+
+def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, layer_idx: int) -> MLP | MoE | Energy_MLP:
     block = config.mlp_blocks[layer_idx]
     mlp_type = block.mlp_type
 
@@ -25,6 +26,10 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
 
     if mlp_type == "MLP":
         mlp = MLP(**kwargs)
+    
+    elif mlp_type == "Energy_MLP":   
+        mlp = Energy_MLP(**kwargs)
+        
     elif mlp_type == "MoE":
         mlp = MoE(
             **kwargs,

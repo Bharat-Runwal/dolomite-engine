@@ -443,6 +443,7 @@ def train(
                 experiments_tracker=experiments_tracker,
                 metrics_tracker=metrics_tracker,
                 context="train",
+                model_container=model_container,
             )
 
             start_time = time.perf_counter()

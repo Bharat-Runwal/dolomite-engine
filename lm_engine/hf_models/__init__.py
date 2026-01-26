@@ -21,6 +21,9 @@ from .models import (
     PaLMConfig,
     PaLMForCausalLM,
     PaLMModel,
+    EnergyConfig,
+    EnergyForCausalLM,
+    EnergyModel,
 )
 from .parameter import (
     is_parameter_with_mup_learning_rate,

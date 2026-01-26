@@ -7,6 +7,25 @@ from typing import Any
 from ...utils import BaseArgs
 
 
+class _EnergyAttentionArgs(BaseArgs):
+    sequence_mixer_type: str = "energy_attention"
+    num_attention_heads: int = 12
+    num_key_value_heads: int = 1
+    softmax_dropout: float = 0
+    dropout: float = 0
+    add_bias: bool = False
+    attention_multiplier: float | None = None
+    sliding_window: int | None = None
+    # needed for Qwen 2 MoE
+    qkv_bias: bool = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.qkv_bias is None:
+            self.qkv_bias = self.add_bias
+
+        assert self.sequence_mixer_type == "energy_attention"
+
+
 class _SoftmaxAttentionArgs(BaseArgs):
     sequence_mixer_type: str = "softmax_attention"
     num_attention_heads: int = 12

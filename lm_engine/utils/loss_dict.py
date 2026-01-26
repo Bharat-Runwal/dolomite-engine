@@ -52,6 +52,11 @@ class MetricsTrackingDict:
     def __setitem__(self, key: str, value: float) -> None:
         self.data[key] = value
 
+    def update(self, x: MetricsTrackingDict | dict) -> None:
+        if isinstance(x, MetricsTrackingDict):
+            x = x.data
+        self.data.update(x)
+
     def __repr__(self) -> str:
         x = ""
         for key in self.data:

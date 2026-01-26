@@ -44,7 +44,7 @@ def all_reduce_metrics_tracker(metrics_tracker: MetricsTrackingDict) -> MetricsT
 
 
 def track_metrics(
-    global_step: int, experiments_tracker: ExperimentsTracker, metrics_tracker: MetricsTrackingDict, context: str
+    global_step: int, experiments_tracker: ExperimentsTracker, metrics_tracker: MetricsTrackingDict, context: str,model_container=None,
 ) -> None:
     """tracks metrics like training loss, learning rate etc
 
@@ -55,6 +55,18 @@ def track_metrics(
         context (str): experiment context
     """
 
+
+    #TODO: This tracking makes training a bit slower change this :
+    if model_container is not None:
+        scale_ff_values = {}
+        for name, module in model_container[0].named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                    # recurse=False gets only direct parameters, not from submodules
+                    if 'scale_ff' in param_name:
+                        scale_ff_values[f"{name}.{param_name}"] = param.item()
+
+        metrics_tracker.update({f"model/scale_ff/{k}": v for k, v in scale_ff_values.items()})
+    
     # experiments tracker
     experiments_tracker.track(metrics_tracker.get_dict(), step=global_step, context=context)
 
@@ -209,6 +221,8 @@ def get_model_tflops(
             )
         elif sequence_mixer_type == "gated_deltanet":
             return 0
+        elif sequence_mixer_type == "energy_attention":
+            return 0 # TODO add flops calculation for energy attention
         else:
             raise NotImplementedError(f"unexpected sequence_mixer_type ({sequence_mixer_type})")
 

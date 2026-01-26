@@ -12,6 +12,7 @@ from ...enums import Kernel
 from ...kernels import is_kernel_allowed
 from ...utils import is_xma_available
 from ..parameter import mark_parameter_as_no_weight_decay
+import numbers
 
 
 if is_xma_available():
@@ -59,7 +60,26 @@ class PNorm(RMSNorm):
         return hidden_states
 
 
-_NORMALIZATION_FUNCTIONS = {"layernorm": nn.LayerNorm, "p_norm": PNorm, "rmsnorm": RMSNorm}
+class BareLayerNorm(nn.Module):
+    """LayerNorm without learnable weights, only bias."""
+
+    def __init__(self, normalized_shape: int | tuple[int, ...], eps: float = 1e-5) -> None:
+        super().__init__()
+        if isinstance(normalized_shape, numbers.Integral):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = tuple(normalized_shape)
+        self.eps = eps
+        self.bias = nn.Parameter(torch.zeros(self.normalized_shape))
+        self.weight = nn.Parameter(torch.ones(self.normalized_shape), requires_grad=False) #TODO: Why this ? Check
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.layer_norm(
+            x, normalized_shape=self.normalized_shape, eps=self.eps, bias=self.bias, weight=self.weight
+        )
+
+
+
+_NORMALIZATION_FUNCTIONS = {"layernorm": nn.LayerNorm, "p_norm": PNorm, "rmsnorm": RMSNorm, "bare_layernorm": BareLayerNorm}
 
 
 def get_normalization_function(

@@ -7,6 +7,18 @@ from typing import Any
 from ...utils import BaseArgs
 
 
+class _EnergyMLPArgs(BaseArgs):
+    mlp_type: str = "Energy_MLP"
+    intermediate_size: int
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "Energy_MLP"
+
+
+
 class _MLPArgs(BaseArgs):
     mlp_type: str = "MLP"
     intermediate_size: int
