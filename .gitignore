@@ -9,3 +9,4 @@ build/
 uv.lock
 .venv
 .DS_Store
+scripts/blue-vela
