@@ -3,8 +3,8 @@
 # **************************************************
 
 load_args:
-  load_path: checkpoints
-  iteration: 5000
+  load_path: /proj/checkpoints/bharat/SUT/save/baseline-swa_v2_3B-MID_TRAIN
+  iteration: 25000 
 
 mixed_precision_args:
   # use this if you want to save the unsharded model in specific dtype,
@@ -12,4 +12,4 @@ mixed_precision_args:
   dtype: bf16
 
 # where to save the HF safetensors checkpoint
-unsharded_path: unsharded_model
+unsharded_path:  /proj/checkpoints/bharat/SUT/save_unshard/baseline-swa_v2_3B-MID_TRAIN_25k
