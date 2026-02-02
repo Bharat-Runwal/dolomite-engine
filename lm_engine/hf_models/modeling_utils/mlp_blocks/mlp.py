@@ -48,7 +48,10 @@ class Energy_MLP(nn.Module):
 
         # Single 3D tensor for efficiency (batched GEMM)
         self.W = nn.Parameter(torch.empty(2, hidden_size, intermediate_size))
-        nn.init.normal_(self.W, mean=0.0, std=std)
+        
+        #TODO: Check this 
+        nn.init.xavier_uniform_(self.W, gain=8.0)
+        # nn.init.normal_(self.W, mean=0.0, std=std)
 
         mark_parameter_as_mup_learning_rate(self.W)
 

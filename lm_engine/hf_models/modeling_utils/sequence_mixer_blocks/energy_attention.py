@@ -78,19 +78,26 @@ class EnergyAttention_QK(nn.Module):
         self.attention_multiplier = attention_multiplier
         self.layer_idx = layer_idx
 
-        # Compute initialization std (mup-style)
-        std = initializer_range
-        if init_method == "mup":
-            std /= math.sqrt(m_width)
-        self.c_attn_init_std = std  # Store for output projection scaling
-
         # c_attn projects to Q and K only (V = K in energy attention)
         self.c_attn = ParameterizedLinear(
             self.hidden_size,
             2 * self.hidden_size,
             bias=self.qkv_bias,
-            std=std,
+            std=initializer_range,
         )
+
+        # Use xavier_uniform_ initialization with gain=8.0 (matching energy attention reference)
+        torch.nn.init.xavier_uniform_(self.c_attn.weight, gain=8.0)
+        # Compute std from initialized weights (or analytically for meta tensors)
+        if self.c_attn.weight.is_meta:
+            # For meta tensors, compute expected std analytically
+            # xavier_uniform_ with gain: a = gain * sqrt(6 / (fan_in + fan_out))
+            # std of uniform[-a, a] = a / sqrt(3)
+            fan_in, fan_out = self.hidden_size, 2 * self.hidden_size
+            a = 8.0 * math.sqrt(6.0 / (fan_in + fan_out))
+            self.c_attn_init_std = a / math.sqrt(3.0)
+        else:
+            self.c_attn_init_std = self.c_attn.weight.std().item()
 
         self.softmax_dropout_p = softmax_dropout
         self.softmax_dropout = Dropout(softmax_dropout)
@@ -182,8 +189,9 @@ class EnergyAttention_QK(nn.Module):
                 use_padding_free_transformer=self.use_padding_free_transformer,
                 causal=self.causal,
                 dropout=self.softmax_dropout_p if self.training else 0,
-                softmax_scale=self.attention_multiplier,
                 sliding_window=self.sliding_window,
+                # softmax_scale=self.attention_multiplier,
+
             )
 
             del query, key, value
