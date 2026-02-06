@@ -78,6 +78,11 @@ class EnergyAttention_QK(nn.Module):
         self.attention_multiplier = attention_multiplier
         self.layer_idx = layer_idx
 
+        std = initializer_range
+        if init_method == "mup":
+            std /= math.sqrt(m_width)
+
+
         # c_attn projects to Q and K only (V = K in energy attention)
         self.c_attn = ParameterizedLinear(
             self.hidden_size,
@@ -87,21 +92,26 @@ class EnergyAttention_QK(nn.Module):
         )
 
         # Use xavier_uniform_ initialization with gain=8.0 (matching energy attention reference)
-        torch.nn.init.xavier_uniform_(self.c_attn.weight, gain=8.0)
-        # Compute std from initialized weights (or analytically for meta tensors)
-        if self.c_attn.weight.is_meta:
-            # For meta tensors, compute expected std analytically
-            # xavier_uniform_ with gain: a = gain * sqrt(6 / (fan_in + fan_out))
-            # std of uniform[-a, a] = a / sqrt(3)
-            fan_in, fan_out = self.hidden_size, 2 * self.hidden_size
-            a = 8.0 * math.sqrt(6.0 / (fan_in + fan_out))
-            self.c_attn_init_std = a / math.sqrt(3.0)
-        else:
-            self.c_attn_init_std = self.c_attn.weight.std().item()
+        # torch.nn.init.xavier_uniform_(self.c_attn.weight, gain=8.0)
+        # # Store init std for reference
+        # if self.c_attn.weight.is_meta:
+        #     fan_in, fan_out = self.hidden_size, 2 * self.hidden_size
+        #     a = 8.0 * math.sqrt(6.0 / (fan_in + fan_out))
+        #     self.c_attn_init_std = a / math.sqrt(3.0)
+        # else:
+        #     self.c_attn_init_std = self.c_attn.weight.std().item()
+
+        # Output scale: since we normalize V and W_Q to unit norm for stability,
+        # we need to scale up the output to match original magnitude
+        # Scale = sqrt(head_dim) gives reasonable output magnitude when combined with normalized V and W_Q
+        self.output_scale = math.sqrt(self.head_dim)
 
         self.softmax_dropout_p = softmax_dropout
         self.softmax_dropout = Dropout(softmax_dropout)
         self.dropout = Dropout(dropout)
+
+        # Metrics storage for tracking (updated each forward pass)
+        self._cached_metrics: dict[str, float] | None = None
 
         mark_parameter_as_mup_learning_rate(self.c_attn.weight)
 
@@ -115,7 +125,10 @@ class EnergyAttention_QK(nn.Module):
         q_weight = self.c_attn.weight[: self.hidden_size]  # (H*D, C)
         q_weight = q_weight.view(self.num_heads, self.head_dim, self.hidden_size)
         q_weight = q_weight.permute(0, 2, 1).contiguous()  # (H, C, D)
-        return q_weight / self.c_attn_init_std
+        # Normalize to unit norm per head to prevent weight growth from amplifying output
+        # This keeps the output projection bounded regardless of how c_attn weights grow
+        q_weight = q_weight / (q_weight.norm(dim=(1, 2), keepdim=True) + 1e-6)
+        return q_weight
 
     def forward(
         self,
@@ -151,14 +164,15 @@ class EnergyAttention_QK(nn.Module):
             query = query.transpose(1, 2).contiguous()
             key = key.transpose(1, 2).contiguous()
 
-        # V = K (core energy attention property)
-        value = key
-
-        # Apply RoPE if configured
+        # Apply RoPE if configured (before setting V = K)
         if self.position_embedding_type == "rope" and rope_cos_sin is not None:
             query = apply_rotary_pos_emb(query, rope_cos_sin)
             key = apply_rotary_pos_emb(key, rope_cos_sin)
-            value = key
+
+        # V = K (core energy attention property)
+        # Normalize value vectors to unit norm per position to bound attention output magnitude
+        # This prevents c_attn weight growth from amplifying attention output
+        value = key / (key.norm(dim=-1, keepdim=True) + 1e-6)
 
         if past_key_values is not None:
             key, value = past_key_values.update(
@@ -167,76 +181,104 @@ class EnergyAttention_QK(nn.Module):
 
         W_Q = self._get_q_weight_for_output()
 
-        if use_flash_attention_2 or use_flash_attention_3:
-            assert accelerator == Accelerator.cuda
+        # if use_flash_attention_2 or use_flash_attention_3:
+        #     assert accelerator == Accelerator.cuda
 
-            if not self.use_padding_free_transformer:
-                query = query.transpose(1, 2).contiguous()
-                key = key.transpose(1, 2).contiguous()
-                value = value.transpose(1, 2).contiguous()
+        #     if not self.use_padding_free_transformer:
+        #         query = query.transpose(1, 2).contiguous()
+        #         key = key.transpose(1, 2).contiguous()
+        #         value = value.transpose(1, 2).contiguous()
 
-            query = wait_for_ACT(query, wait_in_forward=True, wait_in_backward=False)
-            key = wait_for_ACT(key, wait_in_forward=True, wait_in_backward=False)
-            value = wait_for_ACT(value, wait_in_forward=True, wait_in_backward=False)
+        #     query = wait_for_ACT(query, wait_in_forward=True, wait_in_backward=False)
+        #     key = wait_for_ACT(key, wait_in_forward=True, wait_in_backward=False)
+        #     value = wait_for_ACT(value, wait_in_forward=True, wait_in_backward=False)
 
-            attn_output = flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-                attention_mask=attention_mask,
-                use_padding_free_transformer=self.use_padding_free_transformer,
-                causal=self.causal,
-                dropout=self.softmax_dropout_p if self.training else 0,
-                sliding_window=self.sliding_window,
-                # softmax_scale=self.attention_multiplier,
+        #     attn_output = flash_attention(
+        #         query=query,
+        #         key=key,
+        #         value=value,
+        #         cu_seqlens=cu_seqlens,
+        #         max_seqlen=max_seqlen,
+        #         attention_mask=attention_mask,
+        #         use_padding_free_transformer=self.use_padding_free_transformer,
+        #         causal=self.causal,
+        #         dropout=self.softmax_dropout_p if self.training else 0,
+        #         sliding_window=self.sliding_window,
+        #         # softmax_scale=self.attention_multiplier,
 
+        #     )
+
+        #     del query, key, value
+        #     attn_output = wait_for_ACT(attn_output, wait_in_forward=False, wait_in_backward=True)
+
+        #     if self.use_padding_free_transformer:
+        #         attn_output = attn_output.permute(1, 0, 2)
+        #         hidden_states = torch.einsum("hts,hcs->tc", attn_output, W_Q)
+        #     else:
+        #         attn_output = attn_output.transpose(1, 2)
+        #         hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
+        # else:
+        #     assert self.sliding_window is None
+
+        #     if accelerator == Accelerator.tpu:
+        #         assert attention_mask is None
+        #         assert self.softmax_dropout_p == 0
+
+        #         attn_output = flash_attention_tpu(
+        #             query,
+        #             key,
+        #             value,
+        #             causal=self.causal if attention_mask is None else False,
+        #             sm_scale=(
+        #                 1 / math.sqrt(self.head_dim)
+        #                 if self.attention_multiplier is None
+        #                 else self.attention_multiplier
+        #             ),
+        #         )
+        #     else:
+        attn_output = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                dropout_p=self.softmax_dropout_p if self.training else 0,
+                is_causal=self.causal if attention_mask is None else False,
+                # scale=self.attention_multiplier,
             )
 
-            del query, key, value
-            attn_output = wait_for_ACT(attn_output, wait_in_forward=False, wait_in_backward=True)
+        del query, key, value
+        hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
 
-            if self.use_padding_free_transformer:
-                attn_output = attn_output.permute(1, 0, 2)
-                hidden_states = torch.einsum("hts,hcs->tc", attn_output, W_Q)
-            else:
-                attn_output = attn_output.transpose(1, 2)
-                hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
-        else:
-            assert self.sliding_window is None
 
-            if accelerator == Accelerator.tpu:
-                assert attention_mask is None
-                assert self.softmax_dropout_p == 0
 
-                attn_output = flash_attention_tpu(
-                    query,
-                    key,
-                    value,
-                    causal=self.causal if attention_mask is None else False,
-                    sm_scale=(
-                        1 / math.sqrt(self.head_dim)
-                        if self.attention_multiplier is None
-                        else self.attention_multiplier
-                    ),
-                )
-            else:
-                attn_output = F.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    attn_mask=attention_mask,
-                    dropout_p=self.softmax_dropout_p if self.training else 0,
-                    is_causal=self.causal if attention_mask is None else False,
-                    scale=self.attention_multiplier,
-                )
+        hidden_states = self.dropout(hidden_states) * self.output_scale
 
-            del query, key, value
-            hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
+        # Log metrics
+        self._log_norms(hidden_states, W_Q)
 
-        hidden_states = self.dropout(hidden_states)
         return hidden_states
+
+    def _log_norms(self, out: torch.Tensor, W_Q: torch.Tensor) -> None:
+        """Cache weight norms and output norm for external tracking."""
+        with torch.no_grad():
+            # c_attn weight norm
+            c_attn_norm = self.c_attn.weight.norm().item()
+
+            # W_Q norm (extracted Q weights used for output projection)
+            w_q_norm = W_Q.norm().item()
+
+            # Output norm (mean over batch)
+            out_norm = out.norm(dim=-1).mean().item()
+
+            self._cached_metrics = {
+                "c_attn_norm": c_attn_norm,
+                "W_Q_norm": w_q_norm,
+                "output_norm": out_norm,
+            }
+
+    def get_metrics(self) -> dict[str, float] | None:
+        """Return cached metrics for external tracking."""
+        return self._cached_metrics
 
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
         """Compute energy per token for this attention layer."""

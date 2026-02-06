@@ -38,46 +38,66 @@ class Energy_MLP(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.layer_idx = layer_idx
+
+        # Metrics storage for tracking (updated each forward pass)
+        self._cached_metrics: dict[str, float] | None = None
+
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        # Compute initialization std (mup-style)
-        std = initializer_range
-        if init_method == "mup":
-            std /= math.sqrt(m_width)
+        std = _get_std_for_linear(initializer_range, init_method, m_width)
 
-        # Single 3D tensor for efficiency (batched GEMM)
-        self.W = nn.Parameter(torch.empty(2, hidden_size, intermediate_size))
-        
-        #TODO: Check this 
-        nn.init.xavier_uniform_(self.W, gain=8.0)
-        # nn.init.normal_(self.W, mean=0.0, std=std)
+        # Two projection layers: hidden -> intermediate (no bias for energy model)
+        # W1: used for GELU path and sigmoid-gated path
+        # W2: used for gating and output projection
+        self.W1 = ParameterizedLinear(hidden_size, intermediate_size, bias=add_bias, std=std)
+        self.W2 = ParameterizedLinear(hidden_size, intermediate_size, bias=add_bias, std=std)
 
-        mark_parameter_as_mup_learning_rate(self.W)
+        mark_parameter_as_mup_learning_rate(self.W1.weight)
+        mark_parameter_as_mup_learning_rate(self.W2.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Batched projection: compute both W1x and W2x in one matmul
-        # x: (b, t, hidden) -> projected: (b, t, 2, intermediate)
-        # projected = x @ self.W.transpose(0, 1).reshape(self.hidden_size, -1)
-        # projected = projected.view(*x.shape[:-1], 2, self.intermediate_size)
-        # W1x, W2x = projected.unbind(dim=-2)
-
-        # Two separate matmuls - torch.compile can parallelize these
-        W1x = x @ self.W[0]  # (b, t, intermediate_size)
-        W2x = x @ self.W[1]  # (b, t, intermediate_size)
+        # Project to intermediate size using ParameterizedLinear layers
+        W1x = self.W1(x)  # (b, t, intermediate_size)
+        W2x = self.W2(x)  # (b, t, intermediate_size)
 
         # GELU path
         y1 = F.gelu(W1x)
 
-        # Sigmoid-gated path (fused element-wise ops)
-        # Sigmoid-gated path: fused element-wise ops for better kernel fusion
+        # Sigmoid-gated path (energy gradient term)
+        # W1.weight has shape (intermediate_size, hidden_size), so it acts as the projection back
         y2 = torch.sigmoid(self._SIGMOID_SCALE * W1x) * 0.5 * W2x
-        # y2 = torch.sigmoid(self._SIGMOID_SCALE * W1x) * (0.5 * W2x)
-        y2 = y2 @ self.W[0].T  # project back to hidden_size
+        y2 = y2 @ self.W1.weight  # project back to hidden_size
 
-        # Combine paths
-        out = y1 @ self.W[1].T + y2
+        # Combine paths: y1 projected back via W2.weight
+        out = y1 @ self.W2.weight + y2
+
+        self._log_norms(out)
+
         return out
+
+    def _log_norms(self, out: torch.Tensor) -> None:
+        """Cache weight matrix norms and output norm for external tracking."""
+        with torch.no_grad():
+            # Weight norms
+            w1_norm = self.W1.weight.norm().item()
+            w2_norm = self.W2.weight.norm().item()
+            w_total_norm = math.sqrt(w1_norm**2 + w2_norm**2)
+
+            # Output norm (mean over batch)
+            out_norm = out.norm(dim=-1).mean().item()
+
+            self._cached_metrics = {
+                "W1_norm": w1_norm,
+                "W2_norm": w2_norm,
+                "W_total_norm": w_total_norm,
+                "output_norm": out_norm,
+            }
+
+    def get_metrics(self) -> dict[str, float] | None:
+        """Return cached metrics for external tracking."""
+        return self._cached_metrics
 
 
     # def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -113,10 +133,8 @@ class Energy_MLP(nn.Module):
 
 
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
-        W1x = x @ self.W[0]
+        W1x = self.W1(x)
         return F.gelu(W1x).sum(dim=-1)
-
-
 
 
 class MLP(nn.Module):
@@ -145,6 +163,7 @@ class MLP(nn.Module):
 
         self.act = get_activation_function(activation_function)
 
+        #TODO: Issue here when is_glu case is there
         self.c_proj = ParameterizedLinear(
             intermediate_size, hidden_size, bias=add_bias, std=std / math.sqrt(2 * num_layers)
         )
