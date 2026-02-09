@@ -1,5 +1,13 @@
 - As you interact with this codebase, record anything that you find useful or will help you improve in the future to this file.
 
+# Environment Setup
+
+```bash
+make install
+```
+
+This runs `uv sync --extra cuda --extra dev`, which auto-manages Python 3.12 and `.venv`. Use `uv run <cmd>` to run commands.
+
 # Training Jobs (Blue Vela)
 
 ## Bharat's energy training workflow
