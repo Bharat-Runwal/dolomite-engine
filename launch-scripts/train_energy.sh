@@ -2,9 +2,9 @@
 # ==========================================================================
 # Launch across all our grp_ebm gpus.
 #
-# USAGE:
-#   bsub < launch-scripts/train_energy.sh                          # default config
-#   CONFIG=configs/energy/energy_32gpu.yml bsub < launch-scripts/train_energy.sh
+# USAGE (must pass REPO_ROOT):
+#   REPO_ROOT=$(git rev-parse --show-toplevel) bsub < launch-scripts/train_energy.sh
+#   REPO_ROOT=$(git rev-parse --show-toplevel) CONFIG=configs/energy/other.yml bsub < launch-scripts/train_energy.sh
 #
 # Debug (single node, 8 GPUs):
 #   bsub -Is -n 1 -G grp_ebm -q normal -gpu "num=8:mode=exclusive_process" bash
@@ -45,9 +45,8 @@ export NCCL_DEBUG_SUBSYS=NET,ENV,INIT
 export OMP_NUM_THREADS=64
 export TOKENIZERS_PARALLELISM=false
 
-# ========== Repo root (auto-detect from script location) ==========
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# ========== Repo root (passed via env var at submit time) ==========
+REPO_ROOT="${REPO_ROOT:?ERROR: REPO_ROOT not set. Submit with: REPO_ROOT=\$(git rev-parse --show-toplevel) bsub < launch-scripts/train_energy.sh}"
 
 # ========== Config ==========
 CONFIG_PATH="${CONFIG:-configs/energy/energy_32gpu.yml}"
