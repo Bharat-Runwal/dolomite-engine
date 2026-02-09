@@ -4,10 +4,10 @@
 
 ## Bharat's energy training workflow
 
-Run a command with the `scripts/blue-vela/pretrain.sh` script from the ROOT directory. Tune the following cmd to set resources for your run
+Run a command with the `launch-scripts/pretrain.sh` script from the ROOT directory. Tune the following cmd to set resources for your run
 
 ```
-bsub -q normal -G grp_ebm -M 2000G -hl -n 4 -J energy-v1 -gpu "num=8/task:mode=exclusive_process" -oo /proj/dmfexp/energy-gpt/logs/energy-train-%J.out -eo /proj/dmfexp/energy-gpt/logs/energy-train-%J.err blaunch bash scripts/blue-vela/pretrain.sh configs/
+bsub -q normal -G grp_ebm -M 2000G -hl -n 4 -J energy-v1 -gpu "num=8/task:mode=exclusive_process" -oo /proj/dmfexp/energy-gpt/logs/energy-train-%J.out -eo /proj/dmfexp/energy-gpt/logs/energy-train-%J.err blaunch bash launch-scripts/pretrain.sh configs/
 ```
 
 - **`-q normal`**: LSF queue: (grp_ebm, grp_preemptable)
