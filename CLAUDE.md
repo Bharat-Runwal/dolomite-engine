@@ -256,10 +256,10 @@ agent-relay history --json             # JSON output for parsing
 
 ```bash
 # Submit with default 32-GPU config
-bsub < launch-scripts/train_energy.sh
+REPO_ROOT=$(git rev-parse --show-toplevel) bsub < launch-scripts/train_energy.sh
 
 # Or specify a config explicitly
-bsub < launch-scripts/train_energy.sh configs/energy/energy_32gpu.yml
+REPO_ROOT=$(git rev-parse --show-toplevel) CONFIG=configs/energy/other.yml bsub < launch-scripts/train_energy.sh
 ```
 
 Monitor:
