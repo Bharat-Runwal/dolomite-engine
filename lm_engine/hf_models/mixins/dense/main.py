@@ -19,11 +19,14 @@ from .base import PreTrainedModelMixin
 
 
 class CausalLMModelMixin(PreTrainedModelMixin):
-    _tied_weights_keys = ["lm_head.weight"]
     base_model_class = None
 
     def __init__(self, config: CommonConfig, **kwargs) -> CausalLMModelMixin:
         super().__init__(config, **kwargs)
+
+        # Only set tied weights when lm_head exists (not tied embeddings)
+        if not self._tied_word_embeddings:
+            self._tied_weights_keys = {"lm_head.weight": "transformer.wte.weight"}
 
         self.router_aux_loss_coef = getattr(config, "router_aux_loss_coef", 0)
         self._init_model(config, **kwargs)

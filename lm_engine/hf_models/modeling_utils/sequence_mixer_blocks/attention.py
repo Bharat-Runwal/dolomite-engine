@@ -227,7 +227,7 @@ class Attention(nn.Module):
             del query, key, value
 
             hidden_states = wait_for_ACT(hidden_states, wait_in_forward=False, wait_in_backward=True)
-            hidden_states = hidden_states.view(*output_shape)
+            hidden_states = hidden_states.reshape(*output_shape)
         else:
             assert self.sliding_window is None
 
