@@ -1,4 +1,15 @@
 #!/bin/bash
+# ==========================================================================
+# Launch across all our grp_ebm gpus.
+#
+# USAGE:
+#   bsub < launch-scripts/train_energy.sh                          # default config
+#   CONFIG=configs/energy/energy_32gpu.yml bsub < launch-scripts/train_energy.sh
+#
+# Debug (single node, 8 GPUs):
+#   bsub -Is -n 1 -G grp_ebm -q normal -gpu "num=8:mode=exclusive_process" bash
+#   torchrun --nproc_per_node=8 -m lm_engine.pretrain configs/energy/energy_debug.yml
+# ==========================================================================
 #BSUB -J energy-train
 #BSUB -n 4
 #BSUB -R "span[ptile=1]"
@@ -34,19 +45,25 @@ export NCCL_DEBUG_SUBSYS=NET,ENV,INIT
 export OMP_NUM_THREADS=64
 export TOKENIZERS_PARALLELISM=false
 
+# ========== Repo root (auto-detect from script location) ==========
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # ========== Config ==========
-CONFIG_PATH="${1:-/proj/dmfexp/hopfield++/Projects/dolomite-engine/configs/energy/energy_32gpu.yml}"
+CONFIG_PATH="${CONFIG:-configs/energy/energy_32gpu.yml}"
 
 # ========== Pre-flight ==========
+cd "$REPO_ROOT"
+
+# Resolve config path relative to repo root
 if [[ ! -f "$CONFIG_PATH" ]]; then
-  echo "ERROR: Config not found: $CONFIG_PATH" >&2
+  echo "ERROR: Config not found: $REPO_ROOT/$CONFIG_PATH" >&2
   exit 1
 fi
 
 mkdir -p /proj/dmfexp/energy-gpt/logs
 
 # ========== Launch ==========
-cd /proj/dmfexp/hopfield++/Projects/dolomite-engine
 source .venv/bin/activate
 
 # Discover nodes from LSF
@@ -61,7 +78,7 @@ else
   GPUS_PER_NODE=8
 fi
 
-export MASTER_ADDR MASTER_PORT NNODES GPUS_PER_NODE CONFIG_PATH
+export MASTER_ADDR MASTER_PORT NNODES GPUS_PER_NODE CONFIG_PATH REPO_ROOT
 
 echo "[INFO] Nodes: ${HOSTS[*]}"
 echo "[INFO] MASTER=${MASTER_ADDR}:${MASTER_PORT} NNODES=${NNODES} GPUS=${GPUS_PER_NODE}"
@@ -78,7 +95,7 @@ for i in $(seq 0 $((NNODES-1))); do
 set -euo pipefail
 
 NODE_RANK="$1"
-cd /proj/dmfexp/hopfield++/Projects/dolomite-engine
+cd "$REPO_ROOT"
 source .venv/bin/activate
 
 echo "[node_rank=${NODE_RANK}] host=$(hostname) master=${MASTER_ADDR}:${MASTER_PORT}"
