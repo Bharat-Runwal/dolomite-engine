@@ -10,5 +10,6 @@ uv.lock
 .venv
 .DS_Store
 scripts/blue-vela
+_archive/
 !scripts/blue-vela/pretrain.sh
 wandb/
