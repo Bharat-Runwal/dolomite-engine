@@ -178,30 +178,70 @@ class BaseModelMixin(PreTrainedModelMixin):
         # mamba_mask = None
         # mamba_mask_computed = False
         # mamba_mask = None
-        mamba_mask_computed = False
 
-        layer_id=0
-        # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
+        if self.num_iterations==0:
+            mamba_mask = None
+            mamba_mask_computed = False
 
-        for i in self.pre_layer_idxs:
-            hidden_states = self._run_block(
-                hidden_states,
-                past_key_values,
-                attention_mask,
-                cu_seqlens,
-                max_seqlen,
-                causal_mask,
-                rope_cos_sin,
-                mamba_mask_computed,
-                i,
-                layer_id= layer_id
-            )
-            layer_id += 1
+            for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
+                is_linear_layer = sequence_mixer_type in ["mamba2", "rnn", "gru"]
 
-        for j in range(self.num_iterations):
+                if is_linear_layer and not mamba_mask_computed:
+                    mamba_mask = self._get_mamba_mask(attention_mask, past_key_values)
+                    mamba_mask_computed = True
 
-            # Perform looped layers
-            for i in self.loop_layer_idxs:
+                hidden_states = block(
+                    hidden_states,
+                    past_key_values=past_key_values,
+                    attention_mask=mamba_mask if is_linear_layer else causal_mask,
+                    rope_cos_sin=rope_cos_sin,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
+
+            hidden_states = self.ln_f(hidden_states)
+
+            return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
+        else:
+            mamba_mask_computed = False
+
+            layer_id=0
+            # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
+
+            for i in self.pre_layer_idxs:
+                hidden_states = self._run_block(
+                    hidden_states,
+                    past_key_values,
+                    attention_mask,
+                    cu_seqlens,
+                    max_seqlen,
+                    causal_mask,
+                    rope_cos_sin,
+                    mamba_mask_computed,
+                    i,
+                    layer_id= layer_id
+                )
+                layer_id += 1
+
+            for j in range(self.num_iterations):
+
+                # Perform looped layers
+                for i in self.loop_layer_idxs:
+                    hidden_states = self._run_block(
+                        hidden_states,
+                        past_key_values,
+                        attention_mask,
+                        cu_seqlens,
+                        max_seqlen,
+                        causal_mask,
+                        rope_cos_sin,
+                        mamba_mask_computed,
+                        i,
+                        layer_id=layer_id,
+                    )
+                    layer_id += 1
+
+            for i in self.post_layer_idxs:
                 hidden_states = self._run_block(
                     hidden_states,
                     past_key_values,
@@ -216,42 +256,27 @@ class BaseModelMixin(PreTrainedModelMixin):
                 )
                 layer_id += 1
 
-        for i in self.post_layer_idxs:
-            hidden_states = self._run_block(
-                hidden_states,
-                past_key_values,
-                attention_mask,
-                cu_seqlens,
-                max_seqlen,
-                causal_mask,
-                rope_cos_sin,
-                mamba_mask_computed,
-                i,
-                layer_id=layer_id,
-            )
-            layer_id += 1
 
 
+            # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
+            #     is_linear_layer = sequence_mixer_type in ["mamba2", "rnn", "gru"]
 
-        # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
-        #     is_linear_layer = sequence_mixer_type in ["mamba2", "rnn", "gru"]
+            #     if is_linear_layer and not mamba_mask_computed:
+            #         mamba_mask = self._get_mamba_mask(attention_mask, past_key_values)
+            #         mamba_mask_computed = True
 
-        #     if is_linear_layer and not mamba_mask_computed:
-        #         mamba_mask = self._get_mamba_mask(attention_mask, past_key_values)
-        #         mamba_mask_computed = True
+            #     hidden_states = block(
+            #         hidden_states,
+            #         past_key_values=past_key_values,
+            #         attention_mask=mamba_mask if is_linear_layer else causal_mask,
+            #         rope_cos_sin=rope_cos_sin,
+            #         cu_seqlens=cu_seqlens,
+            #         max_seqlen=max_seqlen,
+            #     )
 
-        #     hidden_states = block(
-        #         hidden_states,
-        #         past_key_values=past_key_values,
-        #         attention_mask=mamba_mask if is_linear_layer else causal_mask,
-        #         rope_cos_sin=rope_cos_sin,
-        #         cu_seqlens=cu_seqlens,
-        #         max_seqlen=max_seqlen,
-        #     )
+            hidden_states = self.ln_f(hidden_states)
 
-        hidden_states = self.ln_f(hidden_states)
-
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
+            return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
 
 
     def _run_block(
