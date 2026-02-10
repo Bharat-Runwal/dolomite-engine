@@ -91,7 +91,9 @@ class EnergyAttention_QK(nn.Module):
             std=initializer_range,
         )
 
-        # Use xavier_uniform_ initialization with gain=8.0 (matching energy attention reference)
+        
+
+        # # Use xavier_uniform_ initialization with gain=8.0 (matching energy attention reference)
         # torch.nn.init.xavier_uniform_(self.c_attn.weight, gain=8.0)
         # # Store init std for reference
         # if self.c_attn.weight.is_meta:
@@ -104,7 +106,7 @@ class EnergyAttention_QK(nn.Module):
         # Output scale: since we normalize V and W_Q to unit norm for stability,
         # we need to scale up the output to match original magnitude
         # Scale = sqrt(head_dim) gives reasonable output magnitude when combined with normalized V and W_Q
-        self.output_scale = math.sqrt(self.head_dim)
+        # self.output_scale = math.sqrt(self.head_dim)
 
         self.softmax_dropout_p = softmax_dropout
         self.softmax_dropout = Dropout(softmax_dropout)
@@ -127,7 +129,7 @@ class EnergyAttention_QK(nn.Module):
         q_weight = q_weight.permute(0, 2, 1).contiguous()  # (H, C, D)
         # Normalize to unit norm per head to prevent weight growth from amplifying output
         # This keeps the output projection bounded regardless of how c_attn weights grow
-        q_weight = q_weight / (q_weight.norm(dim=(1, 2), keepdim=True) + 1e-6)
+        q_weight = q_weight # / self.c_attn_init_std   # / (q_weight.norm(dim=(1, 2), keepdim=True) + 1e-6)
         return q_weight
 
     def forward(
@@ -172,7 +174,7 @@ class EnergyAttention_QK(nn.Module):
         # V = K (core energy attention property)
         # Normalize value vectors to unit norm per position to bound attention output magnitude
         # This prevents c_attn weight growth from amplifying attention output
-        value = key / (key.norm(dim=-1, keepdim=True) + 1e-6)
+        value = key  # / (key.norm(dim=-1, keepdim=True) + 1e-6)
 
         if past_key_values is not None:
             key, value = past_key_values.update(
@@ -251,7 +253,7 @@ class EnergyAttention_QK(nn.Module):
 
 
 
-        hidden_states = self.dropout(hidden_states) * self.output_scale
+        hidden_states = self.dropout(hidden_states)  # * self.output_scale
 
         # Log metrics
         self._log_norms(hidden_states, W_Q)

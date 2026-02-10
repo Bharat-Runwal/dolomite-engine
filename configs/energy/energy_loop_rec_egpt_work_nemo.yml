@@ -1,0 +1,162 @@
+datasets:
+  # class_name - data_name & data_sampling_ratio are not used but need to be passed to avoid errors
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/checkpoints/bharat/cache
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 2048 # context length (OpenLM 160M default)
+
+
+# tokenizer_args:
+#   tokenizer_name: /proj/checkpoints/shawntan/diffusion/release/data/tokenizer
+
+
+tokenizer_args:
+  tokenizer_name: /proj/checkpoints/dmf-lh-checkpoints/granite-4.0-tiktoken
+
+
+# kernel_args:
+#   kernels:
+#     - flash_attention_2
+
+    # - swiglu_packed_cute
+    # - rmsnorm_cute
+    # - scattermoe
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    initializer_range: 0.02
+    layer_norm_epsilon: 1e-05
+    model_type: energy
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    hidden_size: 1024
+    # m_width: 8
+    # m_emb: 12
+    # m_residual: 0.28577380332470415
+    num_layers: 3
+    # init_method: mup
+    init_method: normal
+    tie_word_embeddings: true
+
+    rope_dim : 64
+    num_pre_layers:   1
+    num_post_layers:  1
+    num_iterations:   9
+
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 2048
+
+    sequence_mixer_blocks:
+      - add_bias: false
+        attention_multiplier: 0.125
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        sequence_mixer_type: softmax_attention
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+      - add_bias: false
+        attention_multiplier: 0.125
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        sequence_mixer_type: softmax_attention
+    mlp_blocks:
+      - activation_function: swiglu
+        add_bias: false
+        intermediate_size: 4096
+        mlp_type: MLP
+      - mlp_type: Energy_MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+      - activation_function: swiglu
+        add_bias: false
+        intermediate_size: 4096
+        mlp_type: MLP
+  # use_padding_free_transformer: true
+  # # efficient_initialization: true
+  # reset_attention_mask: true
+  # reset_position_ids: true
+
+tuning_args:
+  tuning_method: pretraining
+  # tuning_method: pretraining_diffusion
+
+save_args:
+  save_path: /proj/checkpoints/bharat/personal/energy_gpt/EGPT_9_1k_nemo_pos_ROPE_initD
+  save_interval: 5000
+
+# TODO restoring from last checkpoint
+
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-gpt
+    name: EGPT_9_1k_nemo_pos_ROPE
+
+
+training_parameters:
+  num_training_steps: 75000
+  eval_interval: 5000
+  micro_batch_size: 2
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 3e-4
+    weight_decay: 0.1
+    betas:
+      - 0.9
+      - 0.95
+    eps: 1e-10
+
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 5000
+  num_constant_steps: 0
+  num_decay_steps: 70000
+  
+
+
+# lr_scheduler_args:
+#   lr_decay_style: power
+#   num_warmup_steps: 5000
+#   num_constant_steps: 0
+#   num_decay_steps: 70000
+#   extra_lr_scheduler_args:
+#     # 4 * global_batch_size
+#     a: 4096
+#     # constant
+#     b: -0.51
+#     # global_batch_size in number of tokens
+#     c: 4194304
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: false
+  stage: 0
