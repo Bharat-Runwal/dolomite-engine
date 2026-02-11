@@ -223,10 +223,13 @@ class BaseModelMixin(PreTrainedModelMixin):
                 )
                 layer_id += 1
 
-            for j in range(self.num_iterations):
 
-                # Perform looped layers
-                for i in self.loop_layer_idxs:
+            # Perform looped layers
+
+            #TODO: Fix the layer id logic for KV cache and Generation task
+            for i in self.loop_layer_idxs:
+                for j in range(self.num_iterations):
+
                     hidden_states = self._run_block(
                         hidden_states,
                         past_key_values,
@@ -240,6 +243,7 @@ class BaseModelMixin(PreTrainedModelMixin):
                         layer_id=layer_id,
                     )
                     layer_id += 1
+
 
             for i in self.post_layer_idxs:
                 hidden_states = self._run_block(

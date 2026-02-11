@@ -183,73 +183,73 @@ class EnergyAttention_QK(nn.Module):
 
         W_Q = self._get_q_weight_for_output()
 
-        # if use_flash_attention_2 or use_flash_attention_3:
-        #     assert accelerator == Accelerator.cuda
+        if use_flash_attention_2 or use_flash_attention_3:
+            assert accelerator == Accelerator.cuda
 
-        #     if not self.use_padding_free_transformer:
-        #         query = query.transpose(1, 2).contiguous()
-        #         key = key.transpose(1, 2).contiguous()
-        #         value = value.transpose(1, 2).contiguous()
+            if not self.use_padding_free_transformer:
+                query = query.transpose(1, 2).contiguous()
+                key = key.transpose(1, 2).contiguous()
+                value = value.transpose(1, 2).contiguous()
 
-        #     query = wait_for_ACT(query, wait_in_forward=True, wait_in_backward=False)
-        #     key = wait_for_ACT(key, wait_in_forward=True, wait_in_backward=False)
-        #     value = wait_for_ACT(value, wait_in_forward=True, wait_in_backward=False)
+            query = wait_for_ACT(query, wait_in_forward=True, wait_in_backward=False)
+            key = wait_for_ACT(key, wait_in_forward=True, wait_in_backward=False)
+            value = wait_for_ACT(value, wait_in_forward=True, wait_in_backward=False)
 
-        #     attn_output = flash_attention(
-        #         query=query,
-        #         key=key,
-        #         value=value,
-        #         cu_seqlens=cu_seqlens,
-        #         max_seqlen=max_seqlen,
-        #         attention_mask=attention_mask,
-        #         use_padding_free_transformer=self.use_padding_free_transformer,
-        #         causal=self.causal,
-        #         dropout=self.softmax_dropout_p if self.training else 0,
-        #         sliding_window=self.sliding_window,
-        #         # softmax_scale=self.attention_multiplier,
+            attn_output = flash_attention(
+                query=query,
+                key=key,
+                value=value,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                attention_mask=attention_mask,
+                use_padding_free_transformer=self.use_padding_free_transformer,
+                causal=self.causal,
+                dropout=self.softmax_dropout_p if self.training else 0,
+                sliding_window=self.sliding_window,
+                # softmax_scale=self.attention_multiplier,
 
-        #     )
-
-        #     del query, key, value
-        #     attn_output = wait_for_ACT(attn_output, wait_in_forward=False, wait_in_backward=True)
-
-        #     if self.use_padding_free_transformer:
-        #         attn_output = attn_output.permute(1, 0, 2)
-        #         hidden_states = torch.einsum("hts,hcs->tc", attn_output, W_Q)
-        #     else:
-        #         attn_output = attn_output.transpose(1, 2)
-        #         hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
-        # else:
-        #     assert self.sliding_window is None
-
-        #     if accelerator == Accelerator.tpu:
-        #         assert attention_mask is None
-        #         assert self.softmax_dropout_p == 0
-
-        #         attn_output = flash_attention_tpu(
-        #             query,
-        #             key,
-        #             value,
-        #             causal=self.causal if attention_mask is None else False,
-        #             sm_scale=(
-        #                 1 / math.sqrt(self.head_dim)
-        #                 if self.attention_multiplier is None
-        #                 else self.attention_multiplier
-        #             ),
-        #         )
-        #     else:
-        attn_output = F.scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                attn_mask=attention_mask,
-                dropout_p=self.softmax_dropout_p if self.training else 0,
-                is_causal=self.causal if attention_mask is None else False,
-                # scale=self.attention_multiplier,
             )
 
-        del query, key, value
-        hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
+            del query, key, value
+            attn_output = wait_for_ACT(attn_output, wait_in_forward=False, wait_in_backward=True)
+
+            if self.use_padding_free_transformer:
+                attn_output = attn_output.permute(1, 0, 2)
+                hidden_states = torch.einsum("hts,hcs->tc", attn_output, W_Q)
+            else:
+                attn_output = attn_output.transpose(1, 2)
+                hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
+        else:
+            assert self.sliding_window is None
+
+            if accelerator == Accelerator.tpu:
+                assert attention_mask is None
+                assert self.softmax_dropout_p == 0
+
+                attn_output = flash_attention_tpu(
+                    query,
+                    key,
+                    value,
+                    causal=self.causal if attention_mask is None else False,
+                    sm_scale=(
+                        1 / math.sqrt(self.head_dim)
+                        if self.attention_multiplier is None
+                        else self.attention_multiplier
+                    ),
+                )
+            else:
+                attn_output = F.scaled_dot_product_attention(
+                        query,
+                        key,
+                        value,
+                        attn_mask=attention_mask,
+                        dropout_p=self.softmax_dropout_p if self.training else 0,
+                        is_causal=self.causal if attention_mask is None else False,
+                        # scale=self.attention_multiplier,
+                    )
+
+                del query, key, value
+                hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
 
 
 
