@@ -46,7 +46,7 @@ model_args:
 
     num_pre_layers:   2
     num_post_layers:  2
-    num_iterations:   4
+    num_iterations:   8
 
     bos_token_id: 50256 # ensure these are same in the tokenizer
     eos_token_id: 50256
@@ -126,7 +126,7 @@ logging_args:
 
 
 training_parameters:
-  num_training_steps: 75000 #75000
+  num_training_steps: 80000 #75000
   eval_interval: 1000000000
   micro_batch_size: 2
   gradient_accumulation_steps: 1  # 32 GPUs provides enough parallelism
