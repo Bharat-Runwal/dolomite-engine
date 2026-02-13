@@ -208,7 +208,7 @@ def wrap_model_container_for_distributed_training(
 
     dp_mesh = ProcessGroupManager.get_data_parallel_mesh()
     block_classes = [
-        get_module_class_from_name(model_container[0], name) for name in block_names + teacher_block_names
+        get_module_class_from_name(model_container[0], name) for name in list(block_names) + teacher_block_names
     ]
 
     if args.distributed_args.gradient_checkpointing_method is not None:
