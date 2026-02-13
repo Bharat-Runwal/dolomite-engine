@@ -1209,6 +1209,10 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         use_mixing_coefficients: bool = True,
         diversity_lambda: float = 0.01,
         entropy_bonus_gamma: float = 0.0,
+        mixing_entropy_gamma: float = 0.0,
+        centroid_repulsion_lambda: float = 0.0,
+        bias_based_balancing: bool = False,
+        bias_update_alpha: float = 0.001,
     ):
         super().__init__()
 
@@ -1222,6 +1226,10 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         self.use_mixing_coefficients = use_mixing_coefficients
         self.diversity_lambda = diversity_lambda
         self.entropy_bonus_gamma = entropy_bonus_gamma
+        self.mixing_entropy_gamma = mixing_entropy_gamma
+        self.centroid_repulsion_lambda = centroid_repulsion_lambda
+        self.bias_based_balancing = bias_based_balancing
+        self.bias_update_alpha = bias_update_alpha
 
         std = _get_std_for_linear(initializer_range, init_method, m_width)
 
@@ -1241,6 +1249,10 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
             mark_parameter_as_no_weight_decay(self.mixing_logits)
 
         self.dropout = Dropout(dropout)
+
+        # DeepSeek-V3 bias-based balancing: non-learned per-expert bias
+        if bias_based_balancing:
+            self.register_buffer("expert_bias", torch.zeros(num_experts))
 
         self.is_hopper_or_newer_gpu = (
             torch.cuda.is_available()
@@ -1288,7 +1300,7 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         return (0.5 * logabsdet).to(self.expert_W.dtype)
 
     def _compute_routing_logits(self, energies: torch.Tensor) -> torch.Tensor:
-        """ℓ_e = log(π_e) + ½ log det(W_e^T W_e) - E_e(h)."""
+        """ℓ_e = log(π_e) + ½ log det(W_e^T W_e) - E_e(h) [+ b_e]."""
         logits = -energies  # (N, E)
 
         if self.use_mixing_coefficients:
@@ -1298,6 +1310,9 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         if self.use_det_normalization:
             log_det_half = self._compute_log_det_half()
             logits = logits + log_det_half.unsqueeze(0)
+
+        if self.bias_based_balancing:
+            logits = logits + self.expert_bias.unsqueeze(0)
 
         return logits
 
@@ -1318,6 +1333,20 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         weights = F.softmax(logits.float(), dim=-1)
         H = -(weights * torch.log(weights + 1e-10)).sum(dim=-1)
         return -H.mean()
+
+    def _compute_mixing_entropy_loss(self) -> torch.Tensor:
+        """Entropy penalty on π_e mixing coefficients (negative = maximize entropy)."""
+        pi = F.softmax(self.mixing_logits.float(), dim=0)
+        H = -(pi * torch.log(pi + 1e-10)).sum()
+        return -H
+
+    def _compute_centroid_repulsion_loss(self) -> torch.Tensor:
+        """Pairwise repulsion: -mean_{i!=j} ||μ_i - μ_j||²."""
+        # (E, E) pairwise squared distances
+        diff = self.centroids.unsqueeze(0) - self.centroids.unsqueeze(1)  # (E, E, d)
+        sq_dist = (diff * diff).sum(dim=-1)  # (E, E)
+        mask = ~torch.eye(self.num_experts, device=sq_dist.device, dtype=torch.bool)
+        return -sq_dist[mask].mean()
 
     def _compute_switch_loss(
         self, logits: torch.Tensor, probs: torch.Tensor, expert_frequency: torch.Tensor
@@ -1387,6 +1416,16 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
                 ),
             )
 
+        # DeepSeek-V3 bias update: nudge expert_bias toward uniform load
+        if self.training and self.bias_based_balancing:
+            with torch.no_grad():
+                total_tokens = expert_frequency.sum()
+                if total_tokens > 0:
+                    fraction = expert_frequency.float() / total_tokens
+                    target = 1.0 / self.num_experts
+                    # overloaded experts -> decrease bias, underloaded -> increase
+                    self.expert_bias -= self.bias_update_alpha * (fraction - target)
+
         if self.training:
             self._cache_routing_metrics(expert_frequency, logits)
 
@@ -1406,6 +1445,10 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
                 aux_loss = aux_loss + self.diversity_lambda * self._compute_diversity_loss()
             if self.entropy_bonus_gamma > 0:
                 aux_loss = aux_loss + self.entropy_bonus_gamma * self._compute_entropy_bonus(logits)
+            if self.mixing_entropy_gamma > 0 and self.use_mixing_coefficients:
+                aux_loss = aux_loss + self.mixing_entropy_gamma * self._compute_mixing_entropy_loss()
+            if self.centroid_repulsion_lambda > 0:
+                aux_loss = aux_loss + self.centroid_repulsion_lambda * self._compute_centroid_repulsion_loss()
             add_aux_loss(aux_loss)
 
         return hidden_states

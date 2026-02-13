@@ -99,6 +99,10 @@ class _GaussianBoltzmannMoEArgs(BaseArgs):
     use_mixing_coefficients: bool = True     # learnable GMM mixing weights π_e
     diversity_lambda: float = 0.01           # cosine diversity penalty on W matrices
     entropy_bonus_gamma: float = 0.0         # per-token routing entropy bonus
+    mixing_entropy_gamma: float = 0.0        # entropy bonus on π_e mixing coefficients
+    centroid_repulsion_lambda: float = 0.0   # pairwise centroid repulsion penalty
+    bias_based_balancing: bool = False        # DeepSeek-V3 aux-loss-free balancing via per-expert bias
+    bias_update_alpha: float = 0.001          # step size for bias adjustment
 
     def model_post_init(self, __context: Any) -> None:
         assert self.mlp_type == "GaussianBoltzmannMoE"
