@@ -16,8 +16,8 @@ bsub \
   -n 4 \
   -J bs-energy-v1 \
   -gpu "num=8/task:mode=exclusive_process" \
-  -oo "${LOG_DIR}/bs-energy-train.out" \
-  -eo "${LOG_DIR}/bs-energy-train.err" \
+  -oo "${LOG_DIR}/bs-energy-train-%J.out" \
+  -eo "${LOG_DIR}/bs-energy-train-%J.err" \
   blaunch bash launch-scripts/pretrain.sh "$CONFIG"
 
 
