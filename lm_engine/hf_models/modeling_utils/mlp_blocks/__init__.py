@@ -90,6 +90,13 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             use_mixing_coefficients=block.use_mixing_coefficients,
             diversity_lambda=block.diversity_lambda,
             entropy_bonus_gamma=block.entropy_bonus_gamma,
+            mixing_entropy_gamma=block.mixing_entropy_gamma,
+            centroid_repulsion_lambda=block.centroid_repulsion_lambda,
+            bias_based_balancing=block.bias_based_balancing,
+            bias_update_alpha=block.bias_update_alpha,
+            kl_distillation=block.kl_distillation,
+            distillation_weight=block.distillation_weight,
+            use_gmm_at_inference=block.use_gmm_at_inference,
         )
     else:
         raise ValueError(f"invalid mlp_type ({mlp_type}) for layer ({layer_idx})")

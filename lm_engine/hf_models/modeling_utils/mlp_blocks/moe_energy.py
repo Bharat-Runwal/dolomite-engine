@@ -1208,6 +1208,14 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         use_mixing_coefficients: bool = True,
         diversity_lambda: float = 0.01,
         entropy_bonus_gamma: float = 0.0,
+        mixing_entropy_gamma: float = 0.0,
+        centroid_repulsion_lambda: float = 0.0,
+        bias_based_balancing: bool = False,
+        bias_update_alpha: float = 0.001,
+        # KL distillation to linear router (F5-style inference efficiency)
+        kl_distillation: bool = False,
+        distillation_weight: float = 0.01,
+        use_gmm_at_inference: bool = False,
     ):
         super().__init__()
 
@@ -1221,6 +1229,13 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         self.use_mixing_coefficients = use_mixing_coefficients
         self.diversity_lambda = diversity_lambda
         self.entropy_bonus_gamma = entropy_bonus_gamma
+        self.mixing_entropy_gamma = mixing_entropy_gamma
+        self.centroid_repulsion_lambda = centroid_repulsion_lambda
+        self.bias_based_balancing = bias_based_balancing
+        self.bias_update_alpha = bias_update_alpha
+        self.kl_distillation = kl_distillation
+        self.distillation_weight = distillation_weight
+        self.use_gmm_at_inference = use_gmm_at_inference
 
         std = _get_std_for_linear(initializer_range, init_method, m_width)
 
@@ -1240,6 +1255,19 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
             mark_parameter_as_no_weight_decay(self.mixing_logits)
 
         self.dropout = Dropout(dropout)
+
+        # DeepSeek-V3 bias-based balancing: non-learned per-expert bias
+        if bias_based_balancing:
+            self.register_buffer("expert_bias", torch.zeros(num_experts))
+
+        # KL distillation: cheap linear gate for inference
+        if kl_distillation:
+            self.gate = ParameterizedLinear(
+                in_features=hidden_size,
+                out_features=num_experts,
+                bias=False,
+                std=std,
+            )
 
         self.is_hopper_or_newer_gpu = (
             torch.cuda.is_available()
@@ -1277,18 +1305,17 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
 
     def _compute_log_det_half(self) -> torch.Tensor:
         """½ log det(W_e^T W_e) for each expert. Returns (E,)."""
-        WtW = torch.bmm(
-            self.expert_W.transpose(1, 2),  # (E, d, m)
-            self.expert_W,                   # (E, m, d)
-        )  # (E, d, d)
+        # slogdet requires float32; cast up then back
+        W = self.expert_W.float()
+        WtW = torch.bmm(W.transpose(1, 2), W)  # (E, d, d)
         WtW = WtW + 1e-6 * torch.eye(
-            self.hidden_size, device=WtW.device, dtype=WtW.dtype
+            self.hidden_size, device=WtW.device
         ).unsqueeze(0)
         _sign, logabsdet = torch.linalg.slogdet(WtW)
-        return 0.5 * logabsdet
+        return (0.5 * logabsdet).type_as(self.expert_W)
 
     def _compute_routing_logits(self, energies: torch.Tensor) -> torch.Tensor:
-        """ℓ_e = log(π_e) + ½ log det(W_e^T W_e) - E_e(h)."""
+        """ℓ_e = log(π_e) + ½ log det(W_e^T W_e) - E_e(h) [+ b_e]."""
         logits = -energies  # (N, E)
 
         if self.use_mixing_coefficients:
@@ -1298,6 +1325,9 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         if self.use_det_normalization:
             log_det_half = self._compute_log_det_half()
             logits = logits + log_det_half.unsqueeze(0)
+
+        if self.bias_based_balancing:
+            logits = logits + self.expert_bias.unsqueeze(0)
 
         return logits
 
@@ -1319,6 +1349,20 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         H = -(weights * torch.log(weights + 1e-10)).sum(dim=-1)
         return -H.mean()
 
+    def _compute_mixing_entropy_loss(self) -> torch.Tensor:
+        """Entropy penalty on π_e mixing coefficients (negative = maximize entropy)."""
+        pi = F.softmax(self.mixing_logits.float(), dim=0)
+        H = -(pi * torch.log(pi + 1e-10)).sum()
+        return -H
+
+    def _compute_centroid_repulsion_loss(self) -> torch.Tensor:
+        """Pairwise repulsion: -mean_{i!=j} ||μ_i - μ_j||²."""
+        # (E, E) pairwise squared distances
+        diff = self.centroids.unsqueeze(0) - self.centroids.unsqueeze(1)  # (E, E, d)
+        sq_dist = (diff * diff).sum(dim=-1)  # (E, E)
+        mask = ~torch.eye(self.num_experts, device=sq_dist.device, dtype=torch.bool)
+        return -sq_dist[mask].mean()
+
     def _compute_switch_loss(
         self, logits: torch.Tensor, probs: torch.Tensor, expert_frequency: torch.Tensor
     ) -> torch.Tensor:
@@ -1339,6 +1383,15 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         z_loss = (torch.logsumexp(logits, dim=-1) ** 2).mean()
         return (switch_loss + 0.1 * z_loss).type_as(logits)
 
+    def _compute_distillation_loss(
+        self, linear_logits: torch.Tensor, gmm_weights: torch.Tensor
+    ) -> torch.Tensor:
+        """KL divergence from linear router to GMM routing target."""
+        target = gmm_weights.detach()
+        log_q = F.log_softmax(linear_logits.float(), dim=-1)
+        kl = F.kl_div(log_q, target.float(), reduction="batchmean", log_target=False)
+        return kl.type_as(linear_logits)
+
     def _get_topk(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.top_k == 1:
             x, indices = x.max(dim=-1, keepdim=True)
@@ -1346,8 +1399,23 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
             x, indices = x.topk(self.top_k, dim=-1)
         return x, indices
 
+    def _compute_linear_routing(
+        self, h: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Cheap linear router for inference-time expert selection."""
+        router_logits = self.gate(h)
+
+        if self.normalized_topk:
+            router_weights, selected_experts = self._get_topk(router_logits)
+            router_weights = F.softmax(router_weights.float(), dim=-1).type_as(h)
+        else:
+            router_weights = F.softmax(router_logits.float(), dim=-1).type_as(h)
+            router_weights, selected_experts = self._get_topk(router_weights)
+
+        return router_logits, router_weights, selected_experts
+
     # ------------------------------------------------------------------
-    # Forward
+    # Forward — dual-mode when kl_distillation is enabled
     # ------------------------------------------------------------------
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1356,6 +1424,19 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
 
         h = hidden_states.view(-1, self.hidden_size)
 
+        if self.kl_distillation and not self.training and not self.use_gmm_at_inference:
+            hidden_states = self._forward_inference(h)
+        else:
+            hidden_states = self._forward_train(h)
+
+        if not self.use_padding_free_transformer:
+            hidden_states = hidden_states.reshape(batch_size, sequence_length, self.hidden_size)
+
+        hidden_states = self.dropout(hidden_states)
+        return hidden_states
+
+    def _forward_train(self, h: torch.Tensor) -> torch.Tensor:
+        """Full GMM routing (training path, also used when kl_distillation is off)."""
         # Energies and projections (reused for outputs — no wasted compute)
         energies, projected = self._compute_energies_and_projections(h)
         all_outputs = self._compute_expert_outputs(projected)  # (N, E, d)
@@ -1374,7 +1455,7 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         # Aggregate selected expert outputs
         idx_exp = topk_indices.unsqueeze(-1).expand(-1, -1, self.hidden_size)
         selected = all_outputs.gather(1, idx_exp)
-        hidden_states = (topk_weights.unsqueeze(-1) * selected).sum(dim=1)
+        output = (topk_weights.unsqueeze(-1) * selected).sum(dim=1)
 
         # Expert frequency for metrics and aux loss
         with torch.no_grad():
@@ -1387,13 +1468,17 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
                 ),
             )
 
+        # DeepSeek-V3 bias update: nudge expert_bias toward uniform load
+        if self.training and self.bias_based_balancing:
+            with torch.no_grad():
+                total_tokens = expert_frequency.sum()
+                if total_tokens > 0:
+                    fraction = expert_frequency.float() / total_tokens
+                    target = 1.0 / self.num_experts
+                    self.expert_bias -= self.bias_update_alpha * (fraction - target)
+
         if self.training:
             self._cache_routing_metrics(expert_frequency, logits)
-
-        if not self.use_padding_free_transformer:
-            hidden_states = hidden_states.reshape(batch_size, sequence_length, self.hidden_size)
-
-        hidden_states = self.dropout(hidden_states)
 
         # Auxiliary losses
         if self.training:
@@ -1406,9 +1491,46 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
                 aux_loss = aux_loss + self.diversity_lambda * self._compute_diversity_loss()
             if self.entropy_bonus_gamma > 0:
                 aux_loss = aux_loss + self.entropy_bonus_gamma * self._compute_entropy_bonus(logits)
+            if self.mixing_entropy_gamma > 0 and self.use_mixing_coefficients:
+                aux_loss = aux_loss + self.mixing_entropy_gamma * self._compute_mixing_entropy_loss()
+            if self.centroid_repulsion_lambda > 0:
+                aux_loss = aux_loss + self.centroid_repulsion_lambda * self._compute_centroid_repulsion_loss()
+
+            # KL distillation: train linear gate to mimic GMM routing
+            if self.kl_distillation:
+                gmm_weights = F.softmax(logits.float(), dim=-1).type_as(h)
+                linear_logits = self.gate(h)
+                distill_loss = self._compute_distillation_loss(linear_logits, gmm_weights)
+                aux_loss = aux_loss + self.distillation_weight * distill_loss
+
             add_aux_loss(aux_loss)
 
-        return hidden_states
+        return output
+
+    def _forward_inference(self, h: torch.Tensor) -> torch.Tensor:
+        """Cheap linear router inference: only compute selected experts sparsely."""
+        router_logits, router_weights, selected_experts = self._compute_linear_routing(h)
+
+        # Sparse expert evaluation: only compute projections for selected experts
+        N = h.size(0)
+        output = torch.zeros(N, self.hidden_size, device=h.device, dtype=h.dtype)
+
+        for k in range(self.top_k):
+            expert_idx = selected_experts[:, k]  # (N,)
+            weight_k = router_weights[:, k]      # (N,)
+
+            # Gather per-token expert parameters
+            W_k = self.expert_W[expert_idx]           # (N, m, d)
+            mu_k = self.centroids[expert_idx]          # (N, d)
+
+            # Compute expert output: f_e(h) = -2 W_e^T W_e (h - μ_e)
+            diff = h - mu_k                            # (N, d)
+            projected = torch.bmm(W_k, diff.unsqueeze(-1)).squeeze(-1)  # (N, m)
+            expert_out = -2.0 * torch.bmm(W_k.transpose(1, 2), projected.unsqueeze(-1)).squeeze(-1)  # (N, d)
+
+            output = output + weight_k.unsqueeze(-1) * expert_out
+
+        return output
 
     # ------------------------------------------------------------------
     # Energy computation
