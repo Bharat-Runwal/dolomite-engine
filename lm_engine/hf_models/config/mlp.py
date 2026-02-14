@@ -103,6 +103,10 @@ class _GaussianBoltzmannMoEArgs(BaseArgs):
     centroid_repulsion_lambda: float = 0.0   # pairwise centroid repulsion penalty
     bias_based_balancing: bool = False        # DeepSeek-V3 aux-loss-free balancing via per-expert bias
     bias_update_alpha: float = 0.001          # step size for bias adjustment
+    # KL distillation to linear router (F5-style inference efficiency)
+    kl_distillation: bool = False             # enable KL distillation to a cheap linear gate
+    distillation_weight: float = 0.01         # weight for KL divergence loss
+    use_gmm_at_inference: bool = False        # override: use full GMM routing at inference too
 
     def model_post_init(self, __context: Any) -> None:
         assert self.mlp_type == "GaussianBoltzmannMoE"

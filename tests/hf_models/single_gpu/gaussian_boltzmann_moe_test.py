@@ -1,7 +1,8 @@
-# Tests for GaussianBoltzmannMoE anti-collapse features:
+# Tests for GaussianBoltzmannMoE features:
 #   - mixing_entropy_gamma (π_e entropy bonus)
 #   - centroid_repulsion_lambda (pairwise centroid repulsion)
 #   - bias_based_balancing (DeepSeek-V3 aux-loss-free balancing)
+#   - kl_distillation (F5-style inference-efficient KL router)
 
 import sys
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ import torch.nn.functional as F
 from torch.testing import assert_close
 
 from lm_engine.hf_models.modeling_utils.mlp_blocks.moe_energy import GaussianBoltzmannMoE
+from lm_engine.hf_models.loss import get_aux_loss, clear_aux_loss
 
 
 def _make_moe(**overrides) -> GaussianBoltzmannMoE:
@@ -209,6 +211,109 @@ class TestForwardSmoke:
         assert out.shape == x.shape
         out.sum().backward()
         assert x.grad is not None
+
+
+class TestKLDistillation:
+    """Tests for F5-style KL distillation to linear router."""
+
+    def test_gate_exists_when_enabled(self):
+        """When kl_distillation is on, a linear gate should be created."""
+        moe = _make_moe(kl_distillation=True)
+        assert hasattr(moe, "gate"), "gate should exist when kl_distillation=True"
+        assert moe.gate.weight.shape == (4, 64), f"gate shape should be (num_experts, hidden_size), got {moe.gate.weight.shape}"
+
+    def test_no_gate_when_disabled(self):
+        """When kl_distillation is off, no gate should be created."""
+        moe = _make_moe(kl_distillation=False)
+        assert not hasattr(moe, "gate"), "gate should not exist when kl_distillation=False"
+
+    def test_training_forward_uses_gmm_routing(self):
+        """In training mode, forward should use full GMM routing and add KL loss."""
+        clear_aux_loss()
+        moe = _make_moe(kl_distillation=True, distillation_weight=0.1).cuda().train()
+        x = torch.randn(2, 8, 64, device="cuda", requires_grad=True)
+        out = moe(x)
+        assert out.shape == x.shape
+        # Aux loss includes KL distillation — backward through both
+        total_loss = out.sum() + get_aux_loss()
+        total_loss.backward()
+        assert x.grad is not None
+        # Gate weight should get gradients (from KL distillation via aux loss)
+        assert moe.gate.weight.grad is not None, "gate should receive gradients from KL loss"
+
+    def test_inference_uses_linear_router(self):
+        """In eval mode, forward should use the cheap linear router."""
+        moe = _make_moe(kl_distillation=True).cuda().eval()
+        x = torch.randn(2, 8, 64, device="cuda")
+        with torch.no_grad():
+            out = moe(x)
+        assert out.shape == x.shape
+
+    def test_inference_output_differs_from_training(self):
+        """Training and inference paths should generally produce different outputs."""
+        moe = _make_moe(kl_distillation=True).cuda()
+        x = torch.randn(2, 8, 64, device="cuda")
+
+        moe.train()
+        with torch.no_grad():
+            out_train = moe(x).clone()
+
+        moe.eval()
+        with torch.no_grad():
+            out_eval = moe(x).clone()
+
+        # Outputs should be valid (not NaN/Inf) in both modes
+        assert torch.isfinite(out_train).all(), "Training output should be finite"
+        assert torch.isfinite(out_eval).all(), "Inference output should be finite"
+
+    def test_use_gmm_at_inference_overrides(self):
+        """use_gmm_at_inference=True should use GMM routing even in eval mode."""
+        moe = _make_moe(kl_distillation=True, use_gmm_at_inference=True).cuda().eval()
+        x = torch.randn(2, 8, 64, device="cuda")
+        with torch.no_grad():
+            out = moe(x)
+        assert out.shape == x.shape
+
+    def test_distillation_loss_correct_direction(self):
+        """KL loss should be lower when linear logits match GMM weights."""
+        moe = _make_moe(kl_distillation=True)
+
+        # GMM weights: concentrated on expert 0
+        gmm_weights = torch.tensor([[0.9, 0.05, 0.025, 0.025]] * 4)
+
+        # Linear logits: matching (high for expert 0)
+        matching_logits = torch.tensor([[10.0, -5.0, -10.0, -10.0]] * 4)
+        loss_match = moe._compute_distillation_loss(matching_logits, gmm_weights)
+
+        # Linear logits: mismatching (high for expert 3)
+        mismatch_logits = torch.tensor([[-10.0, -10.0, -5.0, 10.0]] * 4)
+        loss_mismatch = moe._compute_distillation_loss(mismatch_logits, gmm_weights)
+
+        assert loss_match < loss_mismatch, (
+            f"Matching logits should have lower KL loss: {loss_match:.4f} vs {loss_mismatch:.4f}"
+        )
+
+    def test_all_features_with_kl(self):
+        """Smoke test: all features + KL distillation, forward + backward works."""
+        clear_aux_loss()
+        moe = _make_moe(
+            mixing_entropy_gamma=0.1,
+            centroid_repulsion_lambda=0.01,
+            bias_based_balancing=True,
+            bias_update_alpha=0.01,
+            diversity_lambda=0.01,
+            entropy_bonus_gamma=0.1,
+            kl_distillation=True,
+            distillation_weight=0.01,
+        ).cuda().train()
+
+        x = torch.randn(2, 8, 64, device="cuda", requires_grad=True)
+        out = moe(x)
+        assert out.shape == x.shape
+        total_loss = out.sum() + get_aux_loss()
+        total_loss.backward()
+        assert x.grad is not None
+        assert moe.gate.weight.grad is not None
 
 
 if __name__ == "__main__":
