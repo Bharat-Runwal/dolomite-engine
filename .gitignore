@@ -11,6 +11,7 @@ uv.lock
 .DS_Store
 scripts/blue-vela
 
-# Local data and checkpoints
+# Local data, checkpoints, and wandb
 data/
 checkpoints/
+wandb/
