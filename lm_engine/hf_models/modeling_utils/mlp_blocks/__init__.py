@@ -5,7 +5,7 @@
 from ...config import CommonConfig
 from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp, Energy_MLP
 from .moe import MoE, ParameterizedExperts
-from .moe_energy import MoE_Energy, MoE_Energy_Module, MoE_Energy_F5, GaussianBoltzmannMoE
+from .moe_energy import MoE_Energy, MoE_Energy_Module, MoE_Energy_F5, GaussianBoltzmannMoE, LRDiagonalGaussBoltzmannMoE
 
 
 
@@ -81,6 +81,22 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
         )
     elif mlp_type == "GaussianBoltzmannMoE":
         mlp = GaussianBoltzmannMoE(
+            **kwargs,
+            num_experts=block.num_experts,
+            num_experts_per_tok=block.num_experts_per_tok,
+            normalized_topk=block.normalized_topk,
+            use_padding_free_transformer=use_padding_free_transformer,
+            use_det_normalization=block.use_det_normalization,
+            use_mixing_coefficients=block.use_mixing_coefficients,
+            diversity_lambda=block.diversity_lambda,
+            entropy_bonus_gamma=block.entropy_bonus_gamma,
+            mixing_entropy_gamma=block.mixing_entropy_gamma,
+            centroid_repulsion_lambda=block.centroid_repulsion_lambda,
+            bias_based_balancing=block.bias_based_balancing,
+            bias_update_alpha=block.bias_update_alpha,
+        )
+    elif mlp_type == "LRDiagonalGaussBoltzmannMoE":
+        mlp = LRDiagonalGaussBoltzmannMoE(
             **kwargs,
             num_experts=block.num_experts,
             num_experts_per_tok=block.num_experts_per_tok,
