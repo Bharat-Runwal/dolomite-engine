@@ -476,7 +476,7 @@ class BaseModelMixin(PreTrainedModelMixin):
             self.wpe = ParameterizedEmbedding(max_position_embeddings, self.embed_dim, std=self.initializer_range)
 
         if any_layer_uses_rope:
-            if self.config.rope_scaling is None:
+            if self.config.rope_scaling is None or "factor" not in self.config.rope_scaling:
                 self.rope = RoPE(
                     self.rope_dim,
                     max_position_embeddings=max_position_embeddings,

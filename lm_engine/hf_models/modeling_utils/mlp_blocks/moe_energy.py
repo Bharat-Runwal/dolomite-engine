@@ -1312,8 +1312,8 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         WtW = WtW + 1e-6 * torch.eye(
             self.hidden_size, device=WtW.device
         ).unsqueeze(0)
-        _sign, logabsdet = torch.linalg.slogdet(WtW)
-        return (0.5 * logabsdet).to(self.expert_W.dtype)
+        _sign, logabsdet = torch.linalg.slogdet(WtW.float())
+        return (0.5 * logabsdet).type_as(self.expert_W)
 
     def _compute_routing_logits(self, energies: torch.Tensor) -> torch.Tensor:
         """ℓ_e = log(π_e) + ½ log det(W_e^T W_e) - E_e(h) [+ b_e]."""
@@ -1341,6 +1341,12 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         W_flat = self.expert_W.flatten(1)  # (E, m*d)
         W_norm = F.normalize(W_flat, dim=1)
         cos_sim = W_norm @ W_norm.T
+        mask = ~torch.eye(self.num_experts, device=cos_sim.device, dtype=torch.bool)
+        return (cos_sim[mask] ** 2).mean()
+
+    def _compute_centroid_diversity_loss(self):
+        c_norm = F.normalize(self.centroids, dim=1)  # (E, d)
+        cos_sim = c_norm @ c_norm.T
         mask = ~torch.eye(self.num_experts, device=cos_sim.device, dtype=torch.bool)
         return (cos_sim[mask] ** 2).mean()
 
@@ -1489,7 +1495,7 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
                 expert_frequency=expert_frequency,
             )
             if self.diversity_lambda > 0:
-                aux_loss = aux_loss + self.diversity_lambda * self._compute_diversity_loss()
+                aux_loss = aux_loss + self.diversity_lambda * (self._compute_diversity_loss() + self._compute_centroid_diversity_loss)
             if self.entropy_bonus_gamma > 0:
                 aux_loss = aux_loss + self.entropy_bonus_gamma * self._compute_entropy_bonus(logits)
             if self.mixing_entropy_gamma > 0 and self.use_mixing_coefficients:
