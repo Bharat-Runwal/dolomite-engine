@@ -42,7 +42,7 @@ model_args:
     num_post_layers: 1
     num_iterations: 6
 
-    router_aux_loss_coef: 0.001
+    router_aux_loss_coef: 0.1 #0.001
 
     bos_token_id: 100257
     eos_token_id: 100257
@@ -72,16 +72,20 @@ model_args:
         add_bias: false
         intermediate_size: 512
         mlp_type: MLP
-      - mlp_type: GaussianBoltzmannMoE
-        intermediate_size: 1024
+      - mlp_type: LRDiagonalGaussBoltzmannMoE
+        intermediate_size: 64
         add_bias: false
         num_experts: 32
-        num_experts_per_tok: 2
+        num_experts_per_tok: 4
         normalized_topk: true
         use_det_normalization: true
         use_mixing_coefficients: true
-        diversity_lambda: 0.0
-        entropy_bonus_gamma: 0.0
+        diversity_lambda: 0.01
+        entropy_bonus_gamma: 0.01
+        mixing_entropy_gamma: 0.01
+        centroid_repulsion_lambda: 0.01
+        bias_based_balancing: true
+        bias_update_alpha: 0.001
       - activation_function: swiglu
         add_bias: false
         intermediate_size: 512
@@ -99,7 +103,7 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: dolomite
-    name: E9F_GaussianBoltz_32x1024_slim_6iter_dl0.0
+    name: E9F_LRDiagonalGaussBoltzmannMoE_32x64_4_slim_6iter_warm
 
 training_parameters:
   num_training_steps: 30000

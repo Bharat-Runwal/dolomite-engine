@@ -1344,7 +1344,7 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         mask = ~torch.eye(self.num_experts, device=cos_sim.device, dtype=torch.bool)
         return (cos_sim[mask] ** 2).mean()
 
-    def _compute_centroid_diversity_loss(self):
+    def _compute_centroid_diversity_loss(self) -> torch.Tensor:
         c_norm = F.normalize(self.centroids, dim=1)  # (E, d)
         cos_sim = c_norm @ c_norm.T
         mask = ~torch.eye(self.num_experts, device=cos_sim.device, dtype=torch.bool)
@@ -1495,7 +1495,8 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
                 expert_frequency=expert_frequency,
             )
             if self.diversity_lambda > 0:
-                aux_loss = aux_loss + self.diversity_lambda * (self._compute_diversity_loss() + self._compute_centroid_diversity_loss)
+                aux_loss = aux_loss + self.diversity_lambda * self._compute_diversity_loss()
+                aux_loss = aux_loss + self.diversity_lambda * self._compute_centroid_diversity_loss()
             if self.entropy_bonus_gamma > 0:
                 aux_loss = aux_loss + self.entropy_bonus_gamma * self._compute_entropy_bonus(logits)
             if self.mixing_entropy_gamma > 0 and self.use_mixing_coefficients:
@@ -1547,6 +1548,415 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
         """GMM free energy: F(h) = -logsumexp_e(ℓ_e)."""
         h = x.view(-1, self.hidden_size)
         energies, _ = self._compute_energies_and_projections(h)
+        logits = self._compute_routing_logits(energies)
+        free_energy = -torch.logsumexp(logits, dim=-1)
+        if x.dim() == 3:
+            free_energy = free_energy.view(x.shape[0], x.shape[1])
+        return free_energy
+
+    def get_num_active_parameters(self) -> int:
+        num_elements = sum(p.numel() for p in self.parameters())
+        # expert_W: only top_k of num_experts active per token
+        expert_w_numel = self.expert_W.numel()
+        num_elements -= expert_w_numel
+        num_elements += (expert_w_numel * self.top_k) // self.num_experts
+        # centroids: only top_k active
+        centroid_numel = self.centroids.numel()
+        num_elements -= centroid_numel
+        num_elements += (centroid_numel * self.top_k) // self.num_experts
+        return num_elements
+
+
+
+
+
+# ==============================================================================
+# Low-Rank Diagonal Gaussian Boltzmann MoE (v3 — full anti-collapse)
+# ==============================================================================
+# Changes from original:
+#   1. σ² initialized to 1e-3 (was 1.0) — isotropic term doesn't dominate
+#   2. Centroids scaled to match hidden state distribution (was unit sphere)
+#   3. Adaptive routing noise scaled to logit magnitude (was fixed 0.1)
+#   4. Routing warmup: linear blend from uniform → energy routing over N steps
+#   5. routing_noise_std and routing_warmup_steps are configurable
+# ==============================================================================
+
+
+class LRDiagonalGaussBoltzmannMoE(_MoEMetricsMixin, nn.Module):
+    """Mixture-of-Experts with low-rank + diagonal Gaussian energy experts and Boltzmann routing.
+
+    Each expert defines a Gaussian basin of attraction in hidden-state space
+    with precision Λ_e = W_e^T W_e + σ_e² I (low-rank plus isotropic):
+
+        E_e(h) = ||W_e (h - μ_e)||² + σ_e² ||h - μ_e||²
+
+    Routing logits (proper GMM assignment via Sylvester's determinant theorem):
+        ℓ_e = log(π_e) + ½ [d·log(σ_e²) + log det(I_r + W_e W_e^T / σ_e²)] - E_e(h)
+
+    Expert output (negative energy gradient):
+        f_e(h) = -2 W_e^T W_e (h - μ_e) - 2 σ_e² (h - μ_e)
+
+    Energy compatibility is EXACT:  -∇F(h) = Σ_e w_e(h) · f_e(h)
+    where F(h) = -logsumexp_e(ℓ_e) is the GMM free energy.
+
+    Key advantage over full-rank GaussianBoltzmannMoE:
+        - slogdet computed on (r, r) instead of (d, d) via Sylvester's theorem
+        - Learnable σ_e² prevents expert death (baseline attraction even if W → 0)
+        - Numerically stable: no near-singular matrices, bounded log-det values
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        num_experts: int,
+        num_experts_per_tok: int,
+        normalized_topk: bool,
+        activation_function: str,
+        add_bias: bool,
+        dropout: float,
+        init_method: str,
+        initializer_range: float,
+        m_width: float,
+        num_layers: int,
+        use_padding_free_transformer: bool,
+        # Gaussian-specific
+        use_det_normalization: bool = True,
+        use_mixing_coefficients: bool = True,
+        diversity_lambda: float = 0.01,
+        entropy_bonus_gamma: float = 0.0,
+        mixing_entropy_gamma: float = 0.0,
+        centroid_repulsion_lambda: float = 0.0,
+        bias_based_balancing: bool = False,
+        bias_update_alpha: float = 0.001,
+        routing_noise_std: float = 0.1,
+        routing_warmup_steps: int = 5,
+    ):
+        super().__init__()
+
+        self.num_experts = num_experts
+        self.top_k = num_experts_per_tok
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size  # rank r, typically r << d
+        self.normalized_topk = normalized_topk
+        self.use_padding_free_transformer = use_padding_free_transformer
+        self.use_det_normalization = use_det_normalization
+        self.use_mixing_coefficients = use_mixing_coefficients
+        self.diversity_lambda = diversity_lambda
+        self.entropy_bonus_gamma = entropy_bonus_gamma
+        self.mixing_entropy_gamma = mixing_entropy_gamma
+        self.centroid_repulsion_lambda = centroid_repulsion_lambda
+        self.bias_based_balancing = bias_based_balancing
+        self.bias_update_alpha = bias_update_alpha
+        self.routing_noise_std = routing_noise_std
+        self.routing_warmup_steps = routing_warmup_steps
+
+        std = _get_std_for_linear(initializer_range, init_method, m_width)
+
+        # Per-expert low-rank precision factor W_e: (E, r, d) where r << d
+        self.expert_W = nn.Parameter(
+            torch.randn(num_experts, intermediate_size, hidden_size) * std
+        )
+
+        # Per-expert isotropic variance σ_e² (log-parameterized for positivity).
+        # Initialize σ² = 1e-3 so isotropic energy is small at step 0.
+        # With σ²=1.0 and d=1024, isotropic energy ≈ 1024 which drowns the
+        # low-rank term (~1-10) and makes routing purely centroid-distance.
+        self.log_sigma_sq = nn.Parameter(
+            torch.full((num_experts,), math.log(1e-3))
+        )
+        mark_parameter_as_no_weight_decay(self.log_sigma_sq)
+
+        # Per-expert centroid μ_e: (E, d).
+        # Scale centroids to match hidden state norm. After RMSNorm, ||h|| ≈ √d.
+        # Unit sphere centroids (norm=1) are ~31 units from every token when d=1024,
+        # creating huge nearly-identical energies across all experts.
+        centroids = torch.randn(num_experts, hidden_size)
+        centroids = F.normalize(centroids, dim=1) * (std * math.sqrt(hidden_size))
+        self.centroids = nn.Parameter(centroids)
+
+        # GMM mixing logits: π_e = softmax(α_e)
+        if use_mixing_coefficients:
+            self.mixing_logits = nn.Parameter(torch.zeros(num_experts))
+            mark_parameter_as_no_weight_decay(self.mixing_logits)
+
+        self.dropout = Dropout(dropout)
+
+        # DeepSeek-V3 bias-based balancing: non-learned per-expert bias
+        if bias_based_balancing:
+            self.register_buffer("expert_bias", torch.zeros(num_experts))
+
+        # Step counter for routing warmup (persists across checkpoints)
+        self.register_buffer("_step_counter", torch.tensor(0, dtype=torch.long))
+
+        self.is_hopper_or_newer_gpu = (
+            torch.cuda.is_available()
+            and torch.cuda.get_device_capability(torch.cuda.current_device()) >= (9, 0)
+        )
+
+    # ------------------------------------------------------------------
+    # Core computations
+    # ------------------------------------------------------------------
+
+    def _get_sigma_sq(self) -> torch.Tensor:
+        """Per-expert σ_e², shape (E,). Always positive via exp."""
+        return torch.exp(self.log_sigma_sq)
+
+    def _compute_energies_and_projections(
+        self, h: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """E_e(h) = ||W_e(h - μ_e)||² + σ_e² ||h - μ_e||² and projections.
+
+        Args:
+            h: (N, d)
+        Returns:
+            energies:  (N, E)
+            projected: (N, E, r)  — W_e(h - μ_e), reused for expert outputs
+            diff:      (N, E, d)  — (h - μ_e), reused for expert outputs
+        """
+        diff = h.unsqueeze(1) - self.centroids.unsqueeze(0)            # (N, E, d)
+        projected = torch.einsum("ned,emd->nem", diff, self.expert_W)  # (N, E, r)
+        sigma_sq = self._get_sigma_sq()                                # (E,)
+
+        low_rank_energy = (projected * projected).sum(dim=-1)                      # (N, E)
+        isotropic_energy = sigma_sq.unsqueeze(0) * (diff * diff).sum(dim=-1)       # (N, E)
+        energies = low_rank_energy + isotropic_energy                              # (N, E)
+
+        return energies, projected, diff
+
+    def _compute_expert_outputs(
+        self, projected: torch.Tensor, diff: torch.Tensor
+    ) -> torch.Tensor:
+        """f_e(h) = -2 W_e^T W_e (h - μ_e) - 2 σ_e² (h - μ_e).
+
+        Args:
+            projected: (N, E, r)
+            diff:      (N, E, d)
+        Returns:
+            outputs: (N, E, d)
+        """
+        sigma_sq = self._get_sigma_sq()                                                    # (E,)
+        low_rank_term = -2.0 * torch.einsum("nem,emd->ned", projected, self.expert_W)      # (N, E, d)
+        isotropic_term = -2.0 * sigma_sq.unsqueeze(0).unsqueeze(-1) * diff                 # (N, E, d)
+        return low_rank_term + isotropic_term
+
+    def _compute_log_det_half(self) -> torch.Tensor:
+        """½ log det(σ_e² I + W_e^T W_e) for each expert via Sylvester's theorem.
+
+        Sylvester: det(σ²I_d + W^T W) = σ^{2d} · det(I_r + W W^T / σ²)
+
+        So: log det = d·log(σ²) + log det(I_r + W W^T / σ²)
+
+        slogdet is on (r, r), not (d, d). Stable and fast.
+        Returns (E,).
+        """
+        sigma_sq = self._get_sigma_sq()  # (E,)
+
+        # W W^T: (E, r, r) — small matrix!
+        WWt = torch.bmm(
+            self.expert_W,                   # (E, r, d)
+            self.expert_W.transpose(1, 2),   # (E, d, r)
+        )  # (E, r, r)
+
+        # I_r + W W^T / σ²
+        eye_r = torch.eye(
+            self.intermediate_size, device=WWt.device, dtype=WWt.dtype
+        ).unsqueeze(0)
+        M = eye_r + WWt / sigma_sq.unsqueeze(-1).unsqueeze(-1)  # (E, r, r)
+
+        _sign, logabsdet = torch.linalg.slogdet(M.float())  # slogdet on (r, r)
+
+        # ½ [d·log(σ²) + log det(I_r + W W^T / σ²)]
+        log_det = self.hidden_size * torch.log(sigma_sq.float()) + logabsdet
+        return 0.5 * log_det
+
+    def _compute_routing_logits(self, energies: torch.Tensor) -> torch.Tensor:
+        """ℓ_e = log(π_e) + ½ log det(σ_e² I + W_e^T W_e) - E_e(h) [+ b_e + noise]."""
+        logits = -energies  # (N, E)
+
+        if self.use_mixing_coefficients:
+            log_pi = torch.log_softmax(self.mixing_logits, dim=0)
+            logits = logits + log_pi.unsqueeze(0)
+
+        if self.use_det_normalization:
+            log_det_half = self._compute_log_det_half()
+            logits = logits + log_det_half.unsqueeze(0)
+
+        if self.bias_based_balancing:
+            logits = logits + self.expert_bias.unsqueeze(0)
+
+        # Adaptive noise: scale relative to logit magnitude so noise is
+        # always meaningful regardless of logit scale.
+        if self.training and self.routing_noise_std > 0:
+            noise_scale = logits.detach().std() * self.routing_noise_std + 1e-6
+            logits = logits + torch.randn_like(logits) * noise_scale
+
+        return logits
+
+    # ------------------------------------------------------------------
+    # Auxiliary losses
+    # ------------------------------------------------------------------
+
+    def _compute_diversity_loss(self) -> torch.Tensor:
+        """Cosine similarity penalty: mean_{i!=j} cos²(W_i, W_j)."""
+        W_flat = self.expert_W.flatten(1)  # (E, r*d)
+        W_norm = F.normalize(W_flat, dim=1)
+        cos_sim = W_norm @ W_norm.T
+        mask = ~torch.eye(self.num_experts, device=cos_sim.device, dtype=torch.bool)
+        return (cos_sim[mask] ** 2).mean()
+
+    def _compute_centroid_diversity_loss(self) -> torch.Tensor:
+        """Cosine similarity penalty on centroids: mean_{i!=j} cos²(μ_i, μ_j)."""
+        c_norm = F.normalize(self.centroids, dim=1)  # (E, d)
+        cos_sim = c_norm @ c_norm.T
+        mask = ~torch.eye(self.num_experts, device=cos_sim.device, dtype=torch.bool)
+        return (cos_sim[mask] ** 2).mean()
+
+    def _compute_entropy_bonus(self, logits: torch.Tensor) -> torch.Tensor:
+        """Per-token routing entropy bonus (negative = maximize entropy)."""
+        weights = F.softmax(logits.float(), dim=-1)
+        H = -(weights * torch.log(weights + 1e-10)).sum(dim=-1)
+        return -H.mean()
+
+    def _compute_mixing_entropy_loss(self) -> torch.Tensor:
+        """Entropy penalty on π_e mixing coefficients (negative = maximize entropy)."""
+        pi = F.softmax(self.mixing_logits.float(), dim=0)
+        H = -(pi * torch.log(pi + 1e-10)).sum()
+        return -H
+
+    def _compute_centroid_repulsion_loss(self) -> torch.Tensor:
+        """Pairwise repulsion: -mean_{i!=j} ||μ_i - μ_j||²."""
+        # (E, E) pairwise squared distances
+        diff = self.centroids.unsqueeze(0) - self.centroids.unsqueeze(1)  # (E, E, d)
+        sq_dist = (diff * diff).sum(dim=-1)  # (E, E)
+        mask = ~torch.eye(self.num_experts, device=sq_dist.device, dtype=torch.bool)
+        return -sq_dist[mask].mean()
+
+    def _compute_switch_loss(
+        self, logits: torch.Tensor, probs: torch.Tensor, expert_frequency: torch.Tensor
+    ) -> torch.Tensor:
+        logits = logits.view(-1, logits.size(-1))
+        probs = probs.view(-1, probs.size(-1))
+        num_experts = logits.size(1)
+        acc_probs = probs.sum(0)
+        expert_frequency = expert_frequency.float()
+
+        if ProcessGroupManager.is_initialized() and ProcessGroupManager.get_data_parallel_world_size() > 1:
+            expert_frequency = all_reduce(
+                expert_frequency, reduceOp="sum", group=ProcessGroupManager.get_data_parallel_group()
+            )
+
+        switch_loss = (
+            num_experts * (F.normalize(acc_probs, p=1, dim=0) * F.normalize(expert_frequency, p=1, dim=0)).sum()
+        )
+        z_loss = (torch.logsumexp(logits, dim=-1) ** 2).mean()
+        return (switch_loss + 0.1 * z_loss).type_as(logits)
+
+    def _get_topk(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.top_k == 1:
+            x, indices = x.max(dim=-1, keepdim=True)
+        else:
+            x, indices = x.topk(self.top_k, dim=-1)
+        return x, indices
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self.use_padding_free_transformer:
+            batch_size, sequence_length, _ = hidden_states.shape
+
+        h = hidden_states.view(-1, self.hidden_size)
+
+        # Energies and projections (reused for outputs — no wasted compute)
+        energies, projected, diff = self._compute_energies_and_projections(h)
+        all_outputs = self._compute_expert_outputs(projected, diff)  # (N, E, d)
+
+        # GMM routing logits
+        logits = self._compute_routing_logits(energies)  # (N, E)
+
+        # Routing warmup: blend energy logits with uniform during early training.
+        # This ensures all experts receive tokens and LM loss gradients equally
+        # before energy-based routing takes over. Without this, random init
+        # differences in the first few steps permanently determine winners.
+        if self.training:
+            self._step_counter += 1
+            if self._step_counter < self.routing_warmup_steps:
+                alpha = self._step_counter.float() / self.routing_warmup_steps
+                uniform = torch.zeros_like(logits)  # equal logits → uniform routing
+                logits = alpha * logits + (1.0 - alpha) * uniform
+
+        # Top-k sparsification
+        topk_logits, topk_indices = self._get_topk(logits)
+        if self.normalized_topk:
+            topk_weights = F.softmax(topk_logits.float(), dim=-1).type_as(h)
+        else:
+            full_weights = F.softmax(logits.float(), dim=-1).type_as(h)
+            topk_weights = full_weights.gather(1, topk_indices)
+
+        # Aggregate selected expert outputs
+        idx_exp = topk_indices.unsqueeze(-1).expand(-1, -1, self.hidden_size)
+        selected = all_outputs.gather(1, idx_exp)
+        hidden_states = (topk_weights.unsqueeze(-1) * selected).sum(dim=1)
+
+        # Expert frequency for metrics and aux loss
+        with torch.no_grad():
+            sorted_expert_idxs = topk_indices.flatten().sort()[0]
+            expert_frequency = compute_bincount(
+                x=sorted_expert_idxs,
+                size=self.num_experts,
+                use_continuous_count=(
+                    self.is_hopper_or_newer_gpu and is_kernel_allowed(Kernel.continuous_count)
+                ),
+            )
+
+        # DeepSeek-V3 bias update: nudge expert_bias toward uniform load
+        if self.training and self.bias_based_balancing:
+            with torch.no_grad():
+                total_tokens = expert_frequency.sum()
+                if total_tokens > 0:
+                    fraction = expert_frequency.float() / total_tokens
+                    target = 1.0 / self.num_experts
+                    # overloaded experts -> decrease bias, underloaded -> increase
+                    self.expert_bias -= self.bias_update_alpha * (fraction - target)
+
+        if self.training:
+            self._cache_routing_metrics(expert_frequency, logits)
+
+        if not self.use_padding_free_transformer:
+            hidden_states = hidden_states.reshape(batch_size, sequence_length, self.hidden_size)
+
+        hidden_states = self.dropout(hidden_states)
+
+        # Auxiliary losses
+        if self.training:
+            aux_loss = self._compute_switch_loss(
+                logits=logits,
+                probs=torch.softmax(logits, dim=-1),
+                expert_frequency=expert_frequency,
+            )
+            if self.diversity_lambda > 0:
+                aux_loss = aux_loss + self.diversity_lambda * self._compute_diversity_loss()
+                aux_loss = aux_loss + self.diversity_lambda * self._compute_centroid_diversity_loss()
+            if self.entropy_bonus_gamma > 0:
+                aux_loss = aux_loss + self.entropy_bonus_gamma * self._compute_entropy_bonus(logits)
+            if self.mixing_entropy_gamma > 0 and self.use_mixing_coefficients:
+                aux_loss = aux_loss + self.mixing_entropy_gamma * self._compute_mixing_entropy_loss()
+            if self.centroid_repulsion_lambda > 0:
+                aux_loss = aux_loss + self.centroid_repulsion_lambda * self._compute_centroid_repulsion_loss()
+            add_aux_loss(aux_loss)
+
+        return hidden_states
+
+    # ------------------------------------------------------------------
+    # Energy computation
+    # ------------------------------------------------------------------
+
+    def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
+        """GMM free energy: F(h) = -logsumexp_e(ℓ_e)."""
+        h = x.view(-1, self.hidden_size)
+        energies, _, _ = self._compute_energies_and_projections(h)
         logits = self._compute_routing_logits(energies)
         free_energy = -torch.logsumexp(logits, dim=-1)
         if x.dim() == 3:
