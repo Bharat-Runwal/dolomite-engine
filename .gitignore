@@ -10,3 +10,7 @@ uv.lock
 .venv
 .DS_Store
 scripts/blue-vela
+
+# Local data and checkpoints
+data/
+checkpoints/

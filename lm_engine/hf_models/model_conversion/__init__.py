@@ -9,18 +9,28 @@ from ...utils import SafeTensorsWeightsManager, download_repo
 from ..models import GPTBaseConfig
 from .granite import _export_granite_config, _import_granite_config
 from .granitemoe import _export_granitemoe_config, _import_granitemoe_config
-from .granitemoehybrid import (
-    _export_granitemoehybrid_config,
-    _export_granitemoehybrid_state_dict,
-    _import_granitemoehybrid_config,
-    _import_granitemoehybrid_state_dict,
-)
-from .granitemoeshared import (
-    _export_granitemoeshared_config,
-    _export_granitemoeshared_state_dict,
-    _import_granitemoeshared_config,
-    _import_granitemoeshared_state_dict,
-)
+try:
+    from .granitemoehybrid import (
+        _export_granitemoehybrid_config,
+        _export_granitemoehybrid_state_dict,
+        _import_granitemoehybrid_config,
+        _import_granitemoehybrid_state_dict,
+    )
+    _HAS_GRANITEMOEHYBRID = True
+except ImportError:
+    _HAS_GRANITEMOEHYBRID = False
+
+try:
+    from .granitemoeshared import (
+        _export_granitemoeshared_config,
+        _export_granitemoeshared_state_dict,
+        _import_granitemoeshared_config,
+        _import_granitemoeshared_state_dict,
+    )
+    _HAS_GRANITEMOESHARED = True
+except ImportError:
+    _HAS_GRANITEMOESHARED = False
+
 from .llama import _export_llama_config, _export_llama_state_dict, _import_llama_config, _import_llama_state_dict
 from .qwen2_moe import (
     _export_qwen2_moe_config,
@@ -32,12 +42,14 @@ from .qwen2_moe import (
 
 _MODEL_IMPORT_FUNCTIONS = {
     "granite": (_import_granite_config, _import_llama_state_dict),
-    "granitemoe": (_import_granitemoe_config, _import_granitemoeshared_state_dict),
-    "granitemoeshared": (_import_granitemoeshared_config, _import_granitemoeshared_state_dict),
-    "granitemoehybrid": (_import_granitemoehybrid_config, _import_granitemoehybrid_state_dict),
+    "granitemoe": (_import_granitemoe_config, _import_granitemoeshared_state_dict if _HAS_GRANITEMOESHARED else None),
     "llama": (_import_llama_config, _import_llama_state_dict),
     "qwen2_moe": (_import_qwen2_moe_config, _import_qwen2_moe_state_dict),
 }
+if _HAS_GRANITEMOESHARED:
+    _MODEL_IMPORT_FUNCTIONS["granitemoeshared"] = (_import_granitemoeshared_config, _import_granitemoeshared_state_dict)
+if _HAS_GRANITEMOEHYBRID:
+    _MODEL_IMPORT_FUNCTIONS["granitemoehybrid"] = (_import_granitemoehybrid_config, _import_granitemoehybrid_state_dict)
 
 
 def import_from_huggingface(
@@ -73,12 +85,14 @@ def import_from_huggingface(
 
 _MODEL_EXPORT_FUNCTIONS = {
     "granite": (_export_granite_config, _export_llama_state_dict),
-    "granitemoe": (_export_granitemoe_config, _export_granitemoeshared_state_dict),
-    "granitemoeshared": (_export_granitemoeshared_config, _export_granitemoeshared_state_dict),
-    "granitemoehybrid": (_export_granitemoehybrid_config, _export_granitemoehybrid_state_dict),
+    "granitemoe": (_export_granitemoe_config, _export_granitemoeshared_state_dict if _HAS_GRANITEMOESHARED else None),
     "llama": (_export_llama_config, _export_llama_state_dict),
     "qwen2_moe": (_export_qwen2_moe_config, _export_qwen2_moe_state_dict),
 }
+if _HAS_GRANITEMOESHARED:
+    _MODEL_EXPORT_FUNCTIONS["granitemoeshared"] = (_export_granitemoeshared_config, _export_granitemoeshared_state_dict)
+if _HAS_GRANITEMOEHYBRID:
+    _MODEL_EXPORT_FUNCTIONS["granitemoehybrid"] = (_export_granitemoehybrid_config, _export_granitemoehybrid_state_dict)
 
 
 def export_to_huggingface(
