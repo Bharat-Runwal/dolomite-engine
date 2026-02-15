@@ -49,11 +49,11 @@ bsub \
   -G grp_preemptable \
   -M 2000G \
   -hl \
-  -n 4 \
+  -n 8 \
    -J "bs-energy-nemo-lrd-${LR}" \
   -gpu "num=8/task:mode=exclusive_process" \
-  -oo "${LOG_DIR}/bs-energy-nemo-gmm-lrd-${LR}.out" \
-  -eo "${LOG_DIR}/bs-energy-nemo-gmm-lrd-${LR}.err" \
+  -oo "${LOG_DIR}/bs-energy-nemo-gmm-pr2-${LR}-%J.out" \
+  -eo "${LOG_DIR}/bs-energy-nemo-gmm-pr2-${LR}-%J.err" \
   blaunch bash launch-scripts/pretrain.sh "$PATCHED_CONFIG"
 
 

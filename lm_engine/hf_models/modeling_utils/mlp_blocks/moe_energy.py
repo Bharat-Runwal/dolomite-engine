@@ -1496,7 +1496,7 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
             )
             if self.diversity_lambda > 0:
                 aux_loss = aux_loss + self.diversity_lambda * self._compute_diversity_loss()
-                aux_loss = aux_loss + self.diversity_lambda * self._compute_centroid_diversity_loss()
+                # aux_loss = aux_loss + self.diversity_lambda * self._compute_centroid_diversity_loss()
             if self.entropy_bonus_gamma > 0:
                 aux_loss = aux_loss + self.entropy_bonus_gamma * self._compute_entropy_bonus(logits)
             if self.mixing_entropy_gamma > 0 and self.use_mixing_coefficients:
