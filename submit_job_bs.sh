@@ -39,7 +39,9 @@ import yaml
 with open('${PATCHED_CONFIG}', 'r') as f:
     cfg = yaml.safe_load(f)
 cfg['optimizer_args']['class_args']['lr'] = float('${LR}')
-cfg['logging_args']['wandb_args']['name'] += '_${LR}'
+wandb_name = cfg['logging_args']['wandb_args']['name'] + '_lr${LR}'
+cfg['logging_args']['wandb_args']['name'] = wandb_name
+cfg['save_args']['save_path'] = '/proj/dmfexp/energy-gpt/checkpoints-bsaha/workshop_nfam/' + wandb_name
 with open('${PATCHED_CONFIG}', 'w') as f:
     yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 "
@@ -49,7 +51,7 @@ bsub \
   -G grp_preemptable \
   -M 2000G \
   -hl \
-  -n 8 \
+  -n 12 \
    -J "bs-energy-nemo-lrd-${LR}" \
   -gpu "num=8/task:mode=exclusive_process" \
   -oo "${LOG_DIR}/bs-energy-nemo-gmm-pr2-${LR}-%J.out" \

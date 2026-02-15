@@ -13,7 +13,7 @@ set -x
 MODEL_PATH=$1
 RESULT_PATH=$MODEL_PATH/results/
 mkdir -p $RESULT_PATH
-export HF_TOKEN=<put your token>
+export HF_TOKEN=<put your Hugging Face token here>
 export PYTHONPATH=./accelerated-model-architectures:.
 GLOBAL_MODEL_PARAMS="dtype=bfloat16,max_length=4096,use_cache=False"
 
