@@ -771,7 +771,8 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
         # Boltzmann inverse temperature (1D tensor for FSDP compatibility)
         _init_log_beta = math.log(1.0 / boltzmann_temperature)
         if learnable_temperature:
-            self.log_beta_r = mark_parameter_as_no_weight_decay(nn.Parameter(torch.tensor([_init_log_beta])))
+            self.log_beta_r = nn.Parameter(torch.tensor([_init_log_beta]))
+            mark_parameter_as_no_weight_decay(self.log_beta_r)
         else:
             self.register_buffer("log_beta_r", torch.tensor([_init_log_beta]))
 
@@ -1277,15 +1278,14 @@ class GaussianBoltzmannMoE(_MoEMetricsMixin, nn.Module):
 
     def _compute_log_det_half(self) -> torch.Tensor:
         """½ log det(W_e^T W_e) for each expert. Returns (E,)."""
-        WtW = torch.bmm(
-            self.expert_W.transpose(1, 2),  # (E, d, m)
-            self.expert_W,                   # (E, m, d)
-        )  # (E, d, d)
+        # slogdet requires float32
+        W = self.expert_W.float()
+        WtW = torch.bmm(W.transpose(1, 2), W)  # (E, d, d)
         WtW = WtW + 1e-6 * torch.eye(
-            self.hidden_size, device=WtW.device, dtype=WtW.dtype
+            self.hidden_size, device=WtW.device
         ).unsqueeze(0)
         _sign, logabsdet = torch.linalg.slogdet(WtW)
-        return 0.5 * logabsdet
+        return (0.5 * logabsdet).to(self.expert_W.dtype)
 
     def _compute_routing_logits(self, energies: torch.Tensor) -> torch.Tensor:
         """ℓ_e = log(π_e) + ½ log det(W_e^T W_e) - E_e(h)."""
