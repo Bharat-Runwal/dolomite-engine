@@ -25,7 +25,7 @@ from .hf_models import disable_generation_cache
 from .kernels import enable_kernels
 from .model_wrapper import broadcast_tensor_parallel_input, get_model_container
 from .optimization import get_learning_rate, get_optimizer_container, get_scheduler_container
-from .train_utils import all_reduce_metrics_tracker, get_model_tflops, track_metrics
+from .train_utils import all_reduce_metrics_tracker, collect_sink_metrics, get_model_tflops, track_metrics
 from .utils import (
     Accelerator,
     Communication,
@@ -437,6 +437,11 @@ def train(
 
             metrics_tracker["billion_tokens_per_day"] = tokens_per_batch * 86400 / step_time / 1e9
             metrics_tracker["step_time (sec)"] = step_time
+
+            # collect attention sink metrics (values + grad norms) if any sink layers exist
+            sink_metrics = collect_sink_metrics(model_container[0])
+            for key, value in sink_metrics.items():
+                metrics_tracker[key] = value
 
             track_metrics(
                 global_step=global_step,

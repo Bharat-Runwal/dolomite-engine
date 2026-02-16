@@ -68,6 +68,62 @@ def track_metrics(
     log_metrics(logging.INFO, message)
 
 
+_PREV_SINK_VALUES: torch.Tensor | None = None
+
+
+@torch.no_grad()
+@torch.compiler.disable
+def collect_sink_metrics(model: torch.nn.Module) -> dict:
+    """Collect metrics from learnable attention sink parameters.
+
+    Iterates over the model to find 'sinks' parameters (from Attention layers with
+    use_attention_sink=True) and returns their value/gradient statistics for logging.
+    Tracks value delta between calls as a proxy for gradient activity (FSDP2 zeros
+    gradients after optimizer.step(), making direct grad snapshots unreliable).
+
+    Args:
+        model: the model (possibly FSDP-wrapped)
+
+    Returns:
+        dict with sink metrics, empty if no sink parameters found
+    """
+    global _PREV_SINK_VALUES
+
+    sink_values = []
+
+    for name, param in model.named_parameters():
+        if not name.endswith(".sinks"):
+            continue
+
+        # FSDP2 wraps params as DTensors; convert to regular tensors for metric ops
+        data = param.data.detach()
+        if hasattr(data, "full_tensor"):
+            data = data.full_tensor()
+
+        sink_values.append(data)
+
+    if not sink_values:
+        return {}
+
+    all_values = torch.cat(sink_values)
+
+    metrics = {
+        "sink/mean_value": all_values.mean(),
+        "sink/min_value": all_values.min(),
+        "sink/max_value": all_values.max(),
+    }
+
+    # value delta: how much sinks moved since last logging call
+    if _PREV_SINK_VALUES is not None and _PREV_SINK_VALUES.shape == all_values.shape:
+        delta = (all_values - _PREV_SINK_VALUES).abs()
+        metrics["sink/mean_delta"] = delta.mean()
+        metrics["sink/max_delta"] = delta.max()
+
+    _PREV_SINK_VALUES = all_values.clone()
+
+    return metrics
+
+
 def _get_linear_flops(m: int, k: int, n: int, gradient_checkpointing: bool = False) -> int:
     forward_flops = 2 * m * k * n
     backward_flops = 2 * forward_flops

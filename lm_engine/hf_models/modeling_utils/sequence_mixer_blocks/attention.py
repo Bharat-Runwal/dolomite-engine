@@ -26,7 +26,21 @@ if is_torch_xla_available():
     from torch_xla.experimental.custom_kernel import flash_attention as flash_attention_tpu
 
 if is_flex_attention_available():
-    from torch.nn.attention.flex_attention import flex_attention as torch_flex_attention
+    import functools
+
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention as torch_flex_attention
+
+    def _causal_mask(b, h, q_idx, kv_idx):
+        return q_idx >= kv_idx
+
+    @functools.lru_cache
+    def _sliding_window_causal_mask(window_size: int):
+        def mask_fn(b, h, q_idx, kv_idx):
+            causal = q_idx >= kv_idx
+            windowed = q_idx - kv_idx < window_size
+            return causal & windowed
+        mask_fn.__name__ = f"sliding_window_{window_size}"
+        return mask_fn
 
 
 def interleave_query_key_value_tensor_for_attention(
@@ -212,14 +226,26 @@ class Attention(nn.Module):
             assert accelerator == Accelerator.cuda
             assert not self.use_padding_free_transformer, "flex_attention doesn't support padding-free mode"
             assert past_key_values is None, "flex_attention doesn't support KV cache"
-            assert self.sliding_window is None, "flex_attention sliding window not implemented"
 
             # flex_attention expects (B, H, S, D) format - query/key/value are already in this format
+            # build block mask: causal with optional sliding window
+            block_mask = None
+            if self.causal:
+                if self.sliding_window is not None:
+                    mask_fn = _sliding_window_causal_mask(self.sliding_window)
+                else:
+                    mask_fn = _causal_mask
+                block_mask = create_block_mask(
+                    mask_fn, B=None, H=None, Q_LEN=query.shape[2], KV_LEN=key.shape[2],
+                    device=query.device,
+                )
+
             if self.use_attention_sink:
                 hidden_states, lse = torch_flex_attention(
                     query,
                     key,
                     value,
+                    block_mask=block_mask,
                     scale=self.attention_multiplier,
                     enable_gqa=True,
                     return_lse=True,
@@ -229,6 +255,7 @@ class Attention(nn.Module):
                     query,
                     key,
                     value,
+                    block_mask=block_mask,
                     scale=self.attention_multiplier,
                     enable_gqa=True,
                 )
@@ -360,7 +387,7 @@ class Attention(nn.Module):
             sink_scale = torch.sigmoid(lse - self.sinks)  # (total_tokens, H)
             total_tokens = attn_output.shape[0]
             attn_output = attn_output.view(total_tokens, self.num_heads, self.head_dim)
-            attn_output = attn_output * sink_scale.unsqueeze(-1)
+            attn_output = attn_output * sink_scale.unsqueeze(-1).to(attn_output.dtype)
             attn_output = attn_output.view(total_tokens, -1)
         else:
             # lse from FA3: (B, H, S), from flex_attention: (B, H, S)
@@ -370,7 +397,7 @@ class Attention(nn.Module):
             # attn_output: (B, S, H*D)
             B, S, _ = attn_output.shape
             attn_output = attn_output.view(B, S, self.num_heads, self.head_dim)
-            attn_output = attn_output * sink_scale.unsqueeze(-1)
+            attn_output = attn_output * sink_scale.unsqueeze(-1).to(attn_output.dtype)
             attn_output = attn_output.view(B, S, -1)
 
         return attn_output
