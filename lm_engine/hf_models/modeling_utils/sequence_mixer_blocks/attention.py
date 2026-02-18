@@ -30,6 +30,13 @@ if is_flex_attention_available():
 
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention as torch_flex_attention
 
+    # PyTorch >= 2.10 deprecates return_lse in favor of return_aux=AuxRequest(lse=True)
+    try:
+        from torch.nn.attention.flex_attention import AuxRequest
+        _FLEX_ATTN_LSE_KWARGS = {"return_aux": AuxRequest(lse=True)}
+    except ImportError:
+        _FLEX_ATTN_LSE_KWARGS = {"return_lse": True}
+
     def _causal_mask(b, h, q_idx, kv_idx):
         return q_idx >= kv_idx
 
@@ -221,11 +228,12 @@ class Attention(nn.Module):
 
         lse = None  # logsumexp for attention sink
 
-        # flex_attention path (PyTorch native)
-        if use_flex_attention:
+        # flex_attention path (PyTorch native) - training and prefill (query_len > 1)
+        # For single-token generation (query_len == 1), falls to SDPA with manual logsumexp
+        is_single_token_generation = past_key_values is not None and query.shape[2] == 1
+        if use_flex_attention and not is_single_token_generation:
             assert accelerator == Accelerator.cuda
             assert not self.use_padding_free_transformer, "flex_attention doesn't support padding-free mode"
-            assert past_key_values is None, "flex_attention doesn't support KV cache"
 
             # flex_attention expects (B, H, S, D) format - query/key/value are already in this format
             # build block mask: causal with optional sliding window
@@ -241,15 +249,17 @@ class Attention(nn.Module):
                 )
 
             if self.use_attention_sink:
-                hidden_states, lse = torch_flex_attention(
+                hidden_states, aux = torch_flex_attention(
                     query,
                     key,
                     value,
                     block_mask=block_mask,
                     scale=self.attention_multiplier,
                     enable_gqa=True,
-                    return_lse=True,
+                    **_FLEX_ATTN_LSE_KWARGS,
                 )
+                # AuxRequest returns aux.lse, old API returns lse directly
+                lse = aux.lse if hasattr(aux, "lse") else aux
             else:
                 hidden_states = torch_flex_attention(
                     query,
@@ -265,7 +275,9 @@ class Attention(nn.Module):
             hidden_states = hidden_states.transpose(1, 2)
             hidden_states = hidden_states.reshape(batch_size, -1, self.num_heads * self.head_dim)
 
-        elif use_flash_attention_2 or use_flash_attention_3:
+        elif (use_flash_attention_2 or use_flash_attention_3) and not (
+            use_flex_attention and self.use_attention_sink and is_single_token_generation
+        ):
             assert accelerator == Accelerator.cuda
 
             if self.use_padding_free_transformer:
@@ -317,7 +329,36 @@ class Attention(nn.Module):
             hidden_states = wait_for_ACT(hidden_states, wait_in_forward=False, wait_in_backward=True)
             hidden_states = hidden_states.view(*output_shape)
         else:
-            assert self.sliding_window is None
+            # SDPA/TPU path (also handles generation fallback when flex_attention + KV cache)
+
+            # Compute logsumexp manually for sink when SDPA is used (e.g., generation with KV cache)
+            # For generation (query_len=1), this is just one dot product per head -- very cheap
+            if self.use_attention_sink:
+                scale = self.attention_multiplier if self.attention_multiplier is not None else 1.0 / math.sqrt(self.head_dim)
+                # Expand KV heads for GQA: (B, H_KV, S, D) -> (B, H, S, D)
+                key_for_lse = key.repeat_interleave(self.num_heads // self.num_key_value_heads, dim=1) if self.num_heads != self.num_key_value_heads else key
+                scores = torch.matmul(query, key_for_lse.transpose(-2, -1)) * scale  # (B, H, S_q, S_kv)
+                # Apply causal mask for multi-token queries
+                if self.causal and attention_mask is None and scores.shape[2] > 1:
+                    causal_mask = torch.triu(torch.ones(scores.shape[2], scores.shape[3], device=scores.device, dtype=torch.bool), diagonal=1)
+                    scores = scores.masked_fill(causal_mask, float("-inf"))
+                # Apply sliding window mask: mask KV positions outside the window
+                if self.sliding_window is not None:
+                    q_len, kv_len = scores.shape[2], scores.shape[3]
+                    # For generation (q_len=1): q_pos is the last position in the sequence
+                    q_pos = torch.arange(kv_len - q_len, kv_len, device=scores.device).view(1, 1, q_len, 1)
+                    kv_pos = torch.arange(kv_len, device=scores.device).view(1, 1, 1, kv_len)
+                    sw_mask = (q_pos - kv_pos) >= self.sliding_window
+                    scores = scores.masked_fill(sw_mask, float("-inf"))
+                if attention_mask is not None:
+                    if attention_mask.dim() == 2:
+                        # 2D (B, S_kv) -> 4D (B, 1, 1, S_kv) with 0/-inf
+                        mask_4d = (1.0 - attention_mask[:, None, None, :].to(scores.dtype)) * torch.finfo(scores.dtype).min
+                        scores = scores + mask_4d
+                    else:
+                        scores = scores + attention_mask
+                lse = scores.logsumexp(dim=-1)  # (B, H, S_q)
+                del key_for_lse, scores
 
             if accelerator == Accelerator.tpu:
                 assert attention_mask is None
@@ -335,11 +376,31 @@ class Attention(nn.Module):
                     ),
                 )
             else:
+                # Convert attention_mask to 4D float format for SDPA
+                sdpa_mask = attention_mask
+                if sdpa_mask is not None and sdpa_mask.dim() == 2:
+                    # 2D padding mask (B, S_kv) with 1=attend, 0=mask
+                    # -> 4D (B, 1, 1, S_kv) with 0=attend, -inf=mask
+                    sdpa_mask = (1.0 - sdpa_mask[:, None, None, :].to(query.dtype)) * torch.finfo(query.dtype).min
+                elif sdpa_mask is not None and sdpa_mask.dtype not in (torch.bool, torch.float16, torch.bfloat16, torch.float32):
+                    sdpa_mask = sdpa_mask.to(query.dtype)
+
+                # Apply sliding window for SDPA (which doesn't support it natively)
+                if self.sliding_window is not None:
+                    q_len, kv_len = query.shape[2], key.shape[2]
+                    q_pos = torch.arange(kv_len - q_len, kv_len, device=query.device).view(1, 1, q_len, 1)
+                    kv_pos = torch.arange(kv_len, device=query.device).view(1, 1, 1, kv_len)
+                    sw_mask = (q_pos - kv_pos) >= self.sliding_window
+                    if sdpa_mask is None:
+                        sdpa_mask = torch.where(sw_mask, torch.finfo(query.dtype).min, torch.zeros((), device=query.device, dtype=query.dtype))
+                    else:
+                        sdpa_mask = sdpa_mask.masked_fill(sw_mask, torch.finfo(query.dtype).min)
+
                 hidden_states = F.scaled_dot_product_attention(
                     query,
                     key,
                     value,
-                    attn_mask=attention_mask,
+                    attn_mask=sdpa_mask,
                     dropout_p=self.softmax_dropout_p if self.training else 0,
                     is_causal=self.causal if attention_mask is None else False,
                     scale=self.attention_multiplier,
