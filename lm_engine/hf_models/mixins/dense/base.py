@@ -39,6 +39,7 @@ class PreTrainedModelMixin(PreTrainedModel):
         self.num_pre_layers = config.num_pre_layers  # 8
         self.num_post_layers = config.num_post_layers  # 8
         self.num_iterations = config.num_iterations  # 1
+        self.layer_iterations = config.layer_iterations
         
         assert self.config_class is not None
         self.generation_config = GenerationConfig.from_model_config(self.config)
@@ -106,11 +107,6 @@ class BaseModelMixin(PreTrainedModelMixin):
 
         self.num_post_layers = config.num_post_layers  # default 8
         self.num_iterations = config.num_iterations  # default 1
-        num_layers = len(self.h)
-        layer_idxs = list(range(num_layers))
-        self.pre_layer_idxs = layer_idxs[: self.num_pre_layers]
-        self.loop_layer_idxs = layer_idxs[self.num_pre_layers : -self.num_post_layers]
-        self.post_layer_idxs = layer_idxs[-self.num_post_layers :]
 
 
 
@@ -205,31 +201,10 @@ class BaseModelMixin(PreTrainedModelMixin):
         else:
             mamba_mask_computed = False
 
-            layer_id=0
-            # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
-
-            for i in self.pre_layer_idxs:
-                hidden_states = self._run_block(
-                    hidden_states,
-                    past_key_values,
-                    attention_mask,
-                    cu_seqlens,
-                    max_seqlen,
-                    causal_mask,
-                    rope_cos_sin,
-                    mamba_mask_computed,
-                    i,
-                    layer_id= layer_id
-                )
-                layer_id += 1
-
-
-            # Perform looped layers
-
+            layer_id = 0
             #TODO: Fix the layer id logic for KV cache and Generation task
-            for i in self.loop_layer_idxs:
-                for j in range(self.num_iterations):
-
+            for i, num_iter in enumerate(self.layer_iterations):
+                for j in range(num_iter):
                     hidden_states = self._run_block(
                         hidden_states,
                         past_key_values,
@@ -243,22 +218,6 @@ class BaseModelMixin(PreTrainedModelMixin):
                         layer_id=layer_id,
                     )
                     layer_id += 1
-
-
-            for i in self.post_layer_idxs:
-                hidden_states = self._run_block(
-                    hidden_states,
-                    past_key_values,
-                    attention_mask,
-                    cu_seqlens,
-                    max_seqlen,
-                    causal_mask,
-                    rope_cos_sin,
-                    mamba_mask_computed,
-                    i,
-                    layer_id=layer_id,
-                )
-                layer_id += 1
 
 
 
