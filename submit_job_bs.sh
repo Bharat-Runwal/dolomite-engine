@@ -51,7 +51,7 @@ bsub \
   -G grp_preemptable \
   -M 2000G \
   -hl \
-  -n 12 \
+  -n 8 \
    -J "bs-energy-nemo-lrd-${LR}" \
   -gpu "num=8/task:mode=exclusive_process" \
   -oo "${LOG_DIR}/bs-energy-nemo-gmm-pr2-${LR}-%J.out" \

@@ -78,12 +78,12 @@ model_args:
         num_experts: 32
         num_experts_per_tok: 2
         normalized_topk: true
-        use_det_normalization: false         # disabled: log-det explodes and causes collapse
+        use_det_normalization: false        # disabled: log-det explodes and causes collapse
         use_mixing_coefficients: true
-        diversity_lambda: 1                # 100x: W-matrix diversity penalty
-        entropy_bonus_gamma: 10            # 100x: per-token routing entropy bonus
-        mixing_entropy_gamma: 10           # 100x: mixing coefficient entropy bonus
-        centroid_repulsion_lambda: 1       # 100x: centroid repulsion penalty
+        diversity_lambda: 0.1               # 10x: W-matrix diversity penalty
+        entropy_bonus_gamma: 1.0            # 10x: per-token routing entropy bonus
+        mixing_entropy_gamma: 1.0           # 10x: mixing coefficient entropy bonus
+        centroid_repulsion_lambda: 0.1      # 10x: centroid repulsion penalty
         bias_based_balancing: true
         bias_update_alpha: 0.001
       - activation_function: swiglu
@@ -103,7 +103,7 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: dolomite
-    name: E9F_GaussianBoltz_32x1024_6iter_slim_nima_ccs
+    name: E9F_GaussianBoltz_32x1024_6iter_slim_nima_cc8
 
 training_parameters:
   num_training_steps: 30000

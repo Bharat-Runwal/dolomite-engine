@@ -13,7 +13,7 @@ set -x
 MODEL_PATH=$1
 RESULT_PATH=$MODEL_PATH/results/
 mkdir -p $RESULT_PATH
-export HF_TOKEN=<put your Hugging Face token here>
+export HF_TOKEN=<your_huggingface_token_here>
 export PYTHONPATH=./accelerated-model-architectures:.
 GLOBAL_MODEL_PARAMS="dtype=bfloat16,max_length=4096,use_cache=False"
 
@@ -32,3 +32,4 @@ accelerate launch -m lm_eval --batch_size 32 --model hf --model_args $MODEL_ARGS
 # accelerate launch -m lm_eval --batch_size 32 --model hf --model_args $MODEL_ARGS \
 # 	--task mmlu --num_fewshot 5 | tee $RESULT_PATH/mmlu.log
  
+ #/proj/dmfexp/energy-gpt/lm-evaluation-harness/run_eval.py
