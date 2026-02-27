@@ -33,3 +33,5 @@ accelerate launch -m lm_eval --batch_size 32 --model hf --model_args $MODEL_ARGS
 # 	--task mmlu --num_fewshot 5 | tee $RESULT_PATH/mmlu.log
  
  #/proj/dmfexp/energy-gpt/lm-evaluation-harness/run_eval.py
+
+ # /proj/dmfexp/energy-gpt/checkpoints-bsaha/unsharded/E2F_GaussianBoltz_8x1024_6iter_nima_cc_lr3e-4_30k

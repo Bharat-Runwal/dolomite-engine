@@ -3,7 +3,7 @@
 # **************************************************
 
 load_args:
-  load_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/workshop_nfam/E2F_GaussianBoltz_8x1024_6iter_nima_cc_lr3e-4
+  load_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/workshop_nfam/E2_F5_Energy/E2_f5_baseline_8x1024_6iter
   iteration: 30000 
 
 mixed_precision_args:
@@ -12,5 +12,5 @@ mixed_precision_args:
   dtype: bf16
 
 # where to save the HF safetensors checkpoint
-unsharded_path:  /proj/dmfexp/energy-gpt/checkpoints-bsaha/unsharded/E2F_GaussianBoltz_8x1024_6iter_nima_cc_lr3e-4_30k
+unsharded_path:  /proj/dmfexp/energy-gpt/checkpoints-bsaha/unsharded/E2_F5_Energy/E2_f5_baseline_8x1024_6iter_30k
 

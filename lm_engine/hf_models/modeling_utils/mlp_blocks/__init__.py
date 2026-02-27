@@ -5,7 +5,7 @@
 from ...config import CommonConfig
 from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp, Energy_MLP
 from .moe import MoE, ParameterizedExperts
-from .moe_energy import MoE_Energy, MoE_Energy_Module, MoE_Energy_F5, GaussianBoltzmannMoE, LRDiagonalGaussBoltzmannMoE
+from .moe_energy import MoE_Energy, MoE_Energy_Module, MoE_Energy_F5, MoE_Energy_F6, GaussianBoltzmannMoE, LRDiagonalGaussBoltzmannMoE
 
 
 
@@ -67,6 +67,20 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
         )
     elif mlp_type == "MoE_Energy_F5":
         mlp = MoE_Energy_F5(
+            **kwargs,
+            shared_intermediate_size=block.shared_intermediate_size,
+            shared_expert_gating=block.shared_expert_gating,
+            normalized_topk=block.normalized_topk,
+            num_experts=block.num_experts,
+            num_experts_per_tok=block.num_experts_per_tok,
+            use_padding_free_transformer=use_padding_free_transformer,
+            boltzmann_temperature=block.boltzmann_temperature,
+            learnable_temperature=block.learnable_temperature,
+            distillation_weight=block.distillation_weight,
+            use_boltzmann_at_inference=block.use_boltzmann_at_inference,
+        )
+    elif mlp_type == "MoE_Energy_F6":
+        mlp = MoE_Energy_F6(
             **kwargs,
             shared_intermediate_size=block.shared_intermediate_size,
             shared_expert_gating=block.shared_expert_gating,
