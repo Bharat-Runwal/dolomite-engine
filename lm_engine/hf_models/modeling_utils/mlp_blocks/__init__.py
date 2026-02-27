@@ -3,7 +3,7 @@
 # **************************************************
 
 from ...config import CommonConfig
-from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp, Energy_MLP
+from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp, Energy_MLP, Compositional_Energy_MLP
 from .moe import MoE, ParameterizedExperts
 
 
@@ -30,6 +30,14 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
     elif mlp_type == "Energy_MLP":   
         mlp = Energy_MLP(**kwargs)
         
+    elif mlp_type == "Compositional_Energy_MLP":
+        mlp = Compositional_Energy_MLP(
+            **kwargs,
+            num_paths=block.num_paths,
+            path_activations=block.path_activations,
+            layer_idx=layer_idx,
+        )
+
     elif mlp_type == "MoE":
         mlp = MoE(
             **kwargs,
