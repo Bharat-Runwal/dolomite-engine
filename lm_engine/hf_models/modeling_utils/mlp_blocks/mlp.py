@@ -73,7 +73,8 @@ class Energy_MLP(nn.Module):
         # Combine paths: y1 projected back via W2.weight
         out = y1 @ self.W2.weight + y2
 
-        self._log_norms(out)
+        if not torch.compiler.is_compiling():
+            self._log_norms(out)
 
         return out
 
@@ -133,8 +134,10 @@ class Energy_MLP(nn.Module):
 
 
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute energy per token: E(h) = -phi(W1h)^T(W2h)."""
         W1x = self.W1(x)
-        return F.gelu(W1x).sum(dim=-1)
+        W2x = self.W2(x)
+        return -(F.gelu(W1x) * W2x).sum(dim=-1)
 
 
 class Compositional_Energy_MLP(nn.Module):
@@ -234,11 +237,12 @@ class Compositional_Energy_MLP(nn.Module):
             term2 = (phi_prime * W2x_paths[k]) @ W1_weights[k]  # (b, t, hidden_size)
             out = out + self.alphas[k] * (term1 + term2)
 
-        self._log_norms(out)
+        if not torch.compiler.is_compiling():
+            self._log_norms(out)
         return out
 
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute total compositional energy: sum_k alpha_k * phi_k(W1_k h)^T (W2_k h)."""
+        """Compute total compositional energy: E = -sum_k alpha_k * phi_k(W1_k h)^T (W2_k h)."""
         W1x = self.W1(x)
         W2x = self.W2(x)
         W1x_paths = W1x.chunk(self.num_paths, dim=-1)
@@ -247,8 +251,7 @@ class Compositional_Energy_MLP(nn.Module):
         energy = torch.zeros(x.shape[0], x.shape[1], device=x.device, dtype=x.dtype)
         for k in range(self.num_paths):
             phi, _ = self._activation_and_derivative(W1x_paths[k], self.path_activations[k])
-            # E_k = phi_k(W1_k h)^T (W2_k h) summed over intermediate dim
-            energy = energy + self.alphas[k] * (phi * W2x_paths[k]).sum(dim=-1)
+            energy = energy - self.alphas[k] * (phi * W2x_paths[k]).sum(dim=-1)
         return energy
 
     def _log_norms(self, out: torch.Tensor) -> None:

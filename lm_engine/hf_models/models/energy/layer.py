@@ -90,10 +90,10 @@ class EnergyBlock(nn.Module):
             return self.forward_gpt(hidden_states,past_key_values,attention_mask,rope_cos_sin,cu_seqlens,max_seqlen)
 
 
-    def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute total energy per token."""
+    def energy_per_token(self, x: torch.Tensor, rope_cos_sin=None) -> torch.Tensor:
+        """Compute total energy per token: E = E_attn + scale_ff * E_ff."""
         ln_x = self.ln(x)
-        return self.attn.energy_per_token(ln_x) + self.scale_ff * self.ffwd.energy_per_token(ln_x)
+        return self.attn.energy_per_token(ln_x, rope_cos_sin=rope_cos_sin) + self.scale_ff * self.ffwd.energy_per_token(ln_x)
 
 
 
