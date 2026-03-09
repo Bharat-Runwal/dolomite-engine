@@ -113,6 +113,8 @@ class CommonConfig(PretrainedConfig):
         num_post_layers: int = 8,
         num_iterations: int = 1,
         layer_iterations: list[int] | None = None,
+        iter_dropout_range: int = 0,
+        iter_noise_eta: float = 0.0,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -137,6 +139,8 @@ class CommonConfig(PretrainedConfig):
         self.num_pre_layers = num_pre_layers
         self.num_post_layers = num_post_layers
         self.num_iterations = num_iterations
+        self.iter_dropout_range = iter_dropout_range
+        self.iter_noise_eta = iter_noise_eta
 
         if layer_iterations is not None:
             self.layer_iterations = layer_iterations

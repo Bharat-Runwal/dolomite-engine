@@ -110,8 +110,27 @@ class BaseModelMixin(PreTrainedModelMixin):
 
         # Adaptive halting: per-block thresholds on relative hidden state change.
         # None = disabled, dict = {block_idx: threshold} for energy-calibrated halting.
-        # Use calibrate_halting() to automatically set thresholds from energy profiling.
-        self.halt_thresholds = None
+        # Use calibrate_halting() to set automatically, or set via config:
+        #   "halt_thresholds": {"5": 0.127, "6": 0.114, "8": 0.116, "9": 0.097, "10": 0.095}
+        halt_cfg = getattr(config, 'halt_thresholds', None)
+        if halt_cfg and isinstance(halt_cfg, dict):
+            self.halt_thresholds = {int(k): v for k, v in halt_cfg.items()}
+        else:
+            self.halt_thresholds = None
+
+        # Iteration dropout: during training, randomly sample iterations per block
+        # from [max(1, T - iter_dropout_range), T + iter_dropout_range] where T is
+        # the configured iteration count. This teaches the model to produce good
+        # outputs at variable iteration depths, enabling test-time compute scaling.
+        # Set iter_dropout_range=0 (default) to disable.
+        self.iter_dropout_range = getattr(config, 'iter_dropout_range', 0)
+
+        # Langevin noise: during training, add Gaussian noise to the hidden state
+        # after each iteration step: h = h + sqrt(2 * eta) * N(0, 1).
+        # This is inspired by Langevin dynamics in energy-based models and helps
+        # the model explore better energy basins during iterative refinement.
+        # Set iter_noise_eta=0.0 (default) to disable.
+        self.iter_noise_eta = getattr(config, 'iter_noise_eta', 0.0)
 
 
 
@@ -208,13 +227,21 @@ class BaseModelMixin(PreTrainedModelMixin):
 
             layer_id = 0
             for i, num_iter in enumerate(self.layer_iterations):
-                for j in range(num_iter):
+                # Iteration dropout: randomize iteration count during training
+                if self.training and self.iter_dropout_range > 0:
+                    min_iter = max(1, num_iter - self.iter_dropout_range)
+                    max_iter = num_iter + self.iter_dropout_range
+                    effective_iter = torch.randint(min_iter, max_iter + 1, (1,)).item()
+                else:
+                    effective_iter = num_iter
+
+                for j in range(effective_iter):
                     # Adaptive halting: check if hidden state converged for this block
                     if self.halt_thresholds is not None and j > 0 and i in self.halt_thresholds:
                         h_norm = hidden_states.norm(dim=-1).mean()
                         delta_norm = (hidden_states - _prev_h).norm(dim=-1).mean()
                         if (delta_norm / h_norm.clamp(min=1e-6)).item() < self.halt_thresholds[i]:
-                            layer_id += (num_iter - j)
+                            layer_id += (effective_iter - j)
                             break
 
                     _prev_h = hidden_states
@@ -231,6 +258,15 @@ class BaseModelMixin(PreTrainedModelMixin):
                         layer_id=layer_id,
                     )
                     layer_id += 1
+
+                    # Langevin noise: h = h + sqrt(2*eta) * noise
+                    if self.training and self.iter_noise_eta > 0 and j < effective_iter - 1:
+                        noise_scale = (2 * self.iter_noise_eta) ** 0.5
+                        hidden_states = hidden_states + noise_scale * torch.randn_like(hidden_states)
+
+                # Account for skipped iterations in layer_id (for cache alignment)
+                if effective_iter < num_iter:
+                    layer_id += (num_iter - effective_iter)
 
 
 
