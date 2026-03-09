@@ -82,6 +82,7 @@ class EnergyBlock(nn.Module):
                 rope_cos_sin=rope_cos_sin,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
+                layer_id=layer_id,
             )
             ffwd_out = self.ffwd(ln_x)
             hidden_states = hidden_states - self.proj(attn_out + self.scale_ff * ffwd_out)

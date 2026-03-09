@@ -16,6 +16,7 @@ from .rnn import _RNNCache
 
 _CACHE_CLASSES = {
     "causal_convolution": _RNNCache,
+    "energy_attention": _SoftmaxAttentionCache,
     "gru": _RNNCache,
     "mamba2": _Mamba2Cache,
     "multihead_latent_attention": _SoftmaxAttentionCache,
@@ -28,10 +29,16 @@ CACHE_TYPE = torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None
 
 class GenerationCache:
     def __init__(self, config: CommonConfig, **kwargs) -> GenerationCache:
-        self.cache: list[_SoftmaxAttentionCache] = [
-            _CACHE_CLASSES[config.sequence_mixer_blocks[i].sequence_mixer_type](config, i, **kwargs)
-            for i in range(config.num_layers)
-        ]
+        # For iterated energy blocks, each iteration needs its own cache slot.
+        # Total slots = sum(layer_iterations) so that each (block, iteration) pair
+        # gets a unique cache index via the layer_id counter in the forward loop.
+        cache = []
+        for i in range(config.num_layers):
+            mixer_type = config.sequence_mixer_blocks[i].sequence_mixer_type
+            num_iter = config.layer_iterations[i] if hasattr(config, 'layer_iterations') else 1
+            for _ in range(num_iter):
+                cache.append(_CACHE_CLASSES[mixer_type](config, i, **kwargs))
+        self.cache = cache
 
     def __getitem__(self, layer_idx: int) -> CACHE_TYPE:
         return self.cache[layer_idx].get_cache()

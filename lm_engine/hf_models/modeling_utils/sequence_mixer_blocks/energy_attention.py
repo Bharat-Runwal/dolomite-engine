@@ -140,6 +140,7 @@ class EnergyAttention_QK(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        layer_id: int | None = None,
     ) -> torch.Tensor:
         use_flash_attention_2 = is_kernel_allowed(Kernel.flash_attention_2)
         use_flash_attention_3 = is_kernel_allowed(Kernel.flash_attention_3)
@@ -177,8 +178,10 @@ class EnergyAttention_QK(nn.Module):
         value = key  # / (key.norm(dim=-1, keepdim=True) + 1e-6)
 
         if past_key_values is not None:
+            # Use layer_id (iteration-aware index) when available, else fall back to block index
+            cache_idx = layer_id if layer_id is not None else self.layer_idx
             key, value = past_key_values.update(
-                key_states=key, value_states=value, layer_idx=self.layer_idx
+                key_states=key, value_states=value, layer_idx=cache_idx
             )
 
         W_Q = self._get_q_weight_for_output()
