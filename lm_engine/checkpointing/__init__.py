@@ -223,6 +223,12 @@ def load_checkpoint_for_training(
     if args.load_args is None or args.load_args.load_path is None:
         return
 
+    # If no checkpoint exists yet (e.g. first run), skip loading
+    latest_ckpt_path = _get_latest_checkpointed_iterations_path(args.load_args.load_path)
+    if args.load_args.iteration is None and not os.path.exists(latest_ckpt_path):
+        log_rank_0(logging.INFO, f"no checkpoint found at {args.load_args.load_path}, starting from scratch")
+        return 0, {}, None
+
     load_optimizer = args.load_args.load_optimizer
     load_rng_state = args.load_args.load_rng_state
     load_dataloader_state = args.load_args.load_dataloader_state
@@ -231,7 +237,7 @@ def load_checkpoint_for_training(
 
     iteration = args.load_args.iteration
     if iteration is None:
-        iteration = json.load(open(_get_latest_checkpointed_iterations_path(args.load_args.load_path), "r"))[
+        iteration = json.load(open(latest_ckpt_path, "r"))[
             "latest_checkpointed_iteration"
         ]
 

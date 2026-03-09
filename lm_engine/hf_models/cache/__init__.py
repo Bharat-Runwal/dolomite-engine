@@ -16,6 +16,7 @@ from .rnn import _RNNCache
 
 _CACHE_CLASSES = {
     "causal_convolution": _RNNCache,
+    "energy_attention": _SoftmaxAttentionCache,
     "gru": _RNNCache,
     "mamba2": _Mamba2Cache,
     "multihead_latent_attention": _SoftmaxAttentionCache,

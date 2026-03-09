@@ -13,7 +13,7 @@ set -x
 MODEL_PATH=$1
 RESULT_PATH=$MODEL_PATH/results/
 mkdir -p $RESULT_PATH
-export HF_TOKEN=<your_huggingface_token_here>
+export HF_TOKEN=<input_your_hf_token>
 export PYTHONPATH=./accelerated-model-architectures:.
 GLOBAL_MODEL_PARAMS="dtype=bfloat16,max_length=4096,use_cache=False"
 
@@ -35,3 +35,4 @@ accelerate launch -m lm_eval --batch_size 32 --model hf --model_args $MODEL_ARGS
  #/proj/dmfexp/energy-gpt/lm-evaluation-harness/run_eval.py
 
  # /proj/dmfexp/energy-gpt/checkpoints-bsaha/unsharded/E2F_GaussianBoltz_8x1024_6iter_nima_cc_lr3e-4_30k
+ # /proj/dmfexp/energy-gpt/checkpoints-bsaha/unsharded/E2_F5_Energy/E2_f5_baseline_8x1024_6iter_30k

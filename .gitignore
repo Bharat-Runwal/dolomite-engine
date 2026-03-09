@@ -15,3 +15,6 @@ scripts/blue-vela
 data/
 checkpoints/
 wandb/
+
+# Bishwajit's local tools/scripts/data
+tools/bs/

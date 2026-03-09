@@ -122,6 +122,7 @@ class CommonConfig(PretrainedConfig):
         num_pre_layers: int = 8,
         num_post_layers: int = 8,
         num_iterations: int = 1,
+        layer_iterations: list[int] | None = None,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -146,6 +147,7 @@ class CommonConfig(PretrainedConfig):
         self.num_pre_layers = num_pre_layers
         self.num_post_layers = num_post_layers
         self.num_iterations = num_iterations
+        self.layer_iterations = layer_iterations
         
 
         # check if enums are valid

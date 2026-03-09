@@ -49,7 +49,11 @@ class PreTrainedModelMixin(PreTrainedModel):
         self._has_mamba2 = any([block.sequence_mixer_type == "mamba2" for block in self.config.sequence_mixer_blocks])
 
     def _init_weights(self, module: nn.Module) -> None:
-        if hasattr(module, "reset_parameters"):
+        # HF's from_pretrained calls _init_weights AFTER loading the checkpoint
+        # state dict, which would re-randomize already-loaded weights.
+        # Only allow reset_parameters() on modules that have NO learnable
+        # parameters (e.g. RoPE which needs to recompute cos/sin caches).
+        if hasattr(module, "reset_parameters") and not any(True for _ in module.parameters(recurse=False)):
             module.reset_parameters()
 
     # FIXME typing
@@ -104,13 +108,19 @@ class BaseModelMixin(PreTrainedModelMixin):
 
 
 
-        self.num_post_layers = config.num_post_layers  # default 8
-        self.num_iterations = config.num_iterations  # default 1
+        self.num_post_layers = config.num_post_layers
+        self.num_iterations = config.num_iterations
+        self.layer_iterations = config.layer_iterations
+
         num_layers = len(self.h)
+        if self.layer_iterations is not None:
+            assert len(self.layer_iterations) == num_layers, (
+                f"layer_iterations length ({len(self.layer_iterations)}) must match num_layers ({num_layers})"
+            )
         layer_idxs = list(range(num_layers))
         self.pre_layer_idxs = layer_idxs[: self.num_pre_layers]
-        self.loop_layer_idxs = layer_idxs[self.num_pre_layers : -self.num_post_layers]
-        self.post_layer_idxs = layer_idxs[-self.num_post_layers :]
+        self.loop_layer_idxs = layer_idxs[self.num_pre_layers : -self.num_post_layers] if self.num_post_layers > 0 else layer_idxs[self.num_pre_layers :]
+        self.post_layer_idxs = layer_idxs[-self.num_post_layers :] if self.num_post_layers > 0 else []
 
 
 
@@ -179,7 +189,31 @@ class BaseModelMixin(PreTrainedModelMixin):
         # mamba_mask_computed = False
         # mamba_mask = None
 
-        if self.num_iterations==0:
+        if self.layer_iterations is not None:
+            # Per-layer iteration counts: each layer i runs layer_iterations[i] times
+            mamba_mask_computed = False
+            layer_id = 0
+
+            for i in range(len(self.h)):
+                for _j in range(self.layer_iterations[i]):
+                    hidden_states = self._run_block(
+                        hidden_states,
+                        past_key_values,
+                        attention_mask,
+                        cu_seqlens,
+                        max_seqlen,
+                        causal_mask,
+                        rope_cos_sin,
+                        mamba_mask_computed,
+                        i,
+                        layer_id=layer_id,
+                    )
+                    layer_id += 1
+
+            hidden_states = self.ln_f(hidden_states)
+
+            return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
+        elif self.num_iterations==0:
             mamba_mask = None
             mamba_mask_computed = False
 
@@ -206,7 +240,6 @@ class BaseModelMixin(PreTrainedModelMixin):
             mamba_mask_computed = False
 
             layer_id=0
-            # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
 
             for i in self.pre_layer_idxs:
                 hidden_states = self._run_block(
@@ -222,9 +255,6 @@ class BaseModelMixin(PreTrainedModelMixin):
                     layer_id= layer_id
                 )
                 layer_id += 1
-
-
-            # Perform looped layers
 
             #TODO: Fix the layer id logic for KV cache and Generation task
             for i in self.loop_layer_idxs:
@@ -244,7 +274,6 @@ class BaseModelMixin(PreTrainedModelMixin):
                     )
                     layer_id += 1
 
-
             for i in self.post_layer_idxs:
                 hidden_states = self._run_block(
                     hidden_states,
@@ -259,24 +288,6 @@ class BaseModelMixin(PreTrainedModelMixin):
                     layer_id=layer_id,
                 )
                 layer_id += 1
-
-
-
-            # for sequence_mixer_type, block in zip(self.sequence_mixer_block_types, self.h):
-            #     is_linear_layer = sequence_mixer_type in ["mamba2", "rnn", "gru"]
-
-            #     if is_linear_layer and not mamba_mask_computed:
-            #         mamba_mask = self._get_mamba_mask(attention_mask, past_key_values)
-            #         mamba_mask_computed = True
-
-            #     hidden_states = block(
-            #         hidden_states,
-            #         past_key_values=past_key_values,
-            #         attention_mask=mamba_mask if is_linear_layer else causal_mask,
-            #         rope_cos_sin=rope_cos_sin,
-            #         cu_seqlens=cu_seqlens,
-            #         max_seqlen=max_seqlen,
-            #     )
 
             hidden_states = self.ln_f(hidden_states)
 
