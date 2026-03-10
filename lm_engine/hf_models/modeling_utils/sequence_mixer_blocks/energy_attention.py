@@ -140,6 +140,7 @@ class EnergyAttention_QK(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        layer_id: int | None = None,
     ) -> torch.Tensor:
         use_flash_attention_2 = is_kernel_allowed(Kernel.flash_attention_2)
         use_flash_attention_3 = is_kernel_allowed(Kernel.flash_attention_3)
@@ -177,8 +178,10 @@ class EnergyAttention_QK(nn.Module):
         value = key  # / (key.norm(dim=-1, keepdim=True) + 1e-6)
 
         if past_key_values is not None:
+            # Use layer_id (iteration-aware index) when available, else fall back to block index
+            cache_idx = layer_id if layer_id is not None else self.layer_idx
             key, value = past_key_values.update(
-                key_states=key, value_states=value, layer_idx=self.layer_idx
+                key_states=key, value_states=value, layer_idx=cache_idx
             )
 
         W_Q = self._get_q_weight_for_output()
@@ -256,7 +259,8 @@ class EnergyAttention_QK(nn.Module):
         hidden_states = self.dropout(hidden_states)  # * self.output_scale
 
         # Log metrics
-        self._log_norms(hidden_states, W_Q)
+        if not torch.compiler.is_compiling():
+            self._log_norms(hidden_states, W_Q)
 
         return hidden_states
 
@@ -282,13 +286,31 @@ class EnergyAttention_QK(nn.Module):
         self._cached_WQ_for_metrics = None
         return metrics
 
-    def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute energy per token for this attention layer."""
+    def energy_per_token(self, x: torch.Tensor, rope_cos_sin=None) -> torch.Tensor:
+        """Compute attention energy per token: E_attn = -logsumexp(QK^T/sqrt(d)) summed over heads.
+
+        Uses causal masking so each token only sees past context.
+        The logsumexp of attention scores is the Hopfield energy (log-partition function).
+        """
         batch_size, seq_len = x.shape[:2]
         qk = self.c_attn(x)
         qk = qk.view(batch_size, seq_len, 2, self.num_heads, self.head_dim)
         query, key = qk.unbind(2)
-        query = query.transpose(1, 2)
+        query = query.transpose(1, 2)  # (B, H, T, D)
         key = key.transpose(1, 2)
-        attn_weights = torch.einsum("bhts,bhks->bhtk", query, key) / (self.head_dim**0.5)
-        return attn_weights.sum(dim=-1).mean(dim=1)
+
+        # Apply RoPE if available (must match forward pass)
+        if self.position_embedding_type == "rope" and rope_cos_sin is not None:
+            query = apply_rotary_pos_emb(query, rope_cos_sin)
+            key = apply_rotary_pos_emb(key, rope_cos_sin)
+
+        # Compute attention scores with causal mask
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.head_dim)  # (B, H, T, T)
+        causal_mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
+        scores = scores.masked_fill(~causal_mask, float('-inf'))
+
+        # Energy = -logsumexp(scores) summed over heads
+        lse = torch.logsumexp(scores, dim=-1)  # (B, H, T)
+        energy = -lse.sum(dim=1)  # (B, T) - sum over heads, negate for energy
+
+        return energy

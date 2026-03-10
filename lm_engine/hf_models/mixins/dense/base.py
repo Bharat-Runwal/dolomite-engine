@@ -39,6 +39,7 @@ class PreTrainedModelMixin(PreTrainedModel):
         self.num_pre_layers = config.num_pre_layers  # 8
         self.num_post_layers = config.num_post_layers  # 8
         self.num_iterations = config.num_iterations  # 1
+        self.layer_iterations = config.layer_iterations
         
         assert self.config_class is not None
         self.generation_config = GenerationConfig.from_model_config(self.config)
@@ -111,6 +112,16 @@ class BaseModelMixin(PreTrainedModelMixin):
         self.num_post_layers = config.num_post_layers
         self.num_iterations = config.num_iterations
         self.layer_iterations = config.layer_iterations
+
+        # Adaptive halting
+        halt_cfg = getattr(config, 'halt_thresholds', None)
+        if halt_cfg and isinstance(halt_cfg, dict):
+            self.halt_thresholds = {int(k): v for k, v in halt_cfg.items()}
+        else:
+            self.halt_thresholds = None
+
+        self.iter_dropout_range = getattr(config, 'iter_dropout_range', 0)
+        self.iter_noise_eta = getattr(config, 'iter_noise_eta', 0.0)
 
         num_layers = len(self.h)
         if self.layer_iterations is not None:
@@ -239,27 +250,26 @@ class BaseModelMixin(PreTrainedModelMixin):
         else:
             mamba_mask_computed = False
 
-            layer_id=0
+            layer_id = 0
+            for i, num_iter in enumerate(self.layer_iterations):
+                # Iteration dropout: randomize iteration count during training
+                if self.training and self.iter_dropout_range > 0:
+                    min_iter = max(1, num_iter - self.iter_dropout_range)
+                    max_iter = num_iter + self.iter_dropout_range
+                    effective_iter = torch.randint(min_iter, max_iter + 1, (1,)).item()
+                else:
+                    effective_iter = num_iter
 
-            for i in self.pre_layer_idxs:
-                hidden_states = self._run_block(
-                    hidden_states,
-                    past_key_values,
-                    attention_mask,
-                    cu_seqlens,
-                    max_seqlen,
-                    causal_mask,
-                    rope_cos_sin,
-                    mamba_mask_computed,
-                    i,
-                    layer_id= layer_id
-                )
-                layer_id += 1
+                for j in range(effective_iter):
+                    # Adaptive halting: check if hidden state converged for this block
+                    if self.halt_thresholds is not None and j > 0 and i in self.halt_thresholds:
+                        h_norm = hidden_states.norm(dim=-1).mean()
+                        delta_norm = (hidden_states - _prev_h).norm(dim=-1).mean()
+                        if (delta_norm / h_norm.clamp(min=1e-6)).item() < self.halt_thresholds[i]:
+                            layer_id += (effective_iter - j)
+                            break
 
-            #TODO: Fix the layer id logic for KV cache and Generation task
-            for i in self.loop_layer_idxs:
-                for j in range(self.num_iterations):
-
+                    _prev_h = hidden_states
                     hidden_states = self._run_block(
                         hidden_states,
                         past_key_values,
@@ -274,20 +284,14 @@ class BaseModelMixin(PreTrainedModelMixin):
                     )
                     layer_id += 1
 
-            for i in self.post_layer_idxs:
-                hidden_states = self._run_block(
-                    hidden_states,
-                    past_key_values,
-                    attention_mask,
-                    cu_seqlens,
-                    max_seqlen,
-                    causal_mask,
-                    rope_cos_sin,
-                    mamba_mask_computed,
-                    i,
-                    layer_id=layer_id,
-                )
-                layer_id += 1
+                    # Langevin noise: h = h + sqrt(2*eta) * noise
+                    if self.training and self.iter_noise_eta > 0 and j < effective_iter - 1:
+                        noise_scale = (2 * self.iter_noise_eta) ** 0.5
+                        hidden_states = hidden_states + noise_scale * torch.randn_like(hidden_states)
+
+                # Account for skipped iterations in layer_id (for cache alignment)
+                if effective_iter < num_iter:
+                    layer_id += (num_iter - effective_iter)
 
             hidden_states = self.ln_f(hidden_states)
 
@@ -327,8 +331,87 @@ class BaseModelMixin(PreTrainedModelMixin):
         )
 
         return hidden_states
-    
-    
+
+    @torch.no_grad()
+    def calibrate_halting(self, tokenizer, texts, percentile=25):
+        """Calibrate adaptive halting thresholds from energy profiling.
+
+        Runs a few calibration texts through the model, measures energy convergence
+        per block, and sets hidden-state-change thresholds so that blocks which
+        converge fast (low energy change) get halted early while slow blocks keep
+        all iterations.
+
+        Args:
+            tokenizer: tokenizer for encoding texts
+            texts: list of calibration strings (10-50 texts recommended)
+            percentile: blocks below this percentile of energy change are halted.
+                        Lower = more aggressive halting. Default 25 = bottom quartile.
+        """
+        self.eval()
+        block_h_deltas = {}  # block_idx -> list of (iter, relative_h_change)
+
+        for text in texts:
+            input_ids = tokenizer.encode(text, return_tensors='pt', max_length=512, truncation=True)
+            if input_ids.shape[1] < 10:
+                continue
+
+            hidden_states = self.wte(input_ids)
+            if self.m_emb is not None:
+                hidden_states = hidden_states * self.m_emb
+
+            rope_cos_sin = None
+            if self.position_embedding_type == "rope":
+                position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+                rope_cos_sin = self._get_rope_cos_sin(
+                    key_length=input_ids.shape[1], position_ids=position_ids, dtype=hidden_states.dtype)
+
+            for i, num_iter in enumerate(self.layer_iterations):
+                block = self.h[i]
+                if i not in block_h_deltas:
+                    block_h_deltas[i] = []
+
+                for j in range(num_iter):
+                    prev_h = hidden_states
+                    hidden_states = block(
+                        hidden_states, past_key_values=None, attention_mask=None,
+                        rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None, layer_id=None)
+
+                    if j > 0:
+                        h_norm = prev_h.norm(dim=-1).mean()
+                        delta = (hidden_states - prev_h).norm(dim=-1).mean()
+                        rel_change = (delta / h_norm.clamp(min=1e-6)).item()
+                        block_h_deltas[i].append(rel_change)
+
+        # Compute per-block mean hidden state change on last iteration
+        block_means = {}
+        for block_idx, deltas in block_h_deltas.items():
+            block_means[block_idx] = sum(deltas) / max(len(deltas), 1)
+
+        if not block_means:
+            return
+
+        # Set thresholds: blocks below the percentile cutoff get a threshold
+        # (= their own mean change, so ~50% of their iterations will be halted)
+        # Blocks above the cutoff get no threshold (always run all iterations)
+        import numpy as np
+        all_means = list(block_means.values())
+        cutoff = np.percentile(all_means, percentile)
+
+        thresholds = {}
+        for block_idx, mean_change in block_means.items():
+            if mean_change <= cutoff:
+                # Set threshold at this block's mean change (halts ~last 1-2 iterations)
+                thresholds[block_idx] = mean_change
+                tag = "HALT"
+            else:
+                tag = "KEEP"
+            print(f"  Block {block_idx}: mean_h_change={mean_change:.4f} {'<=' if mean_change <= cutoff else '>'} cutoff={cutoff:.4f} -> {tag}")
+
+        self.halt_thresholds = thresholds if thresholds else None
+        n_halt = len(thresholds)
+        n_total = len(block_means)
+        print(f"Calibrated: {n_halt}/{n_total} blocks will use adaptive halting (percentile={percentile})")
+
     def _get_position_ids(
         self, attention_mask: torch.Tensor, past_length: int, query_length: int, key_length: int, device: torch.device
     ) -> torch.Tensor:

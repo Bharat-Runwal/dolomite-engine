@@ -10,7 +10,7 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _MoEEnergyArgs, _MoEEnergyModuleArgs, _MoEEnergyF5Args, _MoEEnergyF6Args, _GaussianBoltzmannMoEArgs, _LRDiagonalGaussBoltzmannMoEArgs
+from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MoEEnergyArgs, _MoEEnergyModuleArgs, _MoEEnergyF5Args, _MoEEnergyF6Args, _GaussianBoltzmannMoEArgs, _LRDiagonalGaussBoltzmannMoEArgs
 from .sequence_mixer import (
     _CausalConvolution,
     _GatedDeltaNetArgs,
@@ -81,6 +81,7 @@ _MLP_CONFIG_CLASSES = {
     "MLP": _MLPArgs,
     "MoE": _MoEArgs,
     "Energy_MLP": _EnergyMLPArgs,
+    "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs,
     "MoE_Energy": _MoEEnergyArgs,
     "MoE_Energy_Module": _MoEEnergyModuleArgs,
     "MoE_Energy_F5": _MoEEnergyF5Args,
@@ -123,6 +124,8 @@ class CommonConfig(PretrainedConfig):
         num_post_layers: int = 8,
         num_iterations: int = 1,
         layer_iterations: list[int] | None = None,
+        iter_dropout_range: int = 0,
+        iter_noise_eta: float = 0.0,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -147,7 +150,14 @@ class CommonConfig(PretrainedConfig):
         self.num_pre_layers = num_pre_layers
         self.num_post_layers = num_post_layers
         self.num_iterations = num_iterations
-        self.layer_iterations = layer_iterations
+        self.iter_dropout_range = iter_dropout_range
+        self.iter_noise_eta = iter_noise_eta
+
+        if layer_iterations is not None:
+            self.layer_iterations = layer_iterations
+        else:
+            num_loop = num_layers - num_pre_layers - num_post_layers
+            self.layer_iterations = [1] * num_pre_layers + [num_iterations] * num_loop + [1] * num_post_layers
         
 
         # check if enums are valid
