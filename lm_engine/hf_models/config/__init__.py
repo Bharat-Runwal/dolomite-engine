@@ -115,6 +115,8 @@ class CommonConfig(PretrainedConfig):
         layer_iterations: list[int] | None = None,
         iter_dropout_range: int = 0,
         iter_noise_eta: float = 0.0,
+        energy_norm_type: str | None = None,
+        energy_proj_type: str = "unconstrained",
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -141,6 +143,12 @@ class CommonConfig(PretrainedConfig):
         self.num_iterations = num_iterations
         self.iter_dropout_range = iter_dropout_range
         self.iter_noise_eta = iter_noise_eta
+        # Energy block normalization: None = use global normalization_function,
+        # or override with "bare_layernorm", "rmsnorm", "layernorm", etc.
+        self.energy_norm_type = energy_norm_type
+        # Energy block projection type: "unconstrained" (learned linear),
+        # "pos_scalar" (positive scalar), "identity" (no projection)
+        self.energy_proj_type = energy_proj_type
 
         if layer_iterations is not None:
             self.layer_iterations = layer_iterations

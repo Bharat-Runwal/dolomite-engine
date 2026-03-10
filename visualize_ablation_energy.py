@@ -44,19 +44,12 @@ def compute_energy_per_iteration(model, input_ids):
             block = base_model.h[i]
             has_energy = hasattr(block, 'energy_per_token') and block.sequence_mixer_type == "energy_attention"
             for j in range(num_iter):
+                hidden_states = block(hidden_states, past_key_values=None, attention_mask=None,
+                    rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None, layer_id=None)
+                # Compute energy AFTER each iteration (block's output energy)
                 if has_energy:
                     e = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin)
                     energies.append((i, j, e.float().mean().item(), e.float().std().item()))
-                hidden_states = block(hidden_states, past_key_values=None, attention_mask=None,
-                    rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None, layer_id=None)
-
-        # Final energy after last iteration
-        last_idx = len(base_model.h) - 1
-        block = base_model.h[last_idx]
-        if hasattr(block, 'energy_per_token') and block.sequence_mixer_type == "energy_attention":
-            e = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin)
-            last_iter = base_model.layer_iterations[last_idx]
-            energies.append((last_idx, last_iter, e.float().mean().item(), e.float().std().item()))
 
     return energies
 
@@ -105,10 +98,10 @@ def main():
     texts = [t for t in dataset["text"] if len(t.strip()) > 100][:args.num_samples]
     print(f"Using {len(texts)} samples")
 
-    # Discover models
-    models_3b = sorted([d for d in os.listdir(args.model_dir) if d.startswith("EGPT_3_blocks")],
+    # Discover models - only uniform "all" configs for 3-block and 4-block
+    models_3b = sorted([d for d in os.listdir(args.model_dir) if d.startswith("EGPT_3_blocks_all_")],
                        key=lambda x: int(x.split("_all_")[1].split("_")[0]))
-    models_4b = sorted([d for d in os.listdir(args.model_dir) if d.startswith("EGPT_4_blocks")],
+    models_4b = sorted([d for d in os.listdir(args.model_dir) if d.startswith("EGPT_4_blocks_all_")],
                        key=lambda x: int(x.split("_all_")[1].split("_")[0]))
 
     # Profile all models

@@ -18,6 +18,8 @@ class _EnergyAttentionArgs(BaseArgs):
     sliding_window: int | None = None
     # needed for Qwen 2 MoE
     qkv_bias: bool = None
+    # Accept but ignore position_embedding_type from older configs
+    position_embedding_type: str | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if self.qkv_bias is None:

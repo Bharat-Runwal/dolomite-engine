@@ -51,28 +51,18 @@ def compute_energy_per_iteration(model, input_ids):
             has_energy = hasattr(block, 'energy_per_token') and block.sequence_mixer_type == "energy_attention"
 
             for j in range(num_iter):
-                h_norm = hidden_states.float().norm(dim=-1).mean().item()
-
-                if has_energy:
-                    e = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin)
-                    energies.append((i, j, e.float().mean().item(), e.float().std().item()))
-                    token_energies.append((i, j, e.float().cpu()))
-
-                hidden_norms.append((i, j, h_norm))
-
                 hidden_states = block(
                     hidden_states, past_key_values=None, attention_mask=None,
                     rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None, layer_id=None)
 
-        # Final energy after last iteration
-        last_idx = len(base_model.h) - 1
-        block = base_model.h[last_idx]
-        if hasattr(block, 'energy_per_token') and block.sequence_mixer_type == "energy_attention":
-            e = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin)
-            last_iter = base_model.layer_iterations[last_idx]
-            energies.append((last_idx, last_iter, e.float().mean().item(), e.float().std().item()))
-            token_energies.append((last_idx, last_iter, e.float().cpu()))
-            hidden_norms.append((last_idx, last_iter, hidden_states.float().norm(dim=-1).mean().item()))
+                h_norm = hidden_states.float().norm(dim=-1).mean().item()
+                hidden_norms.append((i, j, h_norm))
+
+                # Compute energy AFTER each iteration (block's output energy)
+                if has_energy:
+                    e = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin)
+                    energies.append((i, j, e.float().mean().item(), e.float().std().item()))
+                    token_energies.append((i, j, e.float().cpu()))
 
     return energies, token_energies, hidden_norms
 

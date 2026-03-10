@@ -12,6 +12,17 @@ from ...modeling_utils import get_mlp_block, get_normalization_function, get_seq
 from .config import EnergyConfig
 
 
+class PositiveScalarProjection(nn.Module):
+    """Projection that guarantees descent: proj(x) = alpha^2 * x."""
+
+    def __init__(self, init_value: float = 1.0):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(1) * init_value)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (self.weight ** 2) * x
+
+
 
 class EnergyBlock(nn.Module):
     """Energy Transformer block with customizable attention and feedforward.
@@ -32,8 +43,10 @@ class EnergyBlock(nn.Module):
 
         self.sequence_mixer_type = config.sequence_mixer_blocks[layer_idx].sequence_mixer_type
         if self.sequence_mixer_type=="energy_attention":
+            # Use energy-specific norm if configured, otherwise fall back to global
+            norm_type = getattr(config, 'energy_norm_type', None) or config.normalization_function
             self.ln = get_normalization_function(
-                config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
+                norm_type, hidden_size, eps=config.layer_norm_epsilon
             )
             self.attn = get_sequence_mixer(config, True, use_padding_free_transformer, layer_idx)
 
@@ -42,9 +55,17 @@ class EnergyBlock(nn.Module):
             )
 
             self.scale_ff = nn.Parameter(torch.ones(1) * 4, requires_grad=True)
-            # self.scale_ff = nn.Parameter(torch.ones(1) * 1, requires_grad=False)
 
-            self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+            # Projection type: controls energy descent guarantee
+            proj_type = getattr(config, 'energy_proj_type', 'unconstrained')
+            if proj_type == "unconstrained":
+                self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+            elif proj_type == "pos_scalar":
+                self.proj = PositiveScalarProjection()
+            elif proj_type == "identity":
+                self.proj = nn.Identity()
+            else:
+                raise ValueError(f"Unknown energy_proj_type: {proj_type}")
         else:
 
             hidden_size = config.hidden_size
