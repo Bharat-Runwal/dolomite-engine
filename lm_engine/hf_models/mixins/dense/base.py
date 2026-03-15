@@ -124,6 +124,8 @@ class BaseModelMixin(PreTrainedModelMixin):
         self.num_pre_layers = config.num_pre_layers  # default 8
         self.num_post_layers = config.num_post_layers  # default 8
         self.num_iterations = config.num_iterations  # default 1
+        self.per_block_iterations = getattr(config, "per_block_iterations", False)
+        self.iteration_dropout = getattr(config, "iteration_dropout", 0)
         num_layers = len(self.h)
         layer_idxs = list(range(num_layers))
         self.pre_layer_idxs = layer_idxs[: self.num_pre_layers]
@@ -215,34 +217,59 @@ class BaseModelMixin(PreTrainedModelMixin):
             )
             layer_id += 1
 
+        # Compute effective number of iterations with optional dropout during training
+        num_iterations = self.num_iterations
+        if self.training and self.iteration_dropout > 0:
+            drop = torch.randint(-self.iteration_dropout, self.iteration_dropout + 1, (1,)).item()
+            num_iterations = max(1, num_iterations + drop)
+
         halt_state = None
-        for j in range(self.num_iterations):
-
-            prev_loop_hidden_states = hidden_states
-            # Perform looped layers
+        if self.per_block_iterations:
+            # Per-block looping: each mid layer iterates num_iterations times independently
+            # before passing to the next layer. Halting not supported in this mode.
             for i in self.loop_layer_idxs:
-                hidden_states = self._run_block(
-                    hidden_states,
-                    past_key_values,
-                    attention_mask,
-                    cu_seqlens,
-                    max_seqlen,
-                    causal_mask,
-                    rope_cos_sin,
-                    mamba_mask_computed,
-                    i,
-                    layer_id=layer_id,
-                )
-                layer_id += 1
-            # End looped layers
-            curr_loop_hidden_states = hidden_states
+                for _ in range(num_iterations):
+                    hidden_states = self._run_block(
+                        hidden_states,
+                        past_key_values,
+                        attention_mask,
+                        cu_seqlens,
+                        max_seqlen,
+                        causal_mask,
+                        rope_cos_sin,
+                        mamba_mask_computed,
+                        i,
+                        layer_id=layer_id,
+                    )
+                    layer_id += 1
+        else:
+            for j in range(num_iterations):
 
-            if self.halt is not None:
-                # Make halted state the output of this loop
-                halted_hidden_state, _, halt_state = self.halt(
-                    prev_loop_hidden_states, curr_loop_hidden_states, halt_state
-                )
-                hidden_states = halted_hidden_state
+                prev_loop_hidden_states = hidden_states
+                # Perform looped layers
+                for i in self.loop_layer_idxs:
+                    hidden_states = self._run_block(
+                        hidden_states,
+                        past_key_values,
+                        attention_mask,
+                        cu_seqlens,
+                        max_seqlen,
+                        causal_mask,
+                        rope_cos_sin,
+                        mamba_mask_computed,
+                        i,
+                        layer_id=layer_id,
+                    )
+                    layer_id += 1
+                # End looped layers
+                curr_loop_hidden_states = hidden_states
+
+                if self.halt is not None:
+                    # Make halted state the output of this loop
+                    halted_hidden_state, _, halt_state = self.halt(
+                        prev_loop_hidden_states, curr_loop_hidden_states, halt_state
+                    )
+                    hidden_states = halted_hidden_state
 
         for i in self.post_layer_idxs:
             hidden_states = self._run_block(
