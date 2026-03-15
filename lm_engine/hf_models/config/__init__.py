@@ -114,6 +114,7 @@ class CommonConfig(PretrainedConfig):
         num_iterations: int = 1,
         layer_iterations: list[int] | None = None,
         iter_dropout_range: int = 0,
+        iter_dropout_range_per_block: list[int] | None = None,
         iter_noise_eta: float = 0.0,
         energy_norm_type: str | None = None,
         energy_proj_type: str = "unconstrained",
@@ -142,6 +143,7 @@ class CommonConfig(PretrainedConfig):
         self.num_post_layers = num_post_layers
         self.num_iterations = num_iterations
         self.iter_dropout_range = iter_dropout_range
+        self.iter_dropout_range_per_block = iter_dropout_range_per_block
         self.iter_noise_eta = iter_noise_eta
         # Energy block normalization: None = use global normalization_function,
         # or override with "bare_layernorm", "rmsnorm", "layernorm", etc.

@@ -119,11 +119,16 @@ class BaseModelMixin(PreTrainedModelMixin):
             self.halt_thresholds = None
 
         # Iteration dropout: during training, randomly sample iterations per block
-        # from [max(1, T - iter_dropout_range), T + iter_dropout_range] where T is
-        # the configured iteration count. This teaches the model to produce good
-        # outputs at variable iteration depths, enabling test-time compute scaling.
-        # Set iter_dropout_range=0 (default) to disable.
+        # from [max(1, T - range), T + range]. Enables test-time compute scaling.
+        # iter_dropout_range: scalar applied to all blocks (default 0 = disabled)
+        # iter_dropout_range_per_block: list of per-block ranges, overrides scalar
+        # e.g. [1,1,1,1,1,1,1,1,1,1,2,4] gives B11 a larger range for more scaling
         self.iter_dropout_range = getattr(config, 'iter_dropout_range', 0)
+        per_block = getattr(config, 'iter_dropout_range_per_block', None)
+        if per_block and isinstance(per_block, list) and len(per_block) == len(self.layer_iterations):
+            self.iter_dropout_range_per_block = per_block
+        else:
+            self.iter_dropout_range_per_block = None
 
         # Langevin noise: during training, add Gaussian noise to the hidden state
         # after each iteration step: h = h + sqrt(2 * eta) * N(0, 1).
@@ -228,10 +233,16 @@ class BaseModelMixin(PreTrainedModelMixin):
             layer_id = 0
             for i, num_iter in enumerate(self.layer_iterations):
                 # Iteration dropout: randomize iteration count during training
-                if self.training and self.iter_dropout_range > 0:
-                    min_iter = max(1, num_iter - self.iter_dropout_range)
-                    max_iter = num_iter + self.iter_dropout_range
-                    effective_iter = torch.randint(min_iter, max_iter + 1, (1,)).item()
+                if self.training:
+                    block_range = (self.iter_dropout_range_per_block[i]
+                                   if self.iter_dropout_range_per_block is not None
+                                   else self.iter_dropout_range)
+                    if block_range > 0:
+                        min_iter = max(1, num_iter - block_range)
+                        max_iter = num_iter + block_range
+                        effective_iter = torch.randint(min_iter, max_iter + 1, (1,)).item()
+                    else:
+                        effective_iter = num_iter
                 else:
                     effective_iter = num_iter
 
