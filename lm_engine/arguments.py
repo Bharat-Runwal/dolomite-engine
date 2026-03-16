@@ -99,6 +99,9 @@ class TrainingParameters(BaseArgs):
     loss_mask: LossMask = LossMask.output_only
     # gradient clip value
     gradient_clipping: float | None = 1
+    # log stable rank of per-update gradients every N optimizer steps (None = disabled)
+    # SVD is expensive; use a coarser interval than log_interval (e.g. 100-500)
+    stable_rank_interval: int | None = None
 
     def model_post_init(self, __context: Any) -> None:
         _check_not_None([(self.num_training_steps, "num_training_steps"), (self.micro_batch_size, "micro_batch_size")])

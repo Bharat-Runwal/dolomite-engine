@@ -124,6 +124,86 @@ def collect_sink_metrics(model: torch.nn.Module) -> dict:
     return metrics
 
 
+@torch.no_grad()
+@torch.compiler.disable
+def collect_stable_rank_metrics(model: torch.nn.Module, tokens_per_update: int, skip_large_dim: int = 8192) -> dict:
+    """Compute stable rank of per-update gradient matrices for all 2-D Linear weights.
+
+    Must be called AFTER gradient accumulation + clipping and BEFORE optimizer.step(),
+    so that param.grad holds the actual update gradient handed to the optimizer.
+
+    Stable rank: SR(G) = ||G||_F^2 / sigma_max(G)^2
+    This lies in [1, min(m, n)] and measures the effective number of directions
+    contributing to the gradient.
+
+    Matrices with any dimension > skip_large_dim (e.g. lm_head over large vocab)
+    are skipped because their SVD is too expensive and their gradients are sparse.
+
+    A token-count cap warning is emitted when tokens_per_update < min(m, n) for
+    any tracked layer (the cap artifact is not enforced here, only warned about).
+
+    Args:
+        model: the model (possibly FSDP-wrapped)
+        tokens_per_update: batch_size * seq_len * grad_accum * dp_world_size
+        skip_large_dim: skip matrices with any dimension larger than this
+
+    Returns:
+        dict with keys like "stable_rank/<layer_name>" plus aggregate stats,
+        empty dict if no gradients are found (e.g. first step, no-grad context)
+    """
+    sr_values: dict[str, float] = {}
+
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        param = module.weight
+        if param.grad is None:
+            continue
+        if param.grad.ndim != 2:
+            continue
+
+        rows, cols = param.grad.shape
+        if rows > skip_large_dim or cols > skip_large_dim:
+            continue
+
+        # FSDP2 gradients may be DTensors; gather the full tensor for SVD
+        G = param.grad.detach()
+        if hasattr(G, "full_tensor"):
+            G = G.full_tensor()
+
+        G32 = G.float()
+        try:
+            sv = torch.linalg.svdvals(G32)   # descending
+            frob_sq = (sv * sv).sum().item()
+            sigma_max_sq = sv[0].item() ** 2
+            if sigma_max_sq < 1e-30:
+                sr = float("nan")
+            else:
+                sr = frob_sq / sigma_max_sq
+        except Exception:
+            sr = float("nan")
+
+        min_dim = min(rows, cols)
+        if tokens_per_update < min_dim:
+            logging.warning(
+                f"stable_rank: tokens_per_update ({tokens_per_update}) < min_dim ({min_dim}) "
+                f"for {name}.weight - rank is token-count capped, SR may be misleadingly low"
+            )
+
+        sr_values[f"stable_rank/{name}.weight"] = sr
+
+    if not sr_values:
+        return {}
+
+    valid = [v for v in sr_values.values() if not (v != v)]  # filter nan
+    metrics = dict(sr_values)
+    if valid:
+        metrics["stable_rank/mean"] = sum(valid) / len(valid)
+        metrics["stable_rank/min"] = min(valid)
+        metrics["stable_rank/max"] = max(valid)
+    return metrics
+
+
 def _get_linear_flops(m: int, k: int, n: int, gradient_checkpointing: bool = False) -> int:
     forward_flops = 2 * m * k * n
     backward_flops = 2 * forward_flops

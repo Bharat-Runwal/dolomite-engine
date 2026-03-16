@@ -25,7 +25,13 @@ from .hf_models import disable_generation_cache
 from .kernels import enable_kernels
 from .model_wrapper import broadcast_tensor_parallel_input, get_model_container
 from .optimization import get_learning_rate, get_optimizer_container, get_scheduler_container
-from .train_utils import all_reduce_metrics_tracker, collect_sink_metrics, get_model_tflops, track_metrics
+from .train_utils import (
+    all_reduce_metrics_tracker,
+    collect_sink_metrics,
+    collect_stable_rank_metrics,
+    get_model_tflops,
+    track_metrics,
+)
 from .utils import (
     Accelerator,
     Communication,
@@ -160,6 +166,8 @@ def train_step_without_pipeline_parallel(
     sync_every_gradient_accumulation_step: bool,
     lm_loss_multiplier: float,
     tuning_method: TuningMethod,
+    compute_stable_rank: bool = False,
+    tokens_per_update: int = 0,
 ) -> MetricsTrackingDict:
     """runs backpropagation and applies the gradient if at the edge of gradient accumulation boundary
 
@@ -245,6 +253,14 @@ def train_step_without_pipeline_parallel(
         if is_torchao_available():
             FP8Manager.sync_float8_amax_and_scale_history([model])
 
+        # Measure stable rank AFTER clipping, BEFORE optimizer.step(), so
+        # param.grad holds the exact update handed to AdamW on this step.
+        stable_rank_metrics = (
+            collect_stable_rank_metrics(model, tokens_per_update)
+            if compute_stable_rank
+            else {}
+        )
+
         optimizer_container.step()
         lr_scheduler_container.step()
 
@@ -267,7 +283,7 @@ def train_step_without_pipeline_parallel(
 
         metrics_tracker = all_reduce_metrics_tracker(metrics_tracker)
 
-    return metrics_tracker
+    return metrics_tracker, stable_rank_metrics
 
 
 def track_val_metrics(
@@ -335,6 +351,7 @@ def train(
 
     num_training_steps = args.training_parameters.num_training_steps
     gradient_clipping = args.training_parameters.gradient_clipping
+    stable_rank_interval = args.training_parameters.stable_rank_interval
 
     eval_during_training = args.training_parameters.eval_during_training
     eval_interval = args.training_parameters.eval_interval
@@ -419,8 +436,16 @@ def train(
                 sync_every_gradient_accumulation_step=args.distributed_args.sync_every_gradient_accumulation_step,
                 lm_loss_multiplier=1 / (micro_batch_size * sequence_length),
                 tuning_method=args.tuning_args.tuning_method,
+                compute_stable_rank=(
+                    stable_rank_interval is not None and global_step % stable_rank_interval == 0
+                ),
+                tokens_per_update=tokens_per_batch,
             )
 
+        if is_pipeline_parallel_enabled:
+            stable_rank_snapshot = {}
+        else:
+            loss_step_dict, stable_rank_snapshot = loss_step_dict
         metrics_tracker = metrics_tracker + loss_step_dict
         torch_profiler.step()
 
@@ -441,6 +466,10 @@ def train(
             # collect attention sink metrics (values + grad norms) if any sink layers exist
             sink_metrics = collect_sink_metrics(model_container[0])
             for key, value in sink_metrics.items():
+                metrics_tracker[key] = value
+
+            # inject stable rank snapshot AFTER / log_interval so values are not divided
+            for key, value in stable_rank_snapshot.items():
                 metrics_tracker[key] = value
 
             track_metrics(
