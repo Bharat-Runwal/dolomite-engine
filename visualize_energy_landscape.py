@@ -505,6 +505,44 @@ def main():
     print(f"Fast blocks (can halt early): {[i for i in range(num_blocks) if block_conv_rates[i] < median_rate * 0.7]}")
     print(f"Slow blocks (need full iters): {[i for i in range(num_blocks) if block_conv_rates[i] > median_rate * 1.3]}")
 
+    # =========================================================================
+    # Save energy data to CSV
+    # =========================================================================
+    # 1. Per-(block, iteration) summary CSV
+    summary_rows = ["block,iters_configured,iter_idx,mean_energy,std_energy,mean_delta,conv_rate,category"]
+    for block_idx in range(num_blocks):
+        for iter_idx in range(max_iter + 1):
+            key = (block_idx, iter_idx)
+            if key not in all_energies:
+                continue
+            mean_e = np.mean(all_energies[key])
+            std_e = np.std(all_energies[key])
+            mean_delta = np.mean(all_deltas[key]) if key in all_deltas else float('nan')
+            rate = np.mean(all_rel_deltas[key]) if key in all_rel_deltas else 0.0
+            cat = "FAST" if rate < median_rate * 0.7 else ("SLOW" if rate > median_rate * 1.3 else "MEDIUM")
+            summary_rows.append(f"{block_idx},{num_iters[block_idx]},{iter_idx},{mean_e:.4f},{std_e:.4f},{mean_delta:.4f},{rate:.4f},{cat}")
+
+    csv_path = os.path.join(args.output_dir, f'energy_summary_{args.dataset}.csv')
+    with open(csv_path, 'w') as f:
+        f.write("\n".join(summary_rows) + "\n")
+    print(f"\nSaved energy summary CSV: {csv_path}")
+
+    # 2. Per-block stats CSV (one row per block)
+    block_rows = ["block,iters_configured,e_first,e_last,total_delta,conv_rate,category"]
+    for block_idx in range(num_blocks):
+        first_e = np.mean(all_energies.get((block_idx, 0), [0]))
+        last_iter = max((i for (b, i) in all_energies if b == block_idx), default=0)
+        last_e = np.mean(all_energies.get((block_idx, last_iter), [0]))
+        total_delta = last_e - first_e
+        rate = block_conv_rates[block_idx]
+        cat = "FAST" if rate < median_rate * 0.7 else ("SLOW" if rate > median_rate * 1.3 else "MEDIUM")
+        block_rows.append(f"{block_idx},{num_iters[block_idx]},{first_e:.4f},{last_e:.4f},{total_delta:.4f},{rate:.4f},{cat}")
+
+    block_csv_path = os.path.join(args.output_dir, f'energy_per_block_{args.dataset}.csv')
+    with open(block_csv_path, 'w') as f:
+        f.write("\n".join(block_rows) + "\n")
+    print(f"Saved per-block CSV: {block_csv_path}")
+
     print(f"\nAll figures saved to: {args.output_dir}/")
 
 
