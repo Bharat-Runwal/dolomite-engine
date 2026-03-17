@@ -331,7 +331,7 @@ class BaseModelMixin(PreTrainedModelMixin):
             rope_cos_sin=rope_cos_sin,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            layer_id = layer_id
+            layer_id=layer_id,
         )
 
         return hidden_states
