@@ -380,15 +380,18 @@ class BaseModelMixin(PreTrainedModelMixin):
                         hidden_states, past_key_values=None, attention_mask=None,
                         rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None, layer_id=None)
 
-                    if j > 0:
+                    # Only measure convergence for blocks with >1 iterations
+                    if j > 0 and num_iter > 1:
                         h_norm = prev_h.norm(dim=-1).mean()
                         delta = (hidden_states - prev_h).norm(dim=-1).mean()
                         rel_change = (delta / h_norm.clamp(min=1e-6)).item()
                         block_h_deltas[i].append(rel_change)
 
-        # Compute per-block mean hidden state change on last iteration
+        # Compute per-block mean hidden state change (only for blocks with >1 iters)
         block_means = {}
         for block_idx, deltas in block_h_deltas.items():
+            if self.layer_iterations[block_idx] <= 1:
+                continue  # skip 1-iter blocks - halting has no effect on them
             block_means[block_idx] = sum(deltas) / max(len(deltas), 1)
 
         if not block_means:
