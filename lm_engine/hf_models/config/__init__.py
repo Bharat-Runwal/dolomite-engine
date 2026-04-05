@@ -118,6 +118,10 @@ class CommonConfig(PretrainedConfig):
         iter_noise_eta: float = 0.0,
         energy_norm_type: str | None = None,
         energy_proj_type: str = "unconstrained",
+        energy_stop_grad_key: bool = False,
+        energy_attn_add_wv_wo: bool = False,
+        scale_ff_init: float | list[float] | None = None,
+        energy_descent_loss_coef: float = 0.0,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -151,6 +155,10 @@ class CommonConfig(PretrainedConfig):
         # Energy block projection type: "unconstrained" (learned linear),
         # "pos_scalar" (positive scalar), "identity" (no projection)
         self.energy_proj_type = energy_proj_type
+        self.energy_stop_grad_key = energy_stop_grad_key
+        self.energy_attn_add_wv_wo = energy_attn_add_wv_wo
+        self.scale_ff_init = scale_ff_init
+        self.energy_descent_loss_coef = energy_descent_loss_coef
 
         if layer_iterations is not None:
             self.layer_iterations = layer_iterations

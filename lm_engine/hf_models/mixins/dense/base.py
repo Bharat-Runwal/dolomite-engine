@@ -13,6 +13,7 @@ from ....kernels import is_kernel_allowed
 from ....utils import Accelerator
 from ...cache import GenerationCache
 from ...config import CommonConfig
+# Energy descent loss is now passed via BaseModelOutputWithPast (compile-safe)
 from ...modeling_utils import Dropout, ParameterizedEmbedding, RoPE, YaRNScaledRoPE, get_normalization_function
 from ...utils import convert_padding_free_lists_to_tensors, is_generation_cache_enabled
 from ..modeling_outputs import BaseModelOutputWithPast
@@ -137,6 +138,11 @@ class BaseModelMixin(PreTrainedModelMixin):
         # Set iter_noise_eta=0.0 (default) to disable.
         self.iter_noise_eta = getattr(config, 'iter_noise_eta', 0.0)
 
+        # Energy descent auxiliary loss: penalizes energy increases across iterations.
+        # L_energy = coef * sum_blocks sum_iters max(0, E(h_{t+1}) - E(h_t))
+        # Only applies to blocks with energy_attention. Set 0.0 (default) to disable.
+        self.energy_descent_loss_coef = getattr(config, 'energy_descent_loss_coef', 0.0)
+
 
 
     def _init_model(self, config: CommonConfig, **kwargs) -> None:
@@ -229,6 +235,7 @@ class BaseModelMixin(PreTrainedModelMixin):
             return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
         else:
             mamba_mask_computed = False
+            energy_descent_loss = torch.tensor(0.0, device=hidden_states.device)
 
             layer_id = 0
             for i, num_iter in enumerate(self.layer_iterations):
@@ -245,6 +252,14 @@ class BaseModelMixin(PreTrainedModelMixin):
                         effective_iter = num_iter
                 else:
                     effective_iter = num_iter
+
+                # Energy descent aux loss: track per-iteration energy for energy blocks
+                block = self.h[i]
+                has_energy = (self.training and
+                              self.energy_descent_loss_coef > 0 and
+                              hasattr(block, 'energy_per_token') and
+                              getattr(block, 'sequence_mixer_type', '') == 'energy_attention')
+                prev_energy = None
 
                 for j in range(effective_iter):
                     # Adaptive halting: check if hidden state converged for this block
@@ -269,6 +284,15 @@ class BaseModelMixin(PreTrainedModelMixin):
                         layer_id=layer_id,
                     )
                     layer_id += 1
+
+                    # Energy descent aux loss: penalize E(h_{t+1}) > E(h_t)
+                    # Accumulates locally (compile-safe), returned via BaseModelOutputWithPast
+                    if has_energy:
+                        curr_energy = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin).mean()
+                        if prev_energy is not None:
+                            energy_increase = torch.clamp(curr_energy - prev_energy, min=0.0)
+                            energy_descent_loss = energy_descent_loss + energy_increase
+                        prev_energy = curr_energy.detach()  # stop gradient through prev
 
                     # Langevin noise: h = h + sqrt(2*eta) * noise
                     if self.training and self.iter_noise_eta > 0 and j < effective_iter - 1:
@@ -299,7 +323,14 @@ class BaseModelMixin(PreTrainedModelMixin):
 
             hidden_states = self.ln_f(hidden_states)
 
-            return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
+            # Scale energy descent loss by coefficient
+            edl = energy_descent_loss * self.energy_descent_loss_coef if self.energy_descent_loss_coef > 0 else None
+
+            return BaseModelOutputWithPast(
+                last_hidden_state=hidden_states,
+                past_key_values=past_key_values,
+                energy_descent_loss=edl,
+            )
 
 
     def _run_block(

@@ -169,6 +169,8 @@ def get_sequence_mixer(
             causal=causal,
             layer_idx=layer_idx,
             use_padding_free_transformer=use_padding_free_transformer,
+            stop_grad_key=getattr(config, "energy_stop_grad_key", False),
+            add_wv_wo=getattr(config, "energy_attn_add_wv_wo", False),
         )
     else:
         sequence_mixer_kwargs = dict(

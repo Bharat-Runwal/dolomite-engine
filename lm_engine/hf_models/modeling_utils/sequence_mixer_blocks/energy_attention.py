@@ -56,10 +56,14 @@ class EnergyAttention_QK(nn.Module):
         causal: bool,
         layer_idx: int,
         use_padding_free_transformer: bool,
+        stop_grad_key: bool = False,
+        add_wv_wo: bool = False,
     ) -> EnergyAttention_QK:
         super().__init__()
 
         self.causal = causal
+        self.stop_grad_key = stop_grad_key
+        self.add_wv_wo = add_wv_wo
         self.hidden_size = hidden_size
         self.num_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
@@ -90,6 +94,15 @@ class EnergyAttention_QK(nn.Module):
             bias=self.qkv_bias,
             std=initializer_range,
         )
+
+        # Option 1b: proper W_V and W_O projections.
+        # E(h_i) = (W_O * attn_weights * W_V * h_{<i})^T * h_i
+        # grad = W_O * attn_weights * W_V * h_{<i}  (exact when KV stop-grad)
+        if self.add_wv_wo:
+            self.W_V = ParameterizedLinear(self.hidden_size, self.hidden_size, bias=add_bias, std=std)
+            self.W_O = ParameterizedLinear(self.hidden_size, self.hidden_size, bias=add_bias, std=std)
+            mark_parameter_as_mup_learning_rate(self.W_V.weight)
+            mark_parameter_as_mup_learning_rate(self.W_O.weight)
 
         
 
@@ -155,6 +168,9 @@ class EnergyAttention_QK(nn.Module):
             batch_size, query_length = hidden_states.shape[:-1]
             input_shape = (batch_size, query_length, 2, self.num_heads, self.head_dim)
 
+        # Save original hidden states for W_V projection (Option 1b)
+        original_hidden_states = hidden_states if self.add_wv_wo else None
+
         hidden_states = self.c_attn(hidden_states)
         hidden_states = hidden_states.view(*input_shape)
 
@@ -172,10 +188,28 @@ class EnergyAttention_QK(nn.Module):
             query = apply_rotary_pos_emb(query, rope_cos_sin)
             key = apply_rotary_pos_emb(key, rope_cos_sin)
 
-        # V = K (core energy attention property)
-        # Normalize value vectors to unit norm per position to bound attention output magnitude
-        # This prevents c_attn weight growth from amplifying attention output
-        value = key  # / (key.norm(dim=-1, keepdim=True) + 1e-6)
+        # Stop-gradient on K: makes forward output = exact ∂E/∂h_i (no key-role contamination).
+        # Without this, K = f(h_i) contributes an extra term to the backprop gradient that is
+        # absent from the forward energy gradient, causing the structural misalignment we measured.
+        # add_wv_wo always implies stop-grad since proper W_V/W_O already break the key-role path.
+        if self.stop_grad_key or self.add_wv_wo:
+            key = key.detach()
+
+        if self.add_wv_wo:
+            # Option 1b: proper V = W_V(h), output via W_O.
+            # E(h_i) = (W_O * attn_weights * W_V * h_{<i})^T * h_i -- exact energy gradient.
+            if self.use_padding_free_transformer:
+                value = self.W_V(original_hidden_states)
+                value = value.view(total_q, self.num_heads, self.head_dim).detach()
+            else:
+                value = self.W_V(original_hidden_states)
+                value = value.view(batch_size, query_length, self.num_heads, self.head_dim)
+                value = value.transpose(1, 2).contiguous().detach()
+        else:
+            # V = K (core energy attention property)
+            # Normalize value vectors to unit norm per position to bound attention output magnitude
+            # This prevents c_attn weight growth from amplifying attention output
+            value = key  # / (key.norm(dim=-1, keepdim=True) + 1e-6)
 
         if past_key_values is not None:
             # Use layer_id (iteration-aware index) when available, else fall back to block index
@@ -209,14 +243,17 @@ class EnergyAttention_QK(nn.Module):
                 causal=self.causal,
                 dropout=self.softmax_dropout_p if self.training else 0,
                 sliding_window=self.sliding_window,
-                # softmax_scale=self.attention_multiplier,
-
             )
 
             del query, key, value
             attn_output = wait_for_ACT(attn_output, wait_in_forward=False, wait_in_backward=True)
 
-            if self.use_padding_free_transformer:
+            if self.add_wv_wo:
+                if self.use_padding_free_transformer:
+                    hidden_states = self.W_O(attn_output.reshape(total_q, self.hidden_size))
+                else:
+                    hidden_states = self.W_O(attn_output.reshape(batch_size, query_length, self.hidden_size))
+            elif self.use_padding_free_transformer:
                 attn_output = attn_output.permute(1, 0, 2)
                 hidden_states = torch.einsum("hts,hcs->tc", attn_output, W_Q)
             else:
@@ -248,10 +285,13 @@ class EnergyAttention_QK(nn.Module):
                         attn_mask=attention_mask,
                         dropout_p=self.softmax_dropout_p if self.training else 0,
                         is_causal=self.causal if attention_mask is None else False,
-                        # scale=self.attention_multiplier,
                     )
 
                 del query, key, value
+
+            if self.add_wv_wo:
+                hidden_states = self.W_O(attn_output.reshape(batch_size, query_length, self.hidden_size))
+            else:
                 hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
 
 
