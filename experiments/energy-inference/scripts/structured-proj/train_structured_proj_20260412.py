@@ -91,9 +91,16 @@ def parse_args():
                         "Ignored when --residual is set.")
     p.add_argument("--psd_only",         action="store_true",
                    help="Freeze J (U/V=0) and train only the PSD descent component R=LL^T.")
+    p.add_argument("--single_stream",   action="store_true",
+                   help="Apply ONE K=(J-R) to combined (attn+scale_ff*ff) input, mirroring "
+                        "the original single-W architecture but with port-Hamiltonian structure.")
     p.add_argument("--learnable_alpha",  action="store_true",
                    help="Add a per-stream learnable alpha (sigmoid-parametrised) to each proj. "
                         "Logs alpha convergence to wandb. Disables alpha noise.")
+    p.add_argument("--train_layers",    type=str,   default=None,
+                   help="Comma-separated energy block indices to train (e.g. '11' or '10,11'). "
+                        "Other energy blocks' proj params are frozen. "
+                        "Energy blocks are h.8,h.9,h.10,h.11 for this checkpoint.")
     p.add_argument("--backbone_lr",      type=float, default=0.0,
                    help="If >0, unfreeze backbone (non-proj) params and train them at this LR. "
                         "Use e.g. 1e-5 for two-LR setup.")
@@ -102,6 +109,12 @@ def parse_args():
     p.add_argument("--save_dir",         type=str,   default=None)
     p.add_argument("--save_interval",    type=int,   default=2000)
     p.add_argument("--log_interval",     type=int,   default=50)
+    p.add_argument("--eval_interval",    type=int,   default=250,
+                   help="Steps between held-out validation loss evaluations. "
+                        "Uses the wikitext-103 validation split (not train). "
+                        "Critical for two_lr where backbone overfitting inflates train loss.")
+    p.add_argument("--eval_batches",     type=int,   default=50,
+                   help="Number of batches to average for each validation eval.")
     p.add_argument("--wandb_project",    type=str,   default="energy-gpt")
     p.add_argument("--wandb_name",       type=str,   default="410m_structured_proj_retrain")
     p.add_argument("--device",           type=str,   default="cuda" if torch.cuda.is_available() else "cpu")
@@ -178,14 +191,52 @@ def init_from_trained_weight(proj, W: torch.Tensor, scale_ff: float = 0.1):
 
     dtype = proj.U_attn.dtype
     with torch.no_grad():
-        # Attn stream: K_attn ≈ -W
-        proj.L_attn.copy_(L_init.to(dtype))
-        proj.U_attn.copy_(U_init.to(dtype))
-        proj.V_attn.copy_(V_init.to(dtype))
-        # FF stream: K_ff ≈ -scale_ff * W  (scale_ff ≈ 0.09–0.15 for these layers)
-        proj.L_ff.copy_((L_init * scale_ff).to(dtype))
-        proj.U_ff.copy_((U_init * scale_ff).to(dtype))
-        proj.V_ff.copy_((V_init * scale_ff).to(dtype))
+        if proj.single_stream:
+            # Single K applied to combined input — decompose W directly (no ff scaling).
+            proj.L_attn.copy_(L_init.to(dtype))
+            proj.U_attn.copy_(U_init.to(dtype))
+            proj.V_attn.copy_(V_init.to(dtype))
+        else:
+            # Attn stream: K_attn ≈ -W
+            proj.L_attn.copy_(L_init.to(dtype))
+            proj.U_attn.copy_(U_init.to(dtype))
+            proj.V_attn.copy_(V_init.to(dtype))
+            # FF stream: K_ff ≈ -scale_ff * W  (scale_ff ≈ 0.09–0.15 for these layers)
+            proj.L_ff.copy_((L_init * scale_ff).to(dtype))
+            proj.U_ff.copy_((U_init * scale_ff).to(dtype))
+            proj.V_ff.copy_((V_init * scale_ff).to(dtype))
+
+
+# ── Held-out evaluation ───────────────────────────────────────────────────────
+
+def eval_loss(model, tokenizer, seq_len: int, batch_size: int, device: str,
+              n_batches: int = 50) -> float:
+    """Evaluate on wikitext-103 validation split. Returns avg per-token CE loss."""
+    from datasets import load_dataset
+    ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation", streaming=True)
+    buf = []
+    total, count = 0.0, 0
+    model.eval()
+    with torch.no_grad():
+        for sample in ds:
+            text = sample["text"].strip()
+            if not text:
+                continue
+            ids = tokenizer.encode(text, add_special_tokens=False)
+            buf.extend(ids)
+            buf.append(tokenizer.eos_token_id)
+            while len(buf) >= (seq_len + 1) * batch_size and count < n_batches:
+                chunk = buf[: (seq_len + 1) * batch_size]
+                buf = buf[(seq_len + 1) * batch_size :]
+                t = torch.tensor(chunk, dtype=torch.long).view(batch_size, seq_len + 1)
+                inp = t[:, :seq_len].to(device)
+                out = model(inp, labels=inp)
+                total += out.loss.item()
+                count += 1
+            if count >= n_batches:
+                break
+    model.train()
+    return total / max(count, 1)
 
 
 # ── Alpha noise hooks ─────────────────────────────────────────────────────────
@@ -237,7 +288,8 @@ class AlphaNoiseHook:
 def swap_to_structured_proj(model, rank: int, dissipation_rank: int,
                              init_from_weights: bool = True,
                              learnable_alpha: bool = False,
-                             residual: bool = False) -> list:
+                             residual: bool = False,
+                             single_stream: bool = False) -> list:
     """Replace unconstrained proj in each energy block with DualLowRankPH.
 
     Returns list of (block_name, structured_proj) for the patched blocks.
@@ -269,19 +321,18 @@ def swap_to_structured_proj(model, rank: int, dissipation_rank: int,
         device = module.proj.weight.device
 
         if residual:
-            # Residual mode: frozen base W + trainable structured delta starting near 0.
-            # base_weight stored as buffer so it participates in forward but not in grad.
             structured = DualLowRankPortHamiltonianProjection(
                 d, rank=rank, dissipation_rank=dissipation_rank,
                 learnable_alpha=learnable_alpha,
                 base_weight=W_trained.to(dtype),
                 base_scale_ff=scale_ff_val,
+                single_stream=single_stream,
             ).to(dtype=dtype, device=device)
-            # All J/R params already have tiny std (1e-3) from constructor
         else:
             structured = DualLowRankPortHamiltonianProjection(
                 d, rank=rank, dissipation_rank=dissipation_rank,
                 learnable_alpha=learnable_alpha,
+                single_stream=single_stream,
             ).to(dtype=dtype, device=device)
             if init_from_weights:
                 init_from_trained_weight(structured, W_trained, scale_ff=scale_ff_val)
@@ -394,6 +445,7 @@ def train(args):
         init_from_weights=not args.no_warmstart and not args.residual,
         learnable_alpha=args.learnable_alpha,
         residual=args.residual,
+        single_stream=args.single_stream,
     )
     if not patched:
         raise RuntimeError("No energy blocks found — check model architecture.")
@@ -417,6 +469,18 @@ def train(args):
                     param.zero_()
                 param.requires_grad_(False)
         proj_params = [p for p in proj_params if p.requires_grad]
+
+    # ── train_layers: freeze blocks not in the target set ────────────────────
+    if args.train_layers:
+        target_layers = {int(x) for x in args.train_layers.split(',')}
+        for blk_name, structured in patched:
+            layer_idx = int(blk_name.split('.')[-1])
+            if layer_idx not in target_layers:
+                for p in structured.parameters():
+                    p.requires_grad_(False)
+        proj_params = [p for p in proj_params if p.requires_grad]
+        active = [n for n, _ in patched if int(n.split('.')[-1]) in target_layers]
+        print(f"train_layers={args.train_layers}: training only {active}")
 
     # ── Optionally unfreeze backbone with a smaller LR ────────────────────────
     backbone_params = []
@@ -530,6 +594,14 @@ def train(args):
                            "train/lr": lr_now,
                            "step": global_step})
                 accum_loss = 0.0
+
+            # Held-out validation eval (catches backbone overfitting in two_lr)
+            if global_step % args.eval_interval == 0:
+                val_loss = eval_loss(model, tokenizer, args.seq_len, args.batch_size,
+                                     args.device, n_batches=args.eval_batches)
+                val_ppl = math.exp(min(val_loss, 20))
+                print(f"  [val] step {global_step:6d}  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}")
+                wandb.log({"val/loss": val_loss, "val/ppl": val_ppl, "step": global_step})
 
             # Per-layer J/R norm and alpha logging
             if global_step % args.norm_log_interval == 0:

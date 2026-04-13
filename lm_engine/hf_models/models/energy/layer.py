@@ -161,35 +161,41 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         learnable_alpha: bool = False,
         base_weight: torch.Tensor | None = None,
         base_scale_ff: float = 1.0,
+        single_stream: bool = False,
     ):
         """
         Args:
             base_weight: if provided, stores a frozen copy of the trained proj weight W.
                 In residual mode, the forward computes:
                     delta = -W @ (attn_out + base_scale_ff * ffwd_out)   [frozen base]
-                          + (J_attn - R_attn) @ attn_out                 [trained structure]
-                          + (J_ff   - R_ff  ) @ ffwd_out
-                This guarantees the initial output equals the trained model (loss ≈ 2.4)
-                since the J-R factors start near zero.
+                          + structured correction                          [trained]
+                This guarantees the initial output equals the trained model.
             base_scale_ff: scale_ff value used in the trained model (for the base pass).
+            single_stream: if True, applies ONE K to the combined
+                (attn_out + base_scale_ff * ffwd_out) input — mirrors the original
+                single-W architecture but with J-R structure.  Only U/V/L_attn
+                params are created; U/V/L_ff are absent.
         """
         super().__init__()
         self.rank = rank
         self.dissipation_rank = dissipation_rank
         self.learnable_alpha = learnable_alpha
+        self.single_stream = single_stream
         std = 1e-3  # tiny init so residual mode starts at ~0 correction
-        # Attention stream
+        # Attention stream (also serves as the single stream when single_stream=True)
         self.U_attn = nn.Parameter(torch.randn(hidden_size, rank) * std)
         self.V_attn = nn.Parameter(torch.randn(hidden_size, rank) * std)
         self.L_attn = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * std)
-        # FFN stream
-        self.U_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
-        self.V_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
-        self.L_ff = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * std)
+        # FFN stream (only created for dual-stream mode)
+        if not single_stream:
+            self.U_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
+            self.V_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
+            self.L_ff = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * std)
         # Learnable alpha: sigmoid(0) = 0.5 → balanced mix at init
         if learnable_alpha:
             self.log_alpha_attn = nn.Parameter(torch.zeros(1))
-            self.log_alpha_ff   = nn.Parameter(torch.zeros(1))
+            if not single_stream:
+                self.log_alpha_ff = nn.Parameter(torch.zeros(1))
         # Residual mode: frozen base contribution from trained W
         if base_weight is not None:
             self.register_buffer('base_weight', base_weight.detach().clone())
@@ -211,40 +217,48 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         return (1.0 - alpha) * self._J(U, V) - alpha * self._R(L)
 
     def forward(self, attn_out: torch.Tensor, ffwd_out: torch.Tensor) -> torch.Tensor:
-        if self.learnable_alpha:
-            alpha_attn = torch.sigmoid(self.log_alpha_attn)
-            alpha_ff   = torch.sigmoid(self.log_alpha_ff)
-            K_attn = (1.0 - alpha_attn) * self._J(self.U_attn, self.V_attn) \
-                     - alpha_attn * self._R(self.L_attn)
-            K_ff   = (1.0 - alpha_ff)   * self._J(self.U_ff,   self.V_ff) \
-                     - alpha_ff   * self._R(self.L_ff)
-        else:
-            K_attn = self._K(self.U_attn, self.V_attn, self.L_attn)
-            K_ff   = self._K(self.U_ff,   self.V_ff,   self.L_ff)
+        combined = attn_out + self.base_scale_ff * ffwd_out
 
-        struct_delta = torch.matmul(attn_out, K_attn.T) + torch.matmul(ffwd_out, K_ff.T)
+        if self.single_stream:
+            # One K applied to combined input — mirrors original single-W architecture.
+            if self.learnable_alpha:
+                alpha = torch.sigmoid(self.log_alpha_attn)
+                K = (1.0 - alpha) * self._J(self.U_attn, self.V_attn) \
+                    - alpha * self._R(self.L_attn)
+            else:
+                K = self._K(self.U_attn, self.V_attn, self.L_attn)
+            struct_delta = torch.matmul(combined, K.T)
+        else:
+            # Dual stream: independent K for attn and FFN.
+            if self.learnable_alpha:
+                alpha_attn = torch.sigmoid(self.log_alpha_attn)
+                alpha_ff   = torch.sigmoid(self.log_alpha_ff)
+                K_attn = (1.0 - alpha_attn) * self._J(self.U_attn, self.V_attn) \
+                         - alpha_attn * self._R(self.L_attn)
+                K_ff   = (1.0 - alpha_ff)   * self._J(self.U_ff,   self.V_ff) \
+                         - alpha_ff   * self._R(self.L_ff)
+            else:
+                K_attn = self._K(self.U_attn, self.V_attn, self.L_attn)
+                K_ff   = self._K(self.U_ff,   self.V_ff,   self.L_ff)
+            struct_delta = torch.matmul(attn_out, K_attn.T) + torch.matmul(ffwd_out, K_ff.T)
 
         if self.base_weight is not None:
-            # Residual mode: subtract frozen trained contribution, add structured correction.
-            # Combined: delta = -W @ (attn + scale_ff * ff) + (J-R)@attn + (J-R_ff)@ff
-            # At init (J≈0, R≈0): delta ≈ -W @ combined → same as trained model.
-            combined = attn_out + self.base_scale_ff * ffwd_out
+            # Residual mode: subtract frozen trained base, add structured correction.
+            # At init (J≈0, R≈0): struct_delta ≈ 0 → output = trained model.
             base_delta = torch.matmul(combined, self.base_weight.T)
             return -base_delta + struct_delta
 
         return struct_delta
 
     def get_alpha_attn(self) -> float:
-        """Return the effective alpha for the attention stream (0.5 if not learnable)."""
         if self.learnable_alpha:
             return torch.sigmoid(self.log_alpha_attn).item()
         return 0.5
 
     def get_alpha_ff(self) -> float:
-        """Return the effective alpha for the FFN stream (0.5 if not learnable)."""
-        if self.learnable_alpha:
+        if self.learnable_alpha and not self.single_stream:
             return torch.sigmoid(self.log_alpha_ff).item()
-        return 0.5
+        return self.get_alpha_attn()  # single_stream: same alpha for both
 
     def get_J_attn(self):
         return self._J(self.U_attn, self.V_attn)
@@ -253,9 +267,13 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         return self._R(self.L_attn)
 
     def get_J_ff(self):
+        if self.single_stream:
+            return self.get_J_attn()
         return self._J(self.U_ff, self.V_ff)
 
     def get_R_ff(self):
+        if self.single_stream:
+            return self.get_R_attn()
         return self._R(self.L_ff)
 
 
