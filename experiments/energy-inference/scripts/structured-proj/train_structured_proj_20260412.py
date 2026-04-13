@@ -118,8 +118,9 @@ def parse_args():
     p.add_argument("--wandb_project",    type=str,   default="energy-gpt")
     p.add_argument("--wandb_name",       type=str,   default="410m_structured_proj_retrain")
     p.add_argument("--device",           type=str,   default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--dataset",          type=str,   default="wikitext",
-                   help="HF dataset name. 'wikitext' uses wikitext-103-raw-v1.")
+    p.add_argument("--dataset",          type=str,   default="nematron",
+                   help="Training dataset: 'nematron' (default, pre-tokenized Megatron binary) "
+                        "or an HF dataset name ('wikitext' uses wikitext-103-raw-v1).")
     return p.parse_args()
 
 
@@ -355,40 +356,111 @@ def swap_to_structured_proj(model, rank: int, dissipation_rank: int,
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def make_dataloader(tokenizer, dataset_name: str, seq_len: int, batch_size: int,
-                    device: str):
-    """Stream batches of token sequences from a HuggingFace text dataset."""
+# Nematron pre-tokenized Megatron binary shards (web-nemotron-cc-hq)
+_NEMATRON_PATHS = [
+    "/proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0",
+    "/proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1",
+]
+
+# Megatron dtype code → numpy dtype
+_MEGATRON_DTYPES = {
+    1: "uint8", 2: "int8",  3: "int16", 4: "int32", 5: "int64",
+    6: "float64", 7: "float32", 8: "uint16",
+}
+_MEGATRON_HEADER = b"MMIDIDX\x00\x00"
+
+
+def _megatron_batch_gen(paths, seq_len, batch_size, device):
+    """Stream token batches from pre-tokenized Megatron binary (.bin/.idx) files.
+
+    Each .idx document is a variable-length array of token IDs (already tokenized
+    with the granite-4.0 tokenizer).  We pack them sequentially into seq_len chunks
+    and yield (inp, inp) batches — HF handles the label shift internally.
+    """
+    import struct
+    import numpy as np
+
+    token_buffer = []
+
+    for path in paths:
+        idx_path = path + ".idx"
+        bin_path = path + ".bin"
+
+        # ── Read index ────────────────────────────────────────────────────────
+        with open(idx_path, "rb") as f:
+            header = f.read(9)
+            assert header == _MEGATRON_HEADER, f"Bad Megatron header: {idx_path}"
+            _version = struct.unpack("<Q", f.read(8))[0]
+            dtype_code = struct.unpack("<B", f.read(1))[0]
+            dtype = np.dtype(_MEGATRON_DTYPES[dtype_code])
+            seq_count = struct.unpack("<Q", f.read(8))[0]
+            _doc_count = struct.unpack("<Q", f.read(8))[0]
+            offset = f.tell()
+
+        idx_mm = np.memmap(idx_path, mode="r", order="C")
+        buf_view = memoryview(idx_mm)
+        seq_lengths  = np.frombuffer(buf_view, dtype=np.int32, count=seq_count,
+                                     offset=offset)
+        seq_pointers = np.frombuffer(buf_view, dtype=np.int64, count=seq_count,
+                                     offset=offset + seq_lengths.nbytes)
+
+        # Memory-map the bin file as bytes for frombuffer access
+        bin_buf = memoryview(np.memmap(bin_path, mode="r", dtype=np.uint8))
+
+        # Shuffle document order
+        indices = list(range(seq_count))
+        random.shuffle(indices)
+
+        for doc_idx in indices:
+            ptr    = int(seq_pointers[doc_idx])   # byte offset
+            length = int(seq_lengths[doc_idx])    # token count
+            tokens = np.frombuffer(bin_buf, dtype=dtype, count=length, offset=ptr)
+            token_buffer.extend(tokens.tolist())
+
+            while len(token_buffer) >= (seq_len + 1) * batch_size:
+                chunk = token_buffer[: (seq_len + 1) * batch_size]
+                token_buffer = token_buffer[(seq_len + 1) * batch_size :]
+                t   = torch.tensor(chunk, dtype=torch.long).view(batch_size, seq_len + 1)
+                inp = t[:, :seq_len].to(device)
+                # Yield (input_ids, input_ids) — HF shifts labels internally.
+                yield inp, inp
+
+
+def _hf_batch_gen(tokenizer, dataset_name, seq_len, batch_size, device):
+    """Stream token batches from a HuggingFace text dataset (tokenizes on the fly)."""
     from datasets import load_dataset
 
     if dataset_name == "wikitext":
         ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
-        text_col = "text"
     else:
         ds = load_dataset(dataset_name, split="train", streaming=True)
-        text_col = "text"
 
     token_buffer = []
+    for sample in ds:
+        text = sample["text"].strip()
+        if not text:
+            continue
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        token_buffer.extend(ids)
+        token_buffer.append(tokenizer.eos_token_id)
+        while len(token_buffer) >= (seq_len + 1) * batch_size:
+            chunk = token_buffer[: (seq_len + 1) * batch_size]
+            token_buffer = token_buffer[(seq_len + 1) * batch_size :]
+            t   = torch.tensor(chunk, dtype=torch.long).view(batch_size, seq_len + 1)
+            inp = t[:, :seq_len].to(device)
+            yield inp, inp
 
-    def batch_gen():
-        nonlocal token_buffer
-        for sample in ds:
-            text = sample[text_col].strip()
-            if not text:
-                continue
-            ids = tokenizer.encode(text, add_special_tokens=False)
-            token_buffer.extend(ids)
-            token_buffer.append(tokenizer.eos_token_id)
-            while len(token_buffer) >= (seq_len + 1) * batch_size:
-                chunk = token_buffer[: (seq_len + 1) * batch_size]
-                token_buffer = token_buffer[(seq_len + 1) * batch_size :]
-                t = torch.tensor(chunk, dtype=torch.long).view(batch_size, seq_len + 1)
-                # Yield (input_ids, input_ids) — NOT pre-shifted labels.
-                # HF AutoModelForCausalLM shifts internally; pre-shifting here
-                # would cause a double-shift and predict t[i+2] instead of t[i+1].
-                inp = t[:, :seq_len].to(device)
-                yield inp, inp
 
-    return batch_gen()
+def make_dataloader(tokenizer, dataset_name: str, seq_len: int, batch_size: int,
+                    device: str):
+    """Return a generator yielding (input_ids, input_ids) batches.
+
+    'nematron' (default): reads from pre-tokenized Megatron binary files.
+    Any other value: treated as an HF dataset name and tokenized on the fly.
+    """
+    if dataset_name == "nematron":
+        return _megatron_batch_gen(_NEMATRON_PATHS, seq_len, batch_size, device)
+    return _hf_batch_gen(tokenizer, dataset_name, seq_len, batch_size, device)
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
