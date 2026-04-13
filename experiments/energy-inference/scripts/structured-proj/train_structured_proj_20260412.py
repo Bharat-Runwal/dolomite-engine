@@ -522,6 +522,21 @@ def train(args):
     if not patched:
         raise RuntimeError("No energy blocks found — check model architecture.")
 
+    # ── Restore structured proj weights from checkpoint ────────────────────────
+    # HF from_pretrained can't map saved L_attn/U_attn/... back to the original
+    # proj.weight architecture, so it drops them and reinitialises proj.weight.
+    # After swap we have the correct architecture; now overwrite with saved values.
+    if resume_ckpt_path:
+        proj_state_path = resume_ckpt_path / "proj_state.pt"
+        if proj_state_path.exists():
+            saved_proj = torch.load(proj_state_path, map_location=args.device)
+            missing, unexpected = model.load_state_dict(saved_proj, strict=False)
+            print(f"  Loaded structured proj weights from {proj_state_path}")
+            if missing:
+                print(f"  WARNING missing keys: {missing[:3]}")
+        else:
+            print(f"  WARNING: {proj_state_path} not found — proj params reinitialised from W.")
+
     # ── Freeze everything, then re-enable only structured proj params ─────────
     for name, param in model.named_parameters():
         param.requires_grad_(False)
@@ -702,6 +717,14 @@ def train(args):
                 ckpt_path = save_dir / f"step_{global_step}"
                 model.save_pretrained(ckpt_path)
                 tokenizer.save_pretrained(ckpt_path)
+                # Save structured proj params separately so resume can reload them
+                # after from_pretrained (which can't map L_attn/etc. to proj.weight).
+                _PROJ_KEYS = ("L_attn", "U_attn", "V_attn", "L_ff", "U_ff", "V_ff",
+                              "base_weight", "log_alpha")
+                proj_state = {k: v.clone()
+                              for k, v in model.state_dict().items()
+                              if any(x in k for x in _PROJ_KEYS)}
+                torch.save(proj_state, ckpt_path / "proj_state.pt")
                 # Save optimizer/scheduler/wandb state for resume
                 torch.save({
                     "global_step": global_step,

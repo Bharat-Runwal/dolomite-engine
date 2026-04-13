@@ -39,7 +39,7 @@ python experiments/energy-inference/scripts/structured-proj/train_structured_pro
     --save_interval 1000 \
     --log_interval 25 \
     --norm_log_interval 100 \
-    --wandb_name "410m_struct_learnable_alpha"
+    --wandb_name "410m_struct_learnable_alpha_20260413"
 EOF
 
 echo "Submitted. Monitor: bjobs / bpeek <jobid>"
