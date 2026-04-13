@@ -118,6 +118,8 @@ class CommonConfig(PretrainedConfig):
         iter_noise_eta: float = 0.0,
         energy_norm_type: str | None = None,
         energy_proj_type: str = "unconstrained",
+        energy_proj_rank: int = 32,
+        energy_dissipation_rank: int = 16,
         energy_stop_grad_key: bool = False,
         energy_attn_add_wv_wo: bool = False,
         scale_ff_init: float | list[float] | None = None,
@@ -155,6 +157,8 @@ class CommonConfig(PretrainedConfig):
         # Energy block projection type: "unconstrained" (learned linear),
         # "pos_scalar" (positive scalar), "identity" (no projection)
         self.energy_proj_type = energy_proj_type
+        self.energy_proj_rank = energy_proj_rank
+        self.energy_dissipation_rank = energy_dissipation_rank
         self.energy_stop_grad_key = energy_stop_grad_key
         self.energy_attn_add_wv_wo = energy_attn_add_wv_wo
         self.scale_ff_init = scale_ff_init

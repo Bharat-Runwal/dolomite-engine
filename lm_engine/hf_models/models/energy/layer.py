@@ -128,6 +128,137 @@ class LowRankPortHamiltonianProjection(nn.Module):
 
 
 
+class DualLowRankPortHamiltonianProjection(nn.Module):
+    """Split port-Hamiltonian projection: separate J-R matrices for attn and FFN.
+
+    For each stream (attn, ff):
+        J = U V^T - V U^T   (antisymmetric / curl / rotation,   U,V: d x r_j)
+        R = L L^T            (PSD / symmetric / dissipation,     L:   d x r_d)
+
+    Update: h := h + ((1-α)*J_attn - α*R_attn) @ attn_out
+                   + ((1-α)*J_ff   - α*R_ff  ) @ ffwd_out
+
+    where α ∈ [0,1]: α=0 → pure rotation (J only), α=1 → pure descent (R only).
+    Default (α=0.5) recovers the original equal mix.
+
+    If learnable_alpha=True, α is a per-stream learned scalar (sigmoid-parametrised),
+    initialised at 0.5 so training starts from the balanced mix.
+
+    Rationale for splitting: the attention gradient has a causal asymmetry that
+    the FFN gradient lacks; giving each its own J-R pair lets them learn different
+    curl/descent balances.  scale_ff is frozen at 1.0 (absorbed by the ff matrices).
+
+    Parameter count per block: 2 * (2*d*r_j + d*r_d)
+      e.g. d=1280, r_j=32, r_d=16 → 2*(2*1280*32 + 1280*16) = 204,800
+      vs unconstrained d^2 = 1,638,400  (~8x fewer)
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        rank: int = 32,
+        dissipation_rank: int = 16,
+        learnable_alpha: bool = False,
+        base_weight: torch.Tensor | None = None,
+        base_scale_ff: float = 1.0,
+    ):
+        """
+        Args:
+            base_weight: if provided, stores a frozen copy of the trained proj weight W.
+                In residual mode, the forward computes:
+                    delta = -W @ (attn_out + base_scale_ff * ffwd_out)   [frozen base]
+                          + (J_attn - R_attn) @ attn_out                 [trained structure]
+                          + (J_ff   - R_ff  ) @ ffwd_out
+                This guarantees the initial output equals the trained model (loss ≈ 2.4)
+                since the J-R factors start near zero.
+            base_scale_ff: scale_ff value used in the trained model (for the base pass).
+        """
+        super().__init__()
+        self.rank = rank
+        self.dissipation_rank = dissipation_rank
+        self.learnable_alpha = learnable_alpha
+        std = 1e-3  # tiny init so residual mode starts at ~0 correction
+        # Attention stream
+        self.U_attn = nn.Parameter(torch.randn(hidden_size, rank) * std)
+        self.V_attn = nn.Parameter(torch.randn(hidden_size, rank) * std)
+        self.L_attn = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * std)
+        # FFN stream
+        self.U_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
+        self.V_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
+        self.L_ff = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * std)
+        # Learnable alpha: sigmoid(0) = 0.5 → balanced mix at init
+        if learnable_alpha:
+            self.log_alpha_attn = nn.Parameter(torch.zeros(1))
+            self.log_alpha_ff   = nn.Parameter(torch.zeros(1))
+        # Residual mode: frozen base contribution from trained W
+        if base_weight is not None:
+            self.register_buffer('base_weight', base_weight.detach().clone())
+            self.base_scale_ff = base_scale_ff
+        else:
+            self.base_weight = None
+            self.base_scale_ff = base_scale_ff
+
+    def _J(self, U: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
+        """Antisymmetric rotation matrix: J = UV^T - VU^T."""
+        return torch.matmul(U, V.T) - torch.matmul(V, U.T)
+
+    def _R(self, L: torch.Tensor) -> torch.Tensor:
+        """PSD dissipation matrix: R = LL^T."""
+        return torch.matmul(L, L.T)
+
+    def _K(self, U, V, L, alpha: float = 0.5):
+        """Compute K = (1-α)*J - α*R.  α=0.5 → equal mix (default)."""
+        return (1.0 - alpha) * self._J(U, V) - alpha * self._R(L)
+
+    def forward(self, attn_out: torch.Tensor, ffwd_out: torch.Tensor) -> torch.Tensor:
+        if self.learnable_alpha:
+            alpha_attn = torch.sigmoid(self.log_alpha_attn)
+            alpha_ff   = torch.sigmoid(self.log_alpha_ff)
+            K_attn = (1.0 - alpha_attn) * self._J(self.U_attn, self.V_attn) \
+                     - alpha_attn * self._R(self.L_attn)
+            K_ff   = (1.0 - alpha_ff)   * self._J(self.U_ff,   self.V_ff) \
+                     - alpha_ff   * self._R(self.L_ff)
+        else:
+            K_attn = self._K(self.U_attn, self.V_attn, self.L_attn)
+            K_ff   = self._K(self.U_ff,   self.V_ff,   self.L_ff)
+
+        struct_delta = torch.matmul(attn_out, K_attn.T) + torch.matmul(ffwd_out, K_ff.T)
+
+        if self.base_weight is not None:
+            # Residual mode: subtract frozen trained contribution, add structured correction.
+            # Combined: delta = -W @ (attn + scale_ff * ff) + (J-R)@attn + (J-R_ff)@ff
+            # At init (J≈0, R≈0): delta ≈ -W @ combined → same as trained model.
+            combined = attn_out + self.base_scale_ff * ffwd_out
+            base_delta = torch.matmul(combined, self.base_weight.T)
+            return -base_delta + struct_delta
+
+        return struct_delta
+
+    def get_alpha_attn(self) -> float:
+        """Return the effective alpha for the attention stream (0.5 if not learnable)."""
+        if self.learnable_alpha:
+            return torch.sigmoid(self.log_alpha_attn).item()
+        return 0.5
+
+    def get_alpha_ff(self) -> float:
+        """Return the effective alpha for the FFN stream (0.5 if not learnable)."""
+        if self.learnable_alpha:
+            return torch.sigmoid(self.log_alpha_ff).item()
+        return 0.5
+
+    def get_J_attn(self):
+        return self._J(self.U_attn, self.V_attn)
+
+    def get_R_attn(self):
+        return self._R(self.L_attn)
+
+    def get_J_ff(self):
+        return self._J(self.U_ff, self.V_ff)
+
+    def get_R_ff(self):
+        return self._R(self.L_ff)
+
+
 class EnergyBlock(nn.Module):
     """Energy Transformer block with customizable attention and feedforward.
 
@@ -203,6 +334,16 @@ class EnergyBlock(nn.Module):
                 self.proj_mlp = nn.Linear(hidden_size, hidden_size, bias=False)
                 self.proj = None  # not used; forward handles separately
                 self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            elif proj_type == "dual_low_rank_port_hamiltonian":
+                # Split port-Hamiltonian: separate low-rank J-R for attn and FFN streams.
+                # h := h + (J_attn - R_attn) @ attn_out + (J_ff - R_ff) @ ffwd_out
+                # scale_ff absorbed into ff matrices; freeze at 1.0.
+                rank = getattr(config, 'energy_proj_rank', 32)
+                dissipation_rank = getattr(config, 'energy_dissipation_rank', 16)
+                self.proj = DualLowRankPortHamiltonianProjection(
+                    hidden_size, rank=rank, dissipation_rank=dissipation_rank
+                )
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
             else:
                 raise ValueError(f"Unknown energy_proj_type: {proj_type}")
 
@@ -252,6 +393,9 @@ class EnergyBlock(nn.Module):
             # Dual projection: separate matrices for attn and MLP (scale_ff frozen at 1.0)
             if self.proj_type == "dual_unconstrained":
                 hidden_states = hidden_states - self.proj_attn(attn_out) - self.proj_mlp(ffwd_out)
+            # Split port-Hamiltonian: h := h + proj(attn_out, ffwd_out)
+            elif self.proj_type == "dual_low_rank_port_hamiltonian":
+                hidden_states = hidden_states + self.proj(attn_out, ffwd_out)
             # Rotation projections (antisymmetric, etc.): h := h + proj(grad_E)
             elif self.proj_type in ["antisymmetric", "port_hamiltonian", "low_rank_antisymmetric", "low_rank_port_hamiltonian"]:
                 grad_E = attn_out + self.scale_ff * ffwd_out
