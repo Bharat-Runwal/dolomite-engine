@@ -1,0 +1,44 @@
+#!/bin/bash
+# Submit a lm-evaluation-harness job for a given checkpoint.
+# Called automatically at the end of each training job.
+#
+# Usage: bash submit_eval.sh <checkpoint_path> <job_name>
+#
+# Benchmarks: arc_challenge, arc_easy, boolq, copa, hellaswag, lambada_openai,
+#   openbookqa, piqa, race, sciq, wikitext (word_ppl), winogrande,
+#   mmlu, gsm8k, gsm8k_cot
+#
+# Results written to <checkpoint_path>/harness_results.json
+
+CHECKPOINT="${1:?Usage: submit_eval.sh <checkpoint_path> <job_name>}"
+JOB_NAME="${2:-eval}"
+REPO=/proj/dmfexp/nima/Code/dolomite-engine
+
+TASKS="arc_challenge,arc_easy,boolq,copa,hellaswag,lambada_openai,openbookqa,piqa,race,sciq,wikitext,winogrande,mmlu,gsm8k,gsm8k_cot"
+
+bsub \
+    -q normal \
+    -G grp_ebm \
+    -J "${JOB_NAME}" \
+    -gpu "num=1" \
+    -n 1 \
+    -M 48G \
+    -W 02:00 \
+    -o "${HOME}/${JOB_NAME}_%J.stdout" \
+    -e "${HOME}/${JOB_NAME}_%J.stderr" \
+    <<EOF
+#!/bin/bash
+source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
+export PYTHONPATH=$REPO:\$PYTHONPATH
+uv pip install accelerate lm-eval -q
+cd $REPO
+python experiments/energy-inference/scripts/structured-proj/eval_harness.py \\
+    --model hf \\
+    --model_args "pretrained=$CHECKPOINT,dtype=bfloat16" \\
+    --tasks $TASKS \\
+    --device cuda:0 \\
+    --batch_size 4 \\
+    --output_path "$CHECKPOINT/harness_results.json"
+EOF
+
+echo "Eval job submitted: ${JOB_NAME}  checkpoint: ${CHECKPOINT}"

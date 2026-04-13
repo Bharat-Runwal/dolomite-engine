@@ -211,12 +211,28 @@ def init_from_trained_weight(proj, W: torch.Tensor, scale_ff: float = 0.1):
 # ── Held-out evaluation ───────────────────────────────────────────────────────
 
 def eval_loss(model, tokenizer, seq_len: int, batch_size: int, device: str,
-              n_batches: int = 50) -> float:
-    """Evaluate on wikitext-103 validation split. Returns avg per-token CE loss."""
+              n_batches: int = 50) -> dict:
+    """Evaluate on wikitext-103 validation split.
+
+    Returns a dict with:
+      loss       – avg per-token CE loss (nats)
+      ppl        – token-level perplexity
+      bpd        – bits per character (matches original wiki bpd metric)
+      byte_ppl   – 2^bpd  (compare to original byte_ppl=1.8)
+      word_ppl   – word-level perplexity (compare to original word_ppl=25)
+    """
     from datasets import load_dataset
     ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation", streaming=True)
-    buf = []
-    total, count = 0.0, 0
+
+    buf = []                   # token id buffer
+    total_loss = 0.0
+    count = 0
+    # Accumulate text stats to convert token-loss → char/word/byte units
+    total_chars = 0
+    total_words = 0
+    total_bytes = 0
+    total_tokens = 0
+
     model.eval()
     with torch.no_grad():
         for sample in ds:
@@ -224,20 +240,45 @@ def eval_loss(model, tokenizer, seq_len: int, batch_size: int, device: str,
             if not text:
                 continue
             ids = tokenizer.encode(text, add_special_tokens=False)
+            if not ids:
+                continue
             buf.extend(ids)
             buf.append(tokenizer.eos_token_id)
+            total_chars  += len(text)
+            total_words  += len(text.split())
+            total_bytes  += len(text.encode("utf-8"))
+            total_tokens += len(ids)
+
             while len(buf) >= (seq_len + 1) * batch_size and count < n_batches:
                 chunk = buf[: (seq_len + 1) * batch_size]
-                buf = buf[(seq_len + 1) * batch_size :]
-                t = torch.tensor(chunk, dtype=torch.long).view(batch_size, seq_len + 1)
+                buf   = buf[(seq_len + 1) * batch_size :]
+                t   = torch.tensor(chunk, dtype=torch.long).view(batch_size, seq_len + 1)
                 inp = t[:, :seq_len].to(device)
                 out = model(inp, labels=inp)
-                total += out.loss.item()
+                total_loss += out.loss.item()
                 count += 1
             if count >= n_batches:
                 break
+
     model.train()
-    return total / max(count, 1)
+    avg_loss = total_loss / max(count, 1)
+
+    # Convert token loss → character/word/byte metrics using empirical ratios
+    cpt = total_chars  / max(total_tokens, 1)   # chars per token
+    wpt = total_words  / max(total_tokens, 1)   # words per token
+    bpt = total_bytes  / max(total_tokens, 1)   # bytes per token
+
+    bpd      = avg_loss / (math.log(2) * max(cpt, 1e-9))   # bits per char
+    byte_ppl = 2 ** (avg_loss / (math.log(2) * max(bpt, 1e-9)))
+    word_ppl = math.exp(min(avg_loss / max(wpt, 1e-9), 20))
+
+    return {
+        "loss":     avg_loss,
+        "ppl":      math.exp(min(avg_loss, 20)),
+        "bpd":      bpd,
+        "byte_ppl": byte_ppl,
+        "word_ppl": word_ppl,
+    }
 
 
 # ── Alpha noise hooks ─────────────────────────────────────────────────────────
@@ -467,39 +508,54 @@ def make_dataloader(tokenizer, dataset_name: str, seq_len: int, batch_size: int,
 
 def train(args):
     import wandb
+    from datetime import datetime
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import lm_engine.hf_models  # noqa: F401
 
-    # ── Save dir (needed early to detect resume checkpoint) ───────────────────
-    # Include wandb_name so each experiment variant gets its own directory
-    # and resume logic doesn't collide across different runs.
-    ckpt_name = Path(args.checkpoint).name
-    save_dir = Path(args.save_dir or (
-        Path(__file__).parent.parent.parent / "results" / "structured-proj" /
-        args.wandb_name
-    ))
-    save_dir.mkdir(parents=True, exist_ok=True)
+    # ── Save dir: timestamped per-run to prevent cross-run collisions ─────────
+    # Each fresh start gets a unique dir: {wandb_name}_{YYYYMMDD_HHMMSS}
+    # Resume: scan for the most recent dir matching {wandb_name}_20* that has
+    # a checkpoint, so preempted runs continue in the same dir and wandb run.
+    # Explicit --save_dir bypasses all of this.
+    base_dir = Path(args.save_dir) if args.save_dir else (
+        Path(__file__).parent.parent.parent / "results" / "structured-proj"
+    )
 
-    # ── Auto-detect resume checkpoint ─────────────────────────────────────────
     resume_step = 0
     resume_ckpt_path = None
     resume_wandb_id = None
-    existing = sorted(
-        [p for p in save_dir.glob("step_*") if (p / "training_state.pt").exists()],
-        key=lambda p: int(p.name.split("_")[1]),
-    )
-    if existing:
-        resume_ckpt_path = existing[-1]
-        resume_step = int(resume_ckpt_path.name.split("_")[1])
-        state_path = resume_ckpt_path / "training_state.pt"
-        saved_state = torch.load(state_path, map_location="cpu")
-        resume_wandb_id = saved_state.get("wandb_run_id")
-        print(f"\nResuming from checkpoint: {resume_ckpt_path} (step {resume_step})")
-    else:
-        print(f"\nNo resume checkpoint found in {save_dir}; starting from scratch.")
+    save_dir = None
+
+    if not args.save_dir:
+        # Scan for existing timestamped run dirs for this wandb_name
+        existing_runs = sorted(
+            [d for d in base_dir.glob(f"{args.wandb_name}_20*") if d.is_dir()],
+            key=lambda d: d.name,
+        )
+        for run_dir in reversed(existing_runs):
+            ckpts = sorted(
+                [p for p in run_dir.glob("step_*") if (p / "training_state.pt").exists()],
+                key=lambda p: int(p.name.split("_")[1]),
+            )
+            if ckpts:
+                save_dir = run_dir
+                resume_ckpt_path = ckpts[-1]
+                resume_step = int(resume_ckpt_path.name.split("_")[1])
+                saved_state = torch.load(resume_ckpt_path / "training_state.pt",
+                                         map_location="cpu")
+                resume_wandb_id = saved_state.get("wandb_run_id")
+                print(f"\nResuming from {save_dir.name} (step {resume_step})")
+                break
+
+    if save_dir is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = base_dir / f"{args.wandb_name}_{ts}"
+        print(f"\nFresh start: {save_dir.name}")
+
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Load model ────────────────────────────────────────────────────────────
-    load_path = resume_ckpt_path if resume_ckpt_path else args.checkpoint
+    load_path = str(resume_ckpt_path) if resume_ckpt_path else args.checkpoint
     print(f"Loading: {load_path}")
     tokenizer = AutoTokenizer.from_pretrained(load_path)
     model = AutoModelForCausalLM.from_pretrained(
@@ -682,13 +738,22 @@ def train(args):
                            "step": global_step})
                 accum_loss = 0.0
 
-            # Held-out validation eval (catches backbone overfitting in two_lr)
+            # Held-out validation eval on WikiText-103 validation split
+            # Reports token/word/char/byte metrics for direct comparison to
+            # original runs (word_ppl=25, bpd=0.8, byte_ppl=1.8).
             if global_step % args.eval_interval == 0:
-                val_loss = eval_loss(model, tokenizer, args.seq_len, args.batch_size,
-                                     args.device, n_batches=args.eval_batches)
-                val_ppl = math.exp(min(val_loss, 20))
-                print(f"  [val] step {global_step:6d}  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}")
-                wandb.log({"val/loss": val_loss, "val/ppl": val_ppl, "step": global_step})
+                vm = eval_loss(model, tokenizer, args.seq_len, args.batch_size,
+                               args.device, n_batches=args.eval_batches)
+                print(f"  [val] step {global_step:6d}  "
+                      f"loss={vm['loss']:.4f}  ppl={vm['ppl']:.2f}  "
+                      f"word_ppl={vm['word_ppl']:.2f}  bpd={vm['bpd']:.4f}  "
+                      f"byte_ppl={vm['byte_ppl']:.4f}")
+                wandb.log({"val/loss":     vm["loss"],
+                           "val/ppl":      vm["ppl"],
+                           "val/word_ppl": vm["word_ppl"],
+                           "val/bpd":      vm["bpd"],
+                           "val/byte_ppl": vm["byte_ppl"],
+                           "step": global_step})
 
             # Per-layer J/R norm and alpha logging
             if global_step % args.norm_log_interval == 0:
@@ -746,6 +811,9 @@ def train(args):
     final_path = save_dir / "final"
     model.save_pretrained(final_path)
     tokenizer.save_pretrained(final_path)
+    # Print in a parseable format so the caller (bsub heredoc) can extract it
+    # and submit the downstream harness eval job.
+    print(f"FINAL_CKPT={final_path}")
 
     # Save training config
     with open(save_dir / "train_config.json", "w") as f:

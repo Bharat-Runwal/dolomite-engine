@@ -1,10 +1,6 @@
 #!/bin/bash
 # Per-layer focus: train only the penultimate energy block (h.10), freeze h.8,h.9,h.11.
-#
-# Hypothesis: latent-space "thinking" happens in intermediate energy blocks,
-# not the final decoding step. h.10 (6 recurrence iterations) may be where
-# the curl/descent balance matters most for representation quality.
-# If h.10-only outperforms h.11-only, it supports the latent-thinking view.
+# Tests latent-space thinking hypothesis: h.10 may be where curl/descent balance matters most.
 #
 # Usage: bash experiments/energy-inference/scripts/structured-proj/run_penultimate_block.sh
 
@@ -20,12 +16,16 @@ bsub \
     -W 01:00 \
     -o "${HOME}/struct_proj_penult_block_%J.stdout" \
     -e "${HOME}/struct_proj_penult_block_%J.stderr" \
-    <<EOF
+    <<'BSUB_SCRIPT'
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
-export PYTHONPATH=$REPO:\$PYTHONPATH
-uv pip install accelerate datasets wandb tqdm -q
+REPO=/proj/dmfexp/nima/Code/dolomite-engine
+export PYTHONPATH=$REPO:$PYTHONPATH
+uv pip install accelerate datasets wandb tqdm lm-eval -q
 cd $REPO
+
+# Run training; tee output so we can extract the final checkpoint path
+TMPLOG="/tmp/train_${LSB_JOBID}.log"
 python experiments/energy-inference/scripts/structured-proj/train_structured_proj_20260412.py \
     --steps 3000 \
     --batch_size 8 \
@@ -38,7 +38,18 @@ python experiments/energy-inference/scripts/structured-proj/train_structured_pro
     --save_interval 1000 \
     --log_interval 25 \
     --norm_log_interval 100 \
-    --wandb_name "410m_struct_penult_block_h10_20260413"
-EOF
+    --wandb_name "410m_struct_penult_block_h10_20260413" \
+    2>&1 | tee "$TMPLOG"
+
+# Auto-submit harness eval on the saved final checkpoint
+FINAL_CKPT=$(grep '^FINAL_CKPT=' "$TMPLOG" | tail -1 | cut -d= -f2-)
+rm -f "$TMPLOG"
+if [ -n "$FINAL_CKPT" ] && [ -d "$FINAL_CKPT" ]; then
+    bash $REPO/experiments/energy-inference/scripts/structured-proj/submit_eval.sh \
+        "$FINAL_CKPT" "eval_struct_proj_penult_block"
+else
+    echo "WARNING: FINAL_CKPT not found in training output; run submit_eval.sh manually."
+fi
+BSUB_SCRIPT
 
 echo "Submitted. Monitor: bjobs / bpeek <jobid>"
