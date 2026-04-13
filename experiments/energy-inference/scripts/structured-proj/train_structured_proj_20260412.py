@@ -241,11 +241,21 @@ def swap_to_structured_proj(model, rank: int, dissipation_rank: int,
     """Replace unconstrained proj in each energy block with DualLowRankPH.
 
     Returns list of (block_name, structured_proj) for the patched blocks.
+    On resume the model is already swapped; this function detects that and
+    returns existing structured projs without re-initialising them.
     """
     from lm_engine.hf_models.models.energy.layer import DualLowRankPortHamiltonianProjection
 
     patched = []
     for name, module in model.named_modules():
+        # Resume case: proj already swapped, just collect it
+        if (hasattr(module, 'proj_type') and
+                module.proj_type == "dual_low_rank_port_hamiltonian" and
+                isinstance(module.proj, DualLowRankPortHamiltonianProjection)):
+            patched.append((name, module.proj))
+            print(f"  Resumed existing structured proj in {name}")
+            continue
+
         if not (hasattr(module, 'proj') and module.proj is not None
                 and hasattr(module.proj, 'weight')
                 and module.proj.weight.ndim == 2
@@ -337,18 +347,47 @@ def train(args):
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import lm_engine.hf_models  # noqa: F401
 
+    # ── Save dir (needed early to detect resume checkpoint) ───────────────────
+    # Include wandb_name so each experiment variant gets its own directory
+    # and resume logic doesn't collide across different runs.
+    ckpt_name = Path(args.checkpoint).name
+    save_dir = Path(args.save_dir or (
+        Path(__file__).parent.parent.parent / "results" / "structured-proj" /
+        args.wandb_name
+    ))
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Auto-detect resume checkpoint ─────────────────────────────────────────
+    resume_step = 0
+    resume_ckpt_path = None
+    resume_wandb_id = None
+    existing = sorted(
+        [p for p in save_dir.glob("step_*") if (p / "training_state.pt").exists()],
+        key=lambda p: int(p.name.split("_")[1]),
+    )
+    if existing:
+        resume_ckpt_path = existing[-1]
+        resume_step = int(resume_ckpt_path.name.split("_")[1])
+        state_path = resume_ckpt_path / "training_state.pt"
+        saved_state = torch.load(state_path, map_location="cpu")
+        resume_wandb_id = saved_state.get("wandb_run_id")
+        print(f"\nResuming from checkpoint: {resume_ckpt_path} (step {resume_step})")
+    else:
+        print(f"\nNo resume checkpoint found in {save_dir}; starting from scratch.")
+
     # ── Load model ────────────────────────────────────────────────────────────
-    print(f"\nLoading checkpoint: {args.checkpoint}")
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
+    load_path = resume_ckpt_path if resume_ckpt_path else args.checkpoint
+    print(f"Loading: {load_path}")
+    tokenizer = AutoTokenizer.from_pretrained(load_path)
     model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint,
+        load_path,
         torch_dtype=torch.bfloat16,
         device_map=args.device,
     )
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Loaded. Total params: {total_params:,}")
 
-    # ── Swap proj ─────────────────────────────────────────────────────────────
+    # ── Swap proj (or detect existing on resume) ──────────────────────────────
     print("\nSwapping energy block projections → dual_low_rank_port_hamiltonian")
     patched = swap_to_structured_proj(
         model, args.rank, args.dissipation_rank,
@@ -427,25 +466,38 @@ def train(args):
     data_gen = make_dataloader(tokenizer, args.dataset, args.seq_len,
                                args.batch_size, args.device)
 
-    # ── Save dir ──────────────────────────────────────────────────────────────
-    ckpt_name = Path(args.checkpoint).name
-    save_dir = Path(args.save_dir or (
-        Path(__file__).parent.parent.parent / "results" / "structured-proj" /
-        f"{ckpt_name}_rank{args.rank}_dr{args.dissipation_rank}"
-    ))
-    save_dir.mkdir(parents=True, exist_ok=True)
+    # Skip batches already seen before the resume checkpoint
+    if resume_step > 0:
+        skip = resume_step * args.grad_accum
+        print(f"Fast-forwarding data stream by {skip} batches (resume step {resume_step})...")
+        for _ in range(skip):
+            next(data_gen)
+        print("Data stream ready.")
 
     # ── wandb ─────────────────────────────────────────────────────────────────
     wandb.init(
         project=args.wandb_project,
         name=args.wandb_name,
+        id=resume_wandb_id,          # None on fresh run → new id assigned
+        resume="allow",              # resumes existing run if id matches, no-op otherwise
         config=vars(args),
     )
+
+    # Restore optimizer / scheduler state after resume
+    if resume_step > 0:
+        optimizer.load_state_dict(saved_state["optimizer"])
+        scheduler.load_state_dict(saved_state["scheduler"])
+        # Move optimizer state tensors to the correct device
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(args.device)
+        print(f"Restored optimizer + scheduler state from step {resume_step}.")
 
     # ── Training ──────────────────────────────────────────────────────────────
     model.train()
     optimizer.zero_grad()
-    step = 0
+    step = resume_step * args.grad_accum   # micro-step counter starts after skipped data
     accum_loss = 0.0
 
     print(f"\nTraining for {args.steps} steps "
@@ -506,6 +558,13 @@ def train(args):
                 ckpt_path = save_dir / f"step_{global_step}"
                 model.save_pretrained(ckpt_path)
                 tokenizer.save_pretrained(ckpt_path)
+                # Save optimizer/scheduler/wandb state for resume
+                torch.save({
+                    "global_step": global_step,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "wandb_run_id": wandb.run.id,
+                }, ckpt_path / "training_state.pt")
                 print(f"  Checkpoint saved to {ckpt_path}")
 
             if global_step >= args.steps:
