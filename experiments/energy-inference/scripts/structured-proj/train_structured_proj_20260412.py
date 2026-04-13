@@ -69,13 +69,22 @@ def parse_args():
     p.add_argument("--checkpoint", default=(
         "/proj/dmfexp/energy-gpt/checkpoints-bsaha/unsharded/egpt_400m/410m_hybrid_s8e4_lr1e3_60k"
     ))
-    p.add_argument("--rank",             type=int,   default=32)
-    p.add_argument("--dissipation_rank", type=int,   default=16)
+    p.add_argument("--rank",             type=int,   default=256,
+                   help="Rank of antisymmetric J = UV^T - VU^T per stream. "
+                        "256 ≈ full antisymmetric capacity for d=1280.")
+    p.add_argument("--dissipation_rank", type=int,   default=128,
+                   help="Rank of PSD R = LL^T per stream.")
     p.add_argument("--lr",               type=float, default=3e-4)
     p.add_argument("--steps",            type=int,   default=10_000)
-    p.add_argument("--batch_size",       type=int,   default=4)
-    p.add_argument("--seq_len",          type=int,   default=512)
-    p.add_argument("--grad_accum",       type=int,   default=4)
+    p.add_argument("--batch_size",       type=int,   default=2,
+                   help="Micro-batch size. 2×seq_len=4096 ≈ 8k tokens/micro-batch, "
+                        "safe for H100 with energy model recurrence.")
+    p.add_argument("--seq_len",          type=int,   default=4096,
+                   help="Sequence length. Must match training distribution: "
+                        "Nematron is pre-packed at 4096 tokens.")
+    p.add_argument("--grad_accum",       type=int,   default=8,
+                   help="Gradient accumulation. "
+                        "2×8×4096=65536 tokens/step matches the yml config.")
     p.add_argument("--alpha_min",        type=float, default=0.35,
                    help="Minimum alpha for trajectory diversity training.")
     p.add_argument("--alpha_max",        type=float, default=0.65,
