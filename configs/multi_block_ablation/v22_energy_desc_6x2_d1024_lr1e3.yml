@@ -1,0 +1,107 @@
+# V22: Energy-descent mixed heads (~342M, 6×2) — d=1024, 8E+8G heads, identity proj
+# Recurrent counterpart to V20 (24×1). h = h - Identity(attn + scale_ff*mlp).
+# muP LR: 2e-3 × 768/1024 = 1.5e-3
+# 30k steps × 4 GPUs × batch=4 × grad_accum=4 × seq=4096 = 7.86B tokens
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [2, 2, 2, 2, 2, 2]
+    initializer_range: 0.02
+    layer_norm_epsilon: 0.00001
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 6
+    init_method: normal
+    tie_word_embeddings: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    energy_proj_type: identity
+    sequence_mixer_blocks:
+      - {sequence_mixer_type: mixed_head_energy_descent, num_attention_heads: 16, num_key_value_heads: 16, num_energy_heads: 8, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: mixed_head_energy_descent, num_attention_heads: 16, num_key_value_heads: 16, num_energy_heads: 8, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: mixed_head_energy_descent, num_attention_heads: 16, num_key_value_heads: 16, num_energy_heads: 8, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: mixed_head_energy_descent, num_attention_heads: 16, num_key_value_heads: 16, num_energy_heads: 8, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: mixed_head_energy_descent, num_attention_heads: 16, num_key_value_heads: 16, num_energy_heads: 8, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: mixed_head_energy_descent, num_attention_heads: 16, num_key_value_heads: 16, num_energy_heads: 8, add_bias: false, attention_multiplier: 0.125}
+    mlp_blocks:
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/v22_energy_desc_6x2_d1024_lr1e3
+  save_interval: 5000
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: v22_energy_desc_6x2_d1024_lr1e3
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 1.5e-3
+    weight_decay: 0.1
+    betas:
+      - 0.9
+      - 0.95
+    eps: 1e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
