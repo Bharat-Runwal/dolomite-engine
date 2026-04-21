@@ -19,7 +19,8 @@ from .sequence_mixer import (
     _MultiHeadLatentAttentionArgs,
     _RNNArgs,
     _SoftmaxAttentionArgs,
-    _EnergyAttentionArgs
+    _EnergyAttentionArgs,
+    _MixedHeadAttentionArgs,
 )
 
 
@@ -75,6 +76,9 @@ _SEQUENCE_MIXER_CONFIG_CLASSES = {
     "softmax_attention": _SoftmaxAttentionArgs,
     "gated_deltanet": _GatedDeltaNetArgs,
     "energy_attention": _EnergyAttentionArgs,
+    "mixed_head_attention": _MixedHeadAttentionArgs,
+    "energy_grad_mixed_head_attention": _MixedHeadAttentionArgs,
+    "mixed_head_energy_descent": _MixedHeadAttentionArgs,
 }
 
 _MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs}
@@ -124,6 +128,7 @@ class CommonConfig(PretrainedConfig):
         energy_attn_add_wv_wo: bool = False,
         scale_ff_init: float | list[float] | None = None,
         energy_descent_loss_coef: float = 0.0,
+        shared_backbone: bool = False,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -163,6 +168,7 @@ class CommonConfig(PretrainedConfig):
         self.energy_attn_add_wv_wo = energy_attn_add_wv_wo
         self.scale_ff_init = scale_ff_init
         self.energy_descent_loss_coef = energy_descent_loss_coef
+        self.shared_backbone = shared_backbone
 
         if layer_iterations is not None:
             self.layer_iterations = layer_iterations

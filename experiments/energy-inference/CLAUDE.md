@@ -63,9 +63,70 @@ Python helper: `bsub_scripts/mybsub.py` (uses `tyro`).
 
 ## Conventions
 
-- Configs for this project: `experiments/energy-inference/configs/`
+- Configs for this project: `experiments/energy-inference/configs/`; multi-block ablation configs: `configs/multi_block_ablation/`
 - Scripts: `experiments/energy-inference/scripts/` (date-stamped, e.g. `train_alpha_sweep_20260411.py`)
 - Results: `experiments/energy-inference/results/`
 - Wandb project: `energy-inference-large`
+- Tokenizer path: `/proj/datasets/tokenizers/granite-4.0-tiktoken` (NOT `/proj/checkpoints/dmf-lh-checkpoints/...` which is stale)
 - Never modify existing scripts — create new dated copies.
 - Use unsharded checkpoints when loading for inference/grafting.
+
+## Figure and paper rules
+
+1. **Always save figures as both PDF and PNG** — every `fig.savefig()` call must save both extensions
+   (e.g. `for ext in ["png", "pdf"]: fig.savefig(plots_dir / f"{stem}.{ext}", ...)`).
+2. **Always update the paper and recompile after new results** — after any new eval results or plots,
+   update `experiments/energy-inference/paper/main.tex` with the new numbers/figures and run
+   `pdflatex -interaction=nonstopmode main.tex` from the `paper/` directory.
+3. **Always include every new plot in the paper** — after producing any new analysis figure, add a
+   `\includegraphics` block for it in `main.tex` and recompile. Never leave a plot that exists on disk
+   but is missing from the paper.
+
+## Mandatory for every training run
+
+1. **Always log to wandb** — set `experiments_tracker_name: wandb` and `project: energy-inference-large` in every config.
+2. **Record the full run command/script in RESULTS.md** — paste the full bsub command or script name, config path, and key hyperparams.
+3. **Estimate training time before submitting** — compute: `tokens = steps × num_gpus × micro_batch × grad_accum × seq_len`. Use ~1 TFLOP/token/GPU × GPU TFLOPS × 0.4 efficiency for wall-clock estimate.
+4. **Save checkpoints every 5000 steps** (or 2000 for short runs) — set `save_interval` in config.
+5. **Use auto-resume scripts** (see `scripts/multi-block-ablation/run_v*.sh` as template) so preempted jobs continue automatically.
+
+## Preemptable queue
+
+The cluster has a `preemptable` queue for lower-priority long-running jobs. Jobs can be
+killed at any time when higher-priority jobs need GPUs, but otherwise run indefinitely.
+
+```bash
+# Submit to preemptable queue (4 GPUs, 4h wall time, auto-resume on kill)
+bsub \
+    -q preemptable \
+    -G grp_ebm \
+    -J job_name \
+    -gpu "num=4/task:mode=exclusive_process" \
+    -n 1 \
+    -M 64G \
+    -W 04:00 \
+    -o $HOME/job_name_%J.stdout \
+    -e $HOME/job_name_%J.stderr \
+    < job_script.sh
+```
+
+Key differences from `-q standard`:
+- Jobs can be preempted at any time → MUST checkpoint frequently + auto-resubmit
+- Typically less wait time than standard for 4 GPUs when queue not crowded
+- Can run for days if not preempted (observed: jobs running 6+ days)
+- Use wall time `-W 04:00` (4h chunks) to limit blast radius if something goes wrong
+
+Auto-resume pattern (in job script):
+```bash
+LATEST_JSON="${SAVE_PATH}/latest_checkpointed_iteration.json"
+if [ -f "${LATEST_JSON}" ]; then
+    # append load_args to config and resume
+fi
+# At end: check if complete, resubmit if not
+```
+
+Check queue status:
+```bash
+bjobs -q preemptable -u all | head -30   # who is running
+bqueues preemptable                       # queue stats (NJOBS, NRUN, NPEND)
+```

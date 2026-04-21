@@ -14,3 +14,14 @@ scripts/blue-vela
 # Experiment artifacts — model weights, tokenizer vocab, wandb runs
 wandb/
 experiments/energy-inference/results/
+
+# LaTeX build artifacts
+*.aux
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+experiments/energy-inference/paper/*.log
+
+# Claude internal state
+.claude/

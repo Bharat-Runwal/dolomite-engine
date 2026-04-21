@@ -141,19 +141,33 @@ def init_from_trained_weight(proj, W: torch.Tensor, scale_ff: float = 0.1):
     Goal: make the new model's forward pass approximate the trained model's update.
 
     Trained:  h = h - W @ (attn_out + scale_ff * ffwd_out)
-    New:      h = h + (J_attn - R_attn) @ attn_out
-                     + (J_ff   - R_ff  ) @ ffwd_out
+              (EnergyBlock applies x - proj(combined), not x + proj(combined))
+    New:      h = h + K_attn @ attn_out^T + K_ff @ ffwd_out^T
+              where K = 0.5*(J - R)  at default α=0.5
 
-    For these to match we need:
-      K_attn = J_attn - R_attn = -W
-      K_ff   = J_ff   - R_ff   = -scale_ff * W
+    For these to match at α=0.5:
+      K_attn^T = -W^T  →  K_attn = -W  →  0.5*(J-R) = -W  →  J-R = -2W
+      K_ff^T = -scale_ff*W^T  →  K_ff = -scale_ff*W  →  J_ff-R_ff = -2*scale_ff*W
 
-    J = UV^T - VU^T ≈ -W_anti  →  negate U relative to the SVD so J ≈ -W_anti
-    R = LL^T        ≈  W_sym   →  L from eigendecomposition of W_sym (positive part)
-    Combined: K = J - R ≈ -W_anti - W_sym = -W  ✓
+    So we need J = -2*W_anti and R = 2*W_sym (factor of 2 vs naïve init).
 
-    The ff stream gets the same decomposition scaled by scale_ff.
+    J = UV^T - VU^T with U[:, i] = -U_svd[:,i]*sqrt(σ_i), V[:,i] = Vh_svd[i,:]^T*sqrt(σ_i):
+      UV^T = sum_i -σ_i * outer(U_svd[:,i], Vh_svd[i,:]) = -W_anti
+      VU^T = sum_i -σ_i * outer(Vh_svd[i,:]^T, U_svd[:,i]^T)^T = W_anti   (W_anti^T = -W_anti)
+    → J = -W_anti - W_anti = -2*W_anti  ✓
+
+    R = LL^T where L = sqrt(2)*L_eigen:
+    → R = 2 * W_sym_+  (doubled PSD part)  ✓
+
+    J - R ≈ -2*W_anti - 2*W_sym = -2*W  →  K = 0.5*(J-R) = -W  ✓
+
+    For the ff stream (K_ff = -scale_ff*W), scale J and R linearly by scale_ff
+    (NOT quadratically). Since J ∝ (UV^T), linear scaling requires:
+      U_ff = U_init * sqrt(scale_ff),  V_ff = V_init * sqrt(scale_ff)
+      L_ff = L_init * sqrt(scale_ff)
+    → J_ff = scale_ff * J,  R_ff = scale_ff * R,  K_ff = scale_ff * K = -scale_ff*W  ✓
     """
+    import math
     W = W.float()
     r_j = proj.rank
     r_d = proj.dissipation_rank
@@ -162,36 +176,30 @@ def init_from_trained_weight(proj, W: torch.Tensor, scale_ff: float = 0.1):
     W_anti = (W - W.T) / 2
 
     # ── Init R (PSD / descent) from W_sym ────────────────────────────────────
-    # Eigendecompose, keep top-r_d eigenvectors with positive eigenvalues.
-    # R = L L^T ≈ W_sym_+  (truncated to rank r_d)
+    # R = L L^T ≈ 2 * W_sym_+  (doubled so K = 0.5*(J-R) has correct magnitude)
     eigvals, eigvecs = torch.linalg.eigh(W_sym)   # ascending order
-    # Take the r_d largest-magnitude positive eigenvalues
     pos_mask = eigvals > 0
     pos_vals = eigvals[pos_mask]
     pos_vecs = eigvecs[:, pos_mask]
+    _sqrt2 = math.sqrt(2)
     if pos_vals.numel() >= r_d:
         idx = torch.argsort(pos_vals, descending=True)[:r_d]
-        L_init = pos_vecs[:, idx] * pos_vals[idx].sqrt().unsqueeze(0)
+        L_init = pos_vecs[:, idx] * (pos_vals[idx].sqrt() * _sqrt2).unsqueeze(0)
     else:
-        # Fewer positive eigenvalues than r_d — pad with small random columns
         L_init = torch.cat([
-            pos_vecs * pos_vals.sqrt().unsqueeze(0),
+            pos_vecs * (pos_vals.sqrt() * _sqrt2).unsqueeze(0),
             torch.randn(W.shape[0], r_d - pos_vals.numel()) * 0.01
         ], dim=1)
 
     # ── Init J (antisym / curl) from W_anti ──────────────────────────────────
-    # We need J = UV^T - VU^T = -W_anti.
+    # We need J = UV^T - VU^T = -2*W_anti (factor-of-2 vs rank-1 sum).
     #
-    # Using SVD: W_anti = U_svd @ diag(S) @ Vh_svd  (full_matrices=False)
-    # Set: U = -U_svd[:,:k] @ diag(sqrt(S[:k]) / sqrt(2))
-    #      V =  Vh_svd[:k].T @ diag(sqrt(S[:k]) / sqrt(2))
-    # Then:
-    #   UV^T = -1/2 * U_svd @ diag(S) @ Vh_svd = -W_anti/2
-    #   VU^T = -(W_anti.T)/2 = +W_anti/2  (since W_anti.T = -W_anti)
-    # → J = UV^T - VU^T = -W_anti/2 - W_anti/2 = -W_anti  ✓
+    # Set: U[:,i] = -U_svd[:,i] * sqrt(σ_i)   (NOT sqrt(σ_i/2))
+    #      V[:,i] =  Vh_svd[i]^T * sqrt(σ_i)
+    # → J = -2*W_anti  (derivation in docstring above)
     U_svd, S_svd, Vh_svd = torch.linalg.svd(W_anti, full_matrices=False)
     k = min(r_j, S_svd.numel())
-    sqrt_S = (S_svd[:k] / 2.0).sqrt()          # sqrt(σ_i / 2)
+    sqrt_S = S_svd[:k].sqrt()                       # sqrt(σ_i)  [was sqrt(σ_i/2)]
     U_init = -U_svd[:, :k] * sqrt_S.unsqueeze(0)   # (d, k)
     V_init =  Vh_svd[:k].T * sqrt_S.unsqueeze(0)   # (d, k)
     if k < r_j:
@@ -202,19 +210,20 @@ def init_from_trained_weight(proj, W: torch.Tensor, scale_ff: float = 0.1):
     dtype = proj.U_attn.dtype
     with torch.no_grad():
         if proj.single_stream:
-            # Single K applied to combined input — decompose W directly (no ff scaling).
             proj.L_attn.copy_(L_init.to(dtype))
             proj.U_attn.copy_(U_init.to(dtype))
             proj.V_attn.copy_(V_init.to(dtype))
         else:
-            # Attn stream: K_attn ≈ -W
+            # Attn stream: K_attn = -W  (exact at init, modulo rank truncation)
             proj.L_attn.copy_(L_init.to(dtype))
             proj.U_attn.copy_(U_init.to(dtype))
             proj.V_attn.copy_(V_init.to(dtype))
-            # FF stream: K_ff ≈ -scale_ff * W  (scale_ff ≈ 0.09–0.15 for these layers)
-            proj.L_ff.copy_((L_init * scale_ff).to(dtype))
-            proj.U_ff.copy_((U_init * scale_ff).to(dtype))
-            proj.V_ff.copy_((V_init * scale_ff).to(dtype))
+            # FF stream: K_ff = -scale_ff*W
+            # Linear scaling requires sqrt(scale_ff) on U,V,L (not scale_ff, which is quadratic)
+            sf = math.sqrt(abs(scale_ff))
+            proj.L_ff.copy_((L_init * sf).to(dtype))
+            proj.U_ff.copy_((U_init * sf).to(dtype))
+            proj.V_ff.copy_((V_init * sf).to(dtype))
 
 
 # ── Held-out evaluation ───────────────────────────────────────────────────────
@@ -340,12 +349,19 @@ def swap_to_structured_proj(model, rank: int, dissipation_rank: int,
                              init_from_weights: bool = True,
                              learnable_alpha: bool = False,
                              residual: bool = False,
-                             single_stream: bool = False) -> list:
+                             single_stream: bool = False,
+                             per_block_num_iters: dict | None = None,
+                             only_block_names: set | None = None) -> list:
     """Replace unconstrained proj in each energy block with DualLowRankPH.
 
     Returns list of (block_name, structured_proj) for the patched blocks.
     On resume the model is already swapped; this function detects that and
     returns existing structured projs without re-initialising them.
+
+    Args:
+        only_block_names: if given, only swap blocks whose name is in this set.
+            Other energy blocks are left at their original proj unchanged.
+            Used by eval_harness when only a subset of blocks were trained.
     """
     from lm_engine.hf_models.models.energy.layer import DualLowRankPortHamiltonianProjection
 
@@ -365,11 +381,18 @@ def swap_to_structured_proj(model, rank: int, dissipation_rank: int,
                 and module.proj.weight.shape[0] == module.proj.weight.shape[1]):
             continue
 
+        # If a block filter is given, skip blocks not in it.
+        if only_block_names is not None and name not in only_block_names:
+            continue
+
         d = module.proj.weight.shape[0]
         W_trained = module.proj.weight.data.float()
         scale_ff_val = float(module.scale_ff.item()) if hasattr(module, 'scale_ff') else 1.0
         dtype = module.proj.weight.dtype
         device = module.proj.weight.device
+
+        # num_iters: use per-block override if provided (e.g. 6 for h.10), else 1.
+        num_iters = (per_block_num_iters or {}).get(name, 1)
 
         if residual:
             structured = DualLowRankPortHamiltonianProjection(
@@ -378,12 +401,14 @@ def swap_to_structured_proj(model, rank: int, dissipation_rank: int,
                 base_weight=W_trained.to(dtype),
                 base_scale_ff=scale_ff_val,
                 single_stream=single_stream,
+                num_iters=num_iters,
             ).to(dtype=dtype, device=device)
         else:
             structured = DualLowRankPortHamiltonianProjection(
                 d, rank=rank, dissipation_rank=dissipation_rank,
                 learnable_alpha=learnable_alpha,
                 single_stream=single_stream,
+                num_iters=num_iters,
             ).to(dtype=dtype, device=device)
             if init_from_weights:
                 init_from_trained_weight(structured, W_trained, scale_ff=scale_ff_val)
@@ -579,7 +604,7 @@ def train(args):
     print("\nSwapping energy block projections → dual_low_rank_port_hamiltonian")
     patched = swap_to_structured_proj(
         model, args.rank, args.dissipation_rank,
-        init_from_weights=not args.no_warmstart and not args.residual,
+        init_from_weights=not args.no_warmstart,
         learnable_alpha=args.learnable_alpha,
         residual=args.residual,
         single_stream=args.single_stream,
@@ -820,6 +845,13 @@ def train(args):
     final_path = save_dir / "final"
     model.save_pretrained(final_path)
     tokenizer.save_pretrained(final_path)
+    # Save proj_state.pt alongside so eval_harness.py can restore structured proj weights.
+    _PROJ_KEYS = ("L_attn", "U_attn", "V_attn", "L_ff", "U_ff", "V_ff",
+                  "base_weight", "log_alpha", "log_alpha_attn", "log_alpha_ff")
+    proj_state = {k: v.clone()
+                  for k, v in model.state_dict().items()
+                  if any(x in k for x in _PROJ_KEYS)}
+    torch.save(proj_state, final_path / "proj_state.pt")
     # Print in a parseable format so the caller (bsub heredoc) can extract it
     # and submit the downstream harness eval job.
     print(f"FINAL_CKPT={final_path}")

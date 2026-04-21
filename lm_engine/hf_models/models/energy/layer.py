@@ -162,6 +162,7 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         base_weight: torch.Tensor | None = None,
         base_scale_ff: float = 1.0,
         single_stream: bool = False,
+        num_iters: int = 1,
     ):
         """
         Args:
@@ -181,6 +182,7 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         self.dissipation_rank = dissipation_rank
         self.learnable_alpha = learnable_alpha
         self.single_stream = single_stream
+        self.num_iters = num_iters
         std = 1e-3  # tiny init so residual mode starts at ~0 correction
         # Attention stream (also serves as the single stream when single_stream=True)
         self.U_attn = nn.Parameter(torch.randn(hidden_size, rank) * std)
@@ -191,11 +193,13 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
             self.U_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
             self.V_ff = nn.Parameter(torch.randn(hidden_size, rank) * std)
             self.L_ff = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * std)
-        # Learnable alpha: sigmoid(0) = 0.5 → balanced mix at init
+        # Learnable alpha: sigmoid(0) = 0.5 → balanced mix at init.
+        # If num_iters > 1, one alpha per iteration (shape (num_iters,));
+        # otherwise a single scalar (shape (1,)) — backwards compatible.
         if learnable_alpha:
-            self.log_alpha_attn = nn.Parameter(torch.zeros(1))
+            self.log_alpha_attn = nn.Parameter(torch.zeros(num_iters))
             if not single_stream:
-                self.log_alpha_ff = nn.Parameter(torch.zeros(1))
+                self.log_alpha_ff = nn.Parameter(torch.zeros(num_iters))
         # Residual mode: frozen base contribution from trained W
         if base_weight is not None:
             self.register_buffer('base_weight', base_weight.detach().clone())
@@ -216,13 +220,26 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         """Compute K = (1-α)*J - α*R.  α=0.5 → equal mix (default)."""
         return (1.0 - alpha) * self._J(U, V) - alpha * self._R(L)
 
-    def forward(self, attn_out: torch.Tensor, ffwd_out: torch.Tensor) -> torch.Tensor:
+    def forward(self, attn_out: torch.Tensor, ffwd_out: torch.Tensor,
+                iter_idx: int = 0) -> torch.Tensor:
+        """Compute the structured proj update.
+
+        Args:
+            attn_out: attention stream output  (B, T, d)
+            ffwd_out: FFN stream output        (B, T, d)
+            iter_idx: which recurrence iteration we are in (0-indexed).
+                      Used to select the per-iteration alpha when num_iters > 1.
+                      Ignored when num_iters == 1 (always uses index 0).
+        """
         combined = attn_out + self.base_scale_ff * ffwd_out
+        # Clamp iter_idx so we never index out of bounds (e.g. during eval with
+        # effective_iter < num_iters due to iter dropout).
+        t = min(iter_idx, self.num_iters - 1)
 
         if self.single_stream:
             # One K applied to combined input — mirrors original single-W architecture.
             if self.learnable_alpha:
-                alpha = torch.sigmoid(self.log_alpha_attn)
+                alpha = torch.sigmoid(self.log_alpha_attn[t])
                 K = (1.0 - alpha) * self._J(self.U_attn, self.V_attn) \
                     - alpha * self._R(self.L_attn)
             else:
@@ -231,8 +248,8 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         else:
             # Dual stream: independent K for attn and FFN.
             if self.learnable_alpha:
-                alpha_attn = torch.sigmoid(self.log_alpha_attn)
-                alpha_ff   = torch.sigmoid(self.log_alpha_ff)
+                alpha_attn = torch.sigmoid(self.log_alpha_attn[t])
+                alpha_ff   = torch.sigmoid(self.log_alpha_ff[t])
                 K_attn = (1.0 - alpha_attn) * self._J(self.U_attn, self.V_attn) \
                          - alpha_attn * self._R(self.L_attn)
                 K_ff   = (1.0 - alpha_ff)   * self._J(self.U_ff,   self.V_ff) \
@@ -250,15 +267,31 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
 
         return struct_delta
 
-    def get_alpha_attn(self) -> float:
+    def get_alpha_attn(self, iter_idx: int | None = None):
+        """Return learned alpha for the attention stream.
+
+        If num_iters == 1 (or iter_idx is None and num_iters > 1), returns a
+        float (single-iter case) or a list of floats (multi-iter case).
+        If iter_idx is given, returns the scalar alpha for that iteration.
+        """
         if self.learnable_alpha:
-            return torch.sigmoid(self.log_alpha_attn).item()
+            vals = torch.sigmoid(self.log_alpha_attn).detach()
+            if iter_idx is not None:
+                return vals[min(iter_idx, self.num_iters - 1)].item()
+            if self.num_iters == 1:
+                return vals[0].item()
+            return vals.tolist()
         return 0.5
 
-    def get_alpha_ff(self) -> float:
+    def get_alpha_ff(self, iter_idx: int | None = None):
         if self.learnable_alpha and not self.single_stream:
-            return torch.sigmoid(self.log_alpha_ff).item()
-        return self.get_alpha_attn()  # single_stream: same alpha for both
+            vals = torch.sigmoid(self.log_alpha_ff).detach()
+            if iter_idx is not None:
+                return vals[min(iter_idx, self.num_iters - 1)].item()
+            if self.num_iters == 1:
+                return vals[0].item()
+            return vals.tolist()
+        return self.get_alpha_attn(iter_idx)  # single_stream: same alpha for both
 
     def get_J_attn(self):
         return self._J(self.U_attn, self.V_attn)
@@ -275,6 +308,67 @@ class DualLowRankPortHamiltonianProjection(nn.Module):
         if self.single_stream:
             return self.get_R_attn()
         return self._R(self.L_ff)
+
+
+class HelmholtzFactoredProjection(nn.Module):
+    """V6: dx = -M @ (attn + A @ ffn), M=LL^T PSD, A=UV^T-VU^T antisym.
+
+    Shared PSD preconditioner M sets the time-scale/learning-rate; antisymmetric A
+    rotates the FFN contribution before combining. User's formulation:
+        dx = -proj_psd(attn + proj_anti(ffn))
+    """
+
+    def __init__(self, hidden_size: int, rank: int = 32, dissipation_rank: int = 16):
+        super().__init__()
+        self.L = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * 1e-3)
+        self.U = nn.Parameter(torch.randn(hidden_size, rank) * 1e-3)
+        self.V = nn.Parameter(torch.randn(hidden_size, rank) * 1e-3)
+
+    def forward(self, attn_out: torch.Tensor, ffwd_out: torch.Tensor) -> torch.Tensor:
+        M = torch.matmul(self.L, self.L.T)
+        A = torch.matmul(self.U, self.V.T) - torch.matmul(self.V, self.U.T)
+        combined = attn_out + torch.matmul(ffwd_out, A.T)
+        return torch.matmul(combined, M.T)
+
+
+class HelmholtzDualProjection(nn.Module):
+    """V7: dx = -(R @ attn + A @ ffn), R=LL^T PSD, A=UV^T-VU^T antisym.
+
+    Clean Helmholtz split: attn is the gradient component (descent via PSD R),
+    FFN is the curl component (rotation via antisymmetric A).
+    Hypothesis: attn output already approximates -grad_E from causal attention;
+    FFN output is the non-gradient (curl) part of the vector field.
+    """
+
+    def __init__(self, hidden_size: int, rank: int = 32, dissipation_rank: int = 16):
+        super().__init__()
+        self.L = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * 1e-3)
+        self.U = nn.Parameter(torch.randn(hidden_size, rank) * 1e-3)
+        self.V = nn.Parameter(torch.randn(hidden_size, rank) * 1e-3)
+
+    def forward(self, attn_out: torch.Tensor, ffwd_out: torch.Tensor) -> torch.Tensor:
+        R = torch.matmul(self.L, self.L.T)
+        A = torch.matmul(self.U, self.V.T) - torch.matmul(self.V, self.U.T)
+        return torch.matmul(attn_out, R.T) + torch.matmul(ffwd_out, A.T)
+
+
+class HelmholtzDualReversedProjection(nn.Module):
+    """V8: dx = -(A @ attn + R @ ffn) — reversed from V7 (control experiment).
+
+    If V7 outperforms V8, it supports the Helmholtz interpretation:
+    attn = gradient, FFN = curl. If both perform similarly, the assignment is arbitrary.
+    """
+
+    def __init__(self, hidden_size: int, rank: int = 32, dissipation_rank: int = 16):
+        super().__init__()
+        self.L = nn.Parameter(torch.randn(hidden_size, dissipation_rank) * 1e-3)
+        self.U = nn.Parameter(torch.randn(hidden_size, rank) * 1e-3)
+        self.V = nn.Parameter(torch.randn(hidden_size, rank) * 1e-3)
+
+    def forward(self, attn_out: torch.Tensor, ffwd_out: torch.Tensor) -> torch.Tensor:
+        R = torch.matmul(self.L, self.L.T)
+        A = torch.matmul(self.U, self.V.T) - torch.matmul(self.V, self.U.T)
+        return torch.matmul(attn_out, A.T) + torch.matmul(ffwd_out, R.T)
 
 
 class EnergyBlock(nn.Module):
@@ -295,7 +389,7 @@ class EnergyBlock(nn.Module):
         hidden_size = config.hidden_size
 
         self.sequence_mixer_type = config.sequence_mixer_blocks[layer_idx].sequence_mixer_type
-        if self.sequence_mixer_type=="energy_attention":
+        if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent", "energy_grad_mixed_head_attention"):
             # Use energy-specific norm if configured, otherwise fall back to global
             norm_type = getattr(config, 'energy_norm_type', None) or config.normalization_function
             self.ln = get_normalization_function(
@@ -362,6 +456,30 @@ class EnergyBlock(nn.Module):
                     hidden_size, rank=rank, dissipation_rank=dissipation_rank
                 )
                 self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            elif proj_type == "attn_only_energy":
+                # V5: standard additive residual for FFN, energy-projected subtraction for attn.
+                # h := h + ffwd_out - proj_attn(attn_out)
+                self.proj_attn = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.proj = None
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            elif proj_type == "helmholtz_factored":
+                # V6: h := h - M(attn + A*ffn), M=LL^T PSD, A=antisym
+                rank = getattr(config, 'energy_proj_rank', 32)
+                dissipation_rank = getattr(config, 'energy_dissipation_rank', 16)
+                self.proj = HelmholtzFactoredProjection(hidden_size, rank=rank, dissipation_rank=dissipation_rank)
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            elif proj_type == "helmholtz_dual":
+                # V7: h := h - (R*attn + A*ffn), R=PSD, A=antisym — clean Helmholtz split
+                rank = getattr(config, 'energy_proj_rank', 32)
+                dissipation_rank = getattr(config, 'energy_dissipation_rank', 16)
+                self.proj = HelmholtzDualProjection(hidden_size, rank=rank, dissipation_rank=dissipation_rank)
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            elif proj_type == "helmholtz_dual_reversed":
+                # V8: h := h - (A*attn + R*ffn) — reversed from V7, control experiment
+                rank = getattr(config, 'energy_proj_rank', 32)
+                dissipation_rank = getattr(config, 'energy_dissipation_rank', 16)
+                self.proj = HelmholtzDualReversedProjection(hidden_size, rank=rank, dissipation_rank=dissipation_rank)
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
             else:
                 raise ValueError(f"Unknown energy_proj_type: {proj_type}")
 
@@ -392,9 +510,10 @@ class EnergyBlock(nn.Module):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
         layer_id: int | None = None, #TODO: Handle KV Caching for Energy Models
+        iter_idx: int = 0,
     ) -> torch.Tensor:
 
-        if self.sequence_mixer_type=="energy_attention":
+        if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent"):
 
             ln_x = self.ln(hidden_states)
             attn_out = self.attn(
@@ -413,7 +532,13 @@ class EnergyBlock(nn.Module):
                 hidden_states = hidden_states - self.proj_attn(attn_out) - self.proj_mlp(ffwd_out)
             # Split port-Hamiltonian: h := h + proj(attn_out, ffwd_out)
             elif self.proj_type == "dual_low_rank_port_hamiltonian":
-                hidden_states = hidden_states + self.proj(attn_out, ffwd_out)
+                hidden_states = hidden_states + self.proj(attn_out, ffwd_out, iter_idx=iter_idx)
+            # V5: standard residual for FFN, projected subtraction for attn
+            elif self.proj_type == "attn_only_energy":
+                hidden_states = hidden_states + ffwd_out - self.proj_attn(attn_out)
+            # V6/V7/V8 Helmholtz variants: h := h - proj(attn_out, ffwd_out)
+            elif self.proj_type in ["helmholtz_factored", "helmholtz_dual", "helmholtz_dual_reversed"]:
+                hidden_states = hidden_states - self.proj(attn_out, ffwd_out)
             # Rotation projections (antisymmetric, etc.): h := h + proj(grad_E)
             elif self.proj_type in ["antisymmetric", "port_hamiltonian", "low_rank_antisymmetric", "low_rank_port_hamiltonian"]:
                 grad_E = attn_out + self.scale_ff * ffwd_out
@@ -539,7 +664,7 @@ class EnergyBlock(nn.Module):
         max_seqlen: int | None = None,
         layer_id: int | None = None,
     ) -> torch.Tensor:
-        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention"]:
+        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention", "mixed_head_attention", "energy_grad_mixed_head_attention"]:
             hidden_states = self.sequence_mixer(
                 hidden_states,
                 past_key_values=past_key_values,

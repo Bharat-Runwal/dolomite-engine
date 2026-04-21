@@ -35,7 +35,6 @@ python experiments/energy-inference/scripts/structured-proj/train_structured_pro
     --log_interval 25 \
     --norm_log_interval 200 \
     --steps 3000 \
-    --residual \
     --learnable_alpha \
     --train_layers 10 \
     --wandb_name "410m_struct_penult_block_h10_20260413" \

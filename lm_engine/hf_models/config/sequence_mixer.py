@@ -137,6 +137,26 @@ class _CausalConvolution(BaseArgs):
         assert self.sequence_mixer_type == "causal_convolution"
 
 
+class _MixedHeadAttentionArgs(BaseArgs):
+    sequence_mixer_type: str = "mixed_head_attention"
+    num_attention_heads: int = 12
+    num_key_value_heads: int = 12
+    num_energy_heads: int = 6
+    softmax_dropout: float = 0
+    dropout: float = 0
+    add_bias: bool = False
+    attention_multiplier: float | None = None
+    sliding_window: int | None = None
+    qkv_bias: bool = None
+    position_embedding_type: str | None = None
+
+    def model_post_init(self, __context) -> None:
+        if self.qkv_bias is None:
+            self.qkv_bias = self.add_bias
+        assert self.sequence_mixer_type == "mixed_head_attention"
+        assert 0 < self.num_energy_heads < self.num_attention_heads
+
+
 class _GatedDeltaNetArgs(BaseArgs):
     sequence_mixer_type: str = "gated_deltanet"
     k_head_dim: int = 256

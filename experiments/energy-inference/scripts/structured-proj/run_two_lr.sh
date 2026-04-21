@@ -35,7 +35,6 @@ python experiments/energy-inference/scripts/structured-proj/train_structured_pro
     --log_interval 25 \
     --norm_log_interval 200 \
     --steps 3000 \
-    --residual \
     --backbone_lr 1e-5 \
     --wandb_name "410m_struct_two_lr_20260413" \
     2>&1 | tee "$TMPLOG"

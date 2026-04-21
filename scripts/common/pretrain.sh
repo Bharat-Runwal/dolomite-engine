@@ -6,7 +6,7 @@ export NCCL_SOCKET_IFNAME="ib,bond"
 export NCCL_IB_CUDA_SUPPORT=1
 
 MASTER_ADDRESS=$(echo ${LSB_MCPU_HOSTS} | tr ' ' '\n' | head -n 1)
-MASTER_PORT=5${LSB_JOBID: -5:-1}
+MASTER_PORT=$((20000 + LSB_JOBID % 10000))
 NNODES=$(echo ${LSB_MCPU_HOSTS} | tr ' ' '\n' | sed 'n; d' | wc -w)
 GPUS_PER_NODE=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -w)
 NODE_RANK=$(($(echo ${LSB_MCPU_HOSTS} | tr ' ' '\n' | sed 'n; d' | grep -n -m1 $(echo $HOSTNAME | cut -d'.' -f1) | cut -d':' -f1)-1))

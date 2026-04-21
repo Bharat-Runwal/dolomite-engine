@@ -35,7 +35,6 @@ python experiments/energy-inference/scripts/structured-proj/train_structured_pro
     --log_interval 25 \
     --norm_log_interval 200 \
     --steps 3000 \
-    --residual \
     --learnable_alpha \
     --wandb_name "410m_struct_learnable_alpha_20260413" \
     2>&1 | tee "$TMPLOG"

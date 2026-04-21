@@ -45,6 +45,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
         layer_id: int | None = None,
+        iter_idx: int = 0,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)

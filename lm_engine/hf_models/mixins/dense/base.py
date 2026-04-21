@@ -166,6 +166,13 @@ class BaseModelMixin(PreTrainedModelMixin):
             config.normalization_function, self.embed_dim, eps=config.layer_norm_epsilon
         )
 
+        # NOTE: shared_backbone weight-tying is intentionally NOT implemented here.
+        # Tying attn/ffwd/ln modules across FSDP-2 units causes checkpoint key
+        # mismatches on resume (_orig_mod. prefix issues with shared submodules).
+        # V3/V4 train with shared_backbone: true in config but with INDEPENDENT
+        # parameters per block; the config field is reserved for future use once
+        # FSDP-2-compatible tying is implemented.
+
         self.rope_dim = config.rope_dim
 
         self.position_embedding_type = config.position_embedding_type
@@ -282,6 +289,7 @@ class BaseModelMixin(PreTrainedModelMixin):
                         mamba_mask_computed,
                         i,
                         layer_id=layer_id,
+                        iter_idx=j,
                     )
                     layer_id += 1
 
@@ -345,6 +353,7 @@ class BaseModelMixin(PreTrainedModelMixin):
         mamba_mask_computed,
         i,
         layer_id = None,
+        iter_idx: int = 0,
 ):
         sequence_mixer_type = self.sequence_mixer_block_types[i]
         block = self.h[i]
@@ -363,6 +372,7 @@ class BaseModelMixin(PreTrainedModelMixin):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             layer_id=layer_id,
+            iter_idx=iter_idx,
         )
 
         return hidden_states

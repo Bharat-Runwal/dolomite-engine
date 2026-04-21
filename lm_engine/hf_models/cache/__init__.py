@@ -17,6 +17,7 @@ from .rnn import _RNNCache
 _CACHE_CLASSES = {
     "causal_convolution": _RNNCache,
     "energy_attention": _SoftmaxAttentionCache,
+    "mixed_head_attention": _SoftmaxAttentionCache,
     "gru": _RNNCache,
     "mamba2": _Mamba2Cache,
     "multihead_latent_attention": _SoftmaxAttentionCache,
@@ -35,7 +36,7 @@ class GenerationCache:
         cache = []
         for i in range(config.num_layers):
             mixer_type = config.sequence_mixer_blocks[i].sequence_mixer_type
-            num_iter = config.layer_iterations[i] if hasattr(config, 'layer_iterations') else 1
+            num_iter = max(1, config.layer_iterations[i]) if hasattr(config, 'layer_iterations') else 1
             for _ in range(num_iter):
                 cache.append(_CACHE_CLASSES[mixer_type](config, i, **kwargs))
         self.cache = cache

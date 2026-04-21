@@ -35,7 +35,6 @@ python experiments/energy-inference/scripts/structured-proj/train_structured_pro
     --log_interval 25 \
     --norm_log_interval 200 \
     --steps 3000 \
-    --residual \
     --single_stream \
     --alpha_min 0.35 \
     --alpha_max 0.65 \

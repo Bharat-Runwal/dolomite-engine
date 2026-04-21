@@ -673,6 +673,10 @@ def main(args_class: type[DistillationArgs | TrainingArgs] = TrainingArgs) -> No
     # track all hyperparams in args
     experiments_tracker.log_args(args)
 
+    # log param count to wandb config so it's visible as a run column
+    total_params, active_params = model_container[0].calculate_num_parameters()
+    experiments_tracker.log_config({"num_parameters": total_params, "active_parameters": active_params})
+
     # main training loop
     with disable_generation_cache(), enable_kernels(args.kernel_args.kernels):
         train(

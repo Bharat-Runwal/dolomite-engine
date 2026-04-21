@@ -242,7 +242,22 @@ def get_model_tflops(
         elif sequence_mixer_type == "gated_deltanet":
             return 0
         elif sequence_mixer_type == "energy_attention":
-            return 0 # TODO add flops calculation for energy attention
+            return 0  # TODO add flops calculation for energy attention
+        elif sequence_mixer_type == "mixed_head_attention":
+            # c_attn_energy: h → 2*ne*dh, c_attn_gpt: h → 3*ng*dh, W_O: h → h
+            ne = block.num_energy_heads
+            ng = block.num_attention_heads - ne
+            dh = h // block.num_attention_heads
+            sequence_mixer_flops = _get_linear_flops(
+                b * s, h, 2 * ne * dh, gradient_checkpointing=gradient_checkpointing_enabled
+            )
+            sequence_mixer_flops += _get_linear_flops(
+                b * s, h, 3 * ng * dh, gradient_checkpointing=gradient_checkpointing_enabled
+            )
+            sequence_mixer_flops += _get_linear_flops(
+                b * s, h, h, gradient_checkpointing=gradient_checkpointing_enabled
+            )
+            sequence_mixer_flops += _get_attention_flops(b, s, h)
         else:
             raise NotImplementedError(f"unexpected sequence_mixer_type ({sequence_mixer_type})")
 

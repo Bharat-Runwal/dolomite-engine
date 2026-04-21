@@ -37,7 +37,6 @@ python experiments/energy-inference/scripts/structured-proj/train_structured_pro
     --steps 5000 \
     --alpha_min 0.35 \
     --alpha_max 0.65 \
-    --residual \
     --wandb_name "410m_struct_residual_alpha_20260413" \
     2>&1 | tee "$TMPLOG"
 
