@@ -31,11 +31,15 @@ symmetric part drives descent and anti-symmetric part drives conservative rotati
 We ablate five architectural choices---distinct vs.\ shared backbone, number of recurrence
 steps, and learning rate---and evaluate on language modeling perplexity plus nine zero-shot
 commonsense benchmarks, MMLU, and GSM8K.
-The main finding is negative on compute efficiency: a 162M standard GPT baseline
-consistently outperforms all 160M EGPT variants on perplexity, and a 400M EGPT model
-requires 4.4$\times$ more FLOPs per token to approximately match the 162M GPT baseline
-on perplexity and zero-shot accuracy.
-EGPT appears significantly less compute-efficient than standard GPT at current scales.
+At the 160M scale, a standard GPT baseline consistently outperforms all EGPT variants on
+perplexity, and a 400M EGPT model requires 4.4$\times$ more FLOPs per token to
+approximately match the 162M GPT baseline.
+However, two new output-rule variants---\textbf{EGrad} (energy-gradient attention with
+additive residual) and \textbf{EDesc} (mixed V=K attention with identity descent)---close
+this gap at 400M scale: both V19 EGrad (PPL\,=\,27.8, 49.9\% avg) and V20 EDesc
+(PPL\,=\,27.9, 49.5\%) \emph{surpass} the 400M GPT baseline (PPL\,=\,29.8, 48.6\%)
+at identical parameter count and FLOPs, marking the first energy-model variants to
+outperform GPT at matched compute in our ablation.
 We also analyze the Helmholtz decomposition of the projection matrices:
 for all trained variants the curl-to-gradient ratio $\|A\|_F / \|S\|_F$ is close to 1,
 confirming that the trained dynamics require a balanced mix of dissipation and rotation.
@@ -74,9 +78,138 @@ the key design degrees of freedom.
 \section{Model Architectures}
 %% ============================================================
 
-All models use the dolomite-engine \texttt{energy} model type with RoPE positional encoding,
-RMSNorm, SwiGLU FFN, tied embeddings, and \texttt{dual\_unconstrained} projection.
-Table~\ref{tab:variants} summarises the five variants.
+All models share the dolomite-engine \texttt{energy} model type with RoPE positional
+encoding, RMSNorm, SwiGLU FFN ($d_{\mathrm{int}} = 2d$ or $3d$), tied input/output
+embeddings, and BF16 mixed precision.
+Five block variants are ablated; their key differences are the \emph{attention output rule}
+and the \emph{block-level update equation}.
+We write $h_t \in \mathbb{R}^d$ for the hidden state of token $t$,
+$\tilde{h} = \mathrm{RMSNorm}(h)$,
+$Q = W_Q \tilde{h}$, $K = W_K \tilde{h}$, $V = W_V \tilde{h}$,
+and $A_h = \mathrm{softmax}\!\left(Q_h K_h^\top / \sqrt{d_h}\right) \in \mathbb{R}^{T \times T}$
+for the per-head causal attention map.
+
+\subsection{GPT baseline (V0, V9)}
+
+Standard pre-norm decoder transformer:
+\begin{align}
+  h &\;\leftarrow\; h + W_O\,\bigl[\|_h\, A_h V_h\bigr] + \mathrm{FFN}(\tilde{h}),
+\end{align}
+where $\|_h$ denotes head concatenation.  No energy structure; purely additive residual.
+
+\subsection{EGPT energy-descent block (V1, V2)}
+
+Each block approximates one gradient-descent step on a learned Hopfield-style energy.
+With $V_h = K_h$ the per-head energy is
+$E_h = -\sum_{t} \log Z_t + \tfrac{1}{2}\|k_t\|^2$,
+whose gradient with respect to $h_t$ via the query role is $A_h K_h$.
+The update \emph{subtracts} a learned linear projection of this gradient:
+\begin{align}
+  g &= W_O\bigl[\|_h\, A_h K_h\bigr] + s_{\mathrm{ff}}\cdot\mathrm{FFN}(\tilde{h}),
+  \label{eq:egpt_grad}\\
+  h &\;\leftarrow\; h - W\, g,
+  \label{eq:egpt_update}
+\end{align}
+where $W \in \mathbb{R}^{d \times d}$ is an unconstrained linear projection
+(\texttt{energy\_proj\_type: unconstrained}) and $s_{\mathrm{ff}}$ is a learned scalar
+initialised at 4.  The negative sign implements descent; rotation is captured by the
+anti-symmetric part of $W$.
+
+\subsection{Mixed-head EGPT (V10, V11, V13, V14)}
+
+Replaces the $n_h$ pure energy heads with $n_e$ energy heads (V=K) and
+$n_g = n_h - n_e$ standard GPT heads (separate $W_V$), combined through a shared
+output projection $W_O$:
+\begin{align}
+  \mathrm{attn\_out} &= W_O\Bigl[\|_{h=1}^{n_e} A_{e,h} K_{e,h}
+    \;\Big\|\; \|_{h=1}^{n_g} A_{g,h} V_{g,h}\Bigr],
+  \label{eq:mixed_attn}\\
+  h &\;\leftarrow\; h - W\,\bigl(\mathrm{attn\_out} + s_{\mathrm{ff}}\cdot\mathrm{FFN}(\tilde{h})\bigr).
+  \label{eq:mixed_update}
+\end{align}
+V10 uses 6E+6G heads; V13 uses 8E+4G; V14 uses 10E+2G.
+
+\subsection{EGrad: energy-gradient output rule with additive residual (V15, V17, V19, V21, V23, V25, V26)}
+\label{sec:egrad}
+
+The \textbf{EGrad} variant modifies the energy-head output to be the
+\emph{true gradient} of the Hopfield energy with respect to the hidden state $h$
+via the query pathway, while keeping a \emph{standard additive residual} (GPT-style block):
+
+\paragraph{Attention.}
+For each energy head $h$, compute $Q_{e,h} = W_{Q,h}^e \tilde{h}$ and
+$K_{e,h} = W_{K,h}^e \tilde{h}$.
+The Hopfield energy (causal, query-role only) is
+$E_h(x) = \sum_t \mathrm{LSE}_s(q_{t,h}^\top k_{s,h}/\sqrt{d_h})$,
+so $\partial E_h / \partial q_{t,h} = [A_{e,h} K_{e,h}]_t \in \mathbb{R}^{d_h}$.
+Pushing this back through $W_{Q,h}^e$ gives the gradient w.r.t.\ $h_t$:
+\begin{equation}
+  \nabla_{h_t} E_h = {W_{Q,h}^{e}}^\top \bigl[A_{e,h}\, K_{e,h}\bigr]_t.
+  \label{eq:egrad_head}
+\end{equation}
+The $n_g$ GPT heads compute $A_{g,h} V_{g,h}$ as usual, projected through $W_O^g$.
+The combined attention output is
+\begin{equation}
+  \mathrm{attn\_out} = \underbrace{\sum_{h=1}^{n_e} {W_{Q,h}^{e}}^\top
+    \bigl[A_{e,h}\, K_{e,h}\bigr]}_{\text{energy gradient}}
+  + \underbrace{W_O^g \bigl[\|_h A_{g,h} V_{g,h}\bigr]}_{\text{GPT heads}}.
+  \label{eq:egrad_attn}
+\end{equation}
+Note: unlike V10/EDesc, there is no shared $W_O$ for energy heads; $W_Q^e$ itself serves
+as the output projection (no additional parameters from the attention module).
+
+\paragraph{Block update.}
+EGrad uses a standard \textbf{additive} pre-norm residual --- not energy descent:
+\begin{equation}
+  h \;\leftarrow\; h + \mathrm{attn\_out} + \mathrm{FFN}(\tilde{h}).
+  \label{eq:egrad_block}
+\end{equation}
+The energy structure lives entirely in the attention output rule
+(Eq.~\ref{eq:egrad_attn}), not in the block-level dynamics.
+
+\paragraph{Recurrent variants.}
+For $n_e$-headed blocks with iteration count $L$ (e.g.\ V21: $L=2$, V25: $L=4$,
+V26: $L=[2,2,3,4,4,9]$ per layer), the same block weights are applied $L$ times:
+\begin{equation}
+  h^{(\ell+1)} = \mathrm{EGradBlock}(h^{(\ell)}), \quad \ell = 0, \ldots, L-1.
+  \label{eq:egrad_recur}
+\end{equation}
+
+\subsection{EDesc: energy-descent block with mixed V=K attention (V16, V18, V20, V22, V24)}
+\label{sec:edesc}
+
+The \textbf{EDesc} variant keeps the V=K mixed-head attention of V10
+(Eq.~\ref{eq:mixed_attn}) but drops the learned projection $W$ in the block update,
+replacing it with the identity:
+\begin{equation}
+  h \;\leftarrow\; h - \bigl(\mathrm{attn\_out} + s_{\mathrm{ff}}\cdot\mathrm{FFN}(\tilde{h})\bigr).
+  \label{eq:edesc_block}
+\end{equation}
+This is a \emph{pure gradient descent step} (step size 1) on the mixed-head energy,
+with no additional projection parameters beyond attention and FFN.
+\texttt{energy\_proj\_type: identity} implements Eq.~\ref{eq:edesc_block}.
+
+\paragraph{Comparison with EGrad.}
+The two variants differ on both axes simultaneously:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+ & \textbf{Attention output} & \textbf{Block update} \\
+\midrule
+V10 Mixed & $W_O[A_e K_e \| A_g V_g]$ & subtract $W \cdot g$ \\
+EGrad & $\sum_h W_Q^{eT} A_e K_e + W_O^g A_g V_g$ & add (GPT residual) \\
+EDesc & $W_O[A_e K_e \| A_g V_g]$ & subtract $g$ (identity) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+EGrad replaces the V10 output rule with the true energy gradient and switches to additive
+residuals, removing the block-level descent.
+EDesc keeps the V10 output rule but enforces pure descent by removing the $W$ projection.
+
+Table~\ref{tab:variants} summarises the five original 160M-scale variants;
+Tables~\ref{tab:new_variants} and \ref{tab:scaling} cover the extended ablation.
 
 \begin{table}[h]
 \centering

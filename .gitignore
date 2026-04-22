@@ -13,7 +13,10 @@ scripts/blue-vela
 
 # Experiment artifacts — model weights, tokenizer vocab, wandb runs
 wandb/
-experiments/energy-inference/results/
+# Ignore everything in results except plot PDFs
+experiments/energy-inference/results/**
+!experiments/energy-inference/results/**/
+!experiments/energy-inference/results/**/*.pdf
 
 # LaTeX build artifacts
 *.aux
