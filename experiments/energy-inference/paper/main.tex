@@ -721,6 +721,147 @@ Fine-tuning after merge, or block-drop (keeping one block intact),
 remain viable alternatives and are left for future work.
 
 %% ============================================================
+\subsection{Layer Similarity in EGrad and EDesc}
+\label{sec:layer_sim_egrad}
+%% ============================================================
+
+The layer similarity analysis above focused on V1 EGPT and V0 GPT.
+We now extend it to the EGrad (V15, V19) and EDesc (V16, V20) models,
+which differ structurally: they use mixed heads (GPT $V{=}W_V x$ plus energy $V{=}K$ or
+energy-gradient heads) with a shared output projection, rather than a pure $V{=}K$ attention.
+
+\paragraph{Small scale (d=768, 12$\times$1): attention similarity drops, FFN similarity rises.}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/layer_sim_cosine_small.pdf}
+  \caption{Full $12{\times}12$ inter-layer cosine similarity matrices for attn\_out (top row)
+    and ffwd\_out (bottom row) across V0 GPT, V1 EGPT, V15 EGrad, and V16 EDesc.
+    V1 EGPT shows the highest attn\_out off-diagonal cosine (0.216) with near-zero ffwd\_out.
+    V15 EGrad and V16 EDesc invert this: lower attn\_out similarity (0.107/0.106) but
+    elevated ffwd\_out similarity (0.157/0.158).}
+  \label{fig:layer_sim_cosine_small}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/consecutive_sim_small.pdf}
+  \caption{Consecutive-layer cosine similarity for d=768 models.
+    Left: attn\_out — V1 EGPT rises monotonically to 0.531 at layers 8--9 (peak of shared-energy
+    structure); EGrad/EDesc remain below GPT ($\le$0.350 vs GPT $\le$0.403).
+    Right: ffwd\_out — EGrad/EDesc show notably higher early-layer FFN similarity
+    (consecutive max 0.634/0.648 vs V0 GPT 0.480 and V1 EGPT $\approx$0).
+    The random-init baseline is near zero throughout.}
+  \label{fig:consecutive_sim_small}
+\end{figure}
+
+Table~\ref{tab:layer_sim_egrad} summarises the off-diagonal mean cosine similarity.
+
+\begin{table}[h]
+\centering
+\caption{Off-diagonal mean cosine similarity across models.  Random = untrained V1 EGPT.
+  Highest in each row \textbf{bold}.}
+\label{tab:layer_sim_egrad}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Component} & \textbf{V0 GPT} & \textbf{V1 EGPT} & \textbf{V15 EGrad} & \textbf{V16 EDesc} & \textbf{Random} \\
+\midrule
+attn\_out  & 0.121 & \textbf{0.216} & 0.107 & 0.106 & 0.000 \\
+ffwd\_out  & 0.080 & 0.000 & \textbf{0.157} & 0.158 & 0.002 \\
+update ($\Delta x$) & 0.088 & 0.026 & \textbf{0.168} & 0.163 & 0.001 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{itemize}
+  \item \textbf{EGrad/EDesc lose V1 EGPT's shared-attention structure.}
+    V1 EGPT's high attn\_out cosine (0.216) arose because the $V{=}K$ constraint makes
+    every attention head output a weighted sum of keys, which converges to a shared
+    direction in the later layers.
+    EGrad/EDesc mix these heads with standard GPT heads ($V{=}W_V x$), which produce
+    diverse outputs.  The blended attention output loses the convergence pattern:
+    EGrad (0.107) and EDesc (0.106) are both \emph{below} even V0 GPT (0.121).
+
+  \item \textbf{FFN similarity inverts: EGrad/EDesc show elevated cross-layer alignment.}
+    V1 EGPT's subtractive update causes the residual stream $h$ to vary drastically
+    between adjacent layers, so each FFN sees a different input and produces orthogonal
+    outputs (cosine $\approx 0$).
+    EGrad/EDesc use additive (EGrad) or gentler subtractive (EDesc) updates that keep
+    the residual stream more stable across layers.
+    Consequently, the FFN sees more similar inputs at adjacent layers, producing
+    cross-layer FFN similarity of 0.157--0.158 --- twice V0 GPT's 0.080.
+    The consecutive FFN peak at layers 0--1 (0.634/0.648) suggests early-layer FFNs
+    are particularly redundant.
+
+  \item \textbf{Update coherence is highest for EGrad/EDesc.}
+    The full step $\Delta x = h_{\mathrm{out}} - h_{\mathrm{in}}$ shows cross-layer
+    cosine of 0.163--0.168 for EGrad/EDesc, far above V0 GPT (0.088) and V1 EGPT (0.026).
+    EGrad/EDesc apply more consistent update \emph{directions} across all layers ---
+    a form of global coherence that may contribute to their improved benchmark accuracy.
+\end{itemize}
+
+\paragraph{400M scale (d=1024, 24$\times$1): GPT dominates FFN similarity.}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/layer_sim_cosine_400m.pdf}
+  \caption{Full $24{\times}24$ inter-layer cosine similarity matrices at 400M scale.
+    V9 GPT shows extremely high FFN similarity (off-diag 0.267, consecutive max 0.928 at pair 0--1).
+    V19 EGrad and V20 EDesc show lower FFN similarity (0.116/0.126)
+    and similar attention similarity to V9 GPT ($\approx 0.094$).}
+  \label{fig:layer_sim_cosine_400m}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/consecutive_sim_400m.pdf}
+  \caption{Consecutive-layer cosine similarity at 400M scale (24 layers).
+    Left: attn\_out — all three models stay below 0.50 with no clear trend;
+    EGrad/EDesc show a mild monotonic rise toward later layers.
+    Right: ffwd\_out — V9 GPT shows near-perfect FFN similarity at the first pair (0.928)
+    that decays across depth; EGrad/EDesc show uniformly lower values.}
+  \label{fig:consecutive_sim_400m}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{Off-diagonal mean cosine similarity at 400M scale (d=1024, 24$\times$1).}
+\label{tab:layer_sim_400m}
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Component} & \textbf{V9 GPT} & \textbf{V19 EGrad} & \textbf{V20 EDesc} \\
+\midrule
+attn\_out  & 0.093 & 0.094 & \textbf{0.095} \\
+ffwd\_out  & \textbf{0.267} & 0.116 & 0.126 \\
+update ($\Delta x$) & \textbf{0.235} & 0.106 & 0.119 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At 400M scale, EGrad and EDesc show near-identical attention similarity to V9 GPT
+(0.094/0.095 vs 0.093).
+Strikingly, V9 GPT now leads on FFN similarity (0.267) --- nearly $2.3\times$ higher
+than V19/V20 --- with consecutive FFN cosine of 0.928 at the first layer pair,
+decaying across depth.
+This suggests that at wider models ($d{=}1024$, 24 layers), GPT's FFN early layers
+are highly redundant, while EGrad/EDesc maintain more diverse FFN representations.
+The performance advantage of V19/V20 over V9 GPT therefore does not come from
+greater inter-layer representation sharing, but from the structure of the attention
+output rule itself.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.75\textwidth]{../results/multi-block-ablation/plots/layer_sim_summary_egrad_edesc.pdf}
+  \caption{Off-diagonal mean attn\_out cosine similarity across all eight models.
+    V1 EGPT (0.216) has the highest attention layer similarity; EGrad/EDesc (0.107/0.106)
+    are below even V0 GPT (0.121).  At 400M scale (right group), all three models are
+    near-identical on attn ($\approx$0.09).}
+  \label{fig:layer_sim_summary_egrad}
+\end{figure}
+
+%% ============================================================
 \section{Learning Rate and Stability}
 %% ============================================================
 

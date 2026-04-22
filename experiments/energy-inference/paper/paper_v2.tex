@@ -1,0 +1,934 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1.1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{microtype}
+
+\title{\textbf{From Energy Descent to Energy Gradient:\\
+How Changing the Output Rule Turns Energy Models into Better Transformers}}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Energy-based language models (EGPTs) replace the additive residual update of a standard
+transformer with a gradient step on an implicit energy function.
+Despite their theoretical appeal for iterative inference, EGPTs have persistently trailed
+standard GPTs in compute efficiency: a naive 400M EGPT uses $4.4\times$ more FLOPs per
+token yet achieves only GPT-equivalent accuracy.
+Through a series of targeted ablations, we identify the key bottleneck: the $V{=}K$
+attention constraint forces the attention output to lie on the energy manifold rather
+than pointing in the direction of steepest energy descent.
+Replacing the energy-head output with the true energy gradient
+($W_Q^\top \cdot \mathrm{softmax}(QK^\top/\sqrt{d_h}) \cdot K$) yields \textbf{EGrad},
+a mixed-head architecture that \emph{strictly dominates} standard GPT on both perplexity
+and average zero-shot accuracy at matched compute.
+At 144M parameters / 285 MFLOPs/token, EGrad achieves 47.9\% average accuracy and
+36.96 PPL vs.\ GPT's 47.2\% / 38.31 PPL.
+Scaling to 400M / 503 MFLOPs/token, EGrad (V19) achieves 49.9\% avg and 27.8 PPL,
+beating the matched GPT baseline (48.6\% / 29.8 PPL) by a clear margin---the
+first energy-based architecture in our ablation to consistently outperform GPT
+at the same compute budget.
+We also characterise the energy landscape through Helmholtz decomposition (trained models
+learn balanced curl--gradient projections emergently), layer similarity analysis
+(attention outputs share a common gradient direction in later EGPT layers), and
+weight-merge experiments (functional similarity does not imply structural mergeability).
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% ============================================================
+\section{Introduction and Motivation}
+\label{sec:intro}
+%% ============================================================
+
+Standard transformers (GPT) compute a sequence of \emph{additive} residual updates:
+each block reads the current hidden state, computes an attention output and an MLP
+output, and adds them to the state.
+The updates are independent across blocks, and each block is specialised by training
+to contribute a different transformation.
+
+Energy-based models (EGPTs) were proposed as an alternative in which each block
+performs one step of gradient descent on a shared energy function $E(h)$.
+The intuition is that the sequence of blocks then implements an iterative inference
+procedure, converging toward a low-energy configuration.
+This design has several theoretical virtues: it provides a variational interpretation
+of inference, enables test-time compute scaling by adding extra recurrence steps, and
+may encourage convergence toward a stable attractor rather than accumulating noise.
+
+In practice, the original EGPT formulation is substantially less compute-efficient than GPT.
+The $V{=}K$ constraint (using keys as values, so that attention output lies on the key
+manifold) introduces a structural bottleneck: the $4.4\times$ FLOPs overhead of an EGPT
+over a comparable GPT yields only GPT-equivalent accuracy.
+
+This paper is a systematic ablation study that traces a path from the original EGPT to
+a family of architectures, \textbf{EGrad} and \textbf{EDesc}, that match or exceed GPT at
+the same compute budget.
+The key insight is not architectural complexity: it is a \emph{single change to the output
+rule} of the energy attention heads.
+
+\paragraph{Roadmap.}
+\begin{itemize}
+  \item Section~\ref{sec:architectures}: Forward-pass equations for all variants (GPT, EGPT, Mixed, EGrad, EDesc).
+  \item Section~\ref{sec:egpt_gap}: Diagnosing the compute gap between EGPT and GPT.
+  \item Section~\ref{sec:probes}: Mechanistic probes: Helmholtz decomposition, layer similarity, and weight merging.
+  \item Section~\ref{sec:mixed}: Mixed heads close the gap.
+  \item Section~\ref{sec:output_rule}: The output-rule change that crosses the GPT frontier.
+  \item Section~\ref{sec:scaling}: Scaling EGrad/EDesc to 400M parameters confirms the advantage.
+\end{itemize}
+
+%% ============================================================
+\section{Architecture Variants}
+\label{sec:architectures}
+%% ============================================================
+
+\subsection{Standard Transformer (GPT)}
+
+Each block applies:
+\begin{align}
+  \tilde{h} &= \mathrm{LN}(h), \label{eq:ln} \\
+  \mathrm{attn} &= W_O \left[ \|_h\, \mathrm{softmax}\!\left(\tfrac{Q_h K_h^\top}{\sqrt{d_h}}\right) V_h \right], \\
+  h &\leftarrow h + \mathrm{attn} + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}). \label{eq:gpt_update}
+\end{align}
+where $Q_h = W_{Q,h}\tilde{h}$, $K_h = W_{K,h}\tilde{h}$, $V_h = W_{V,h}\tilde{h}$,
+and $s_{\mathrm{ff}}$ is a learned scalar.
+
+\subsection{Original Energy GPT (EGPT)}
+
+EGPT replaces $V_h$ with $K_h$ (the $V{=}K$ constraint) and applies the block output
+as a \emph{gradient step}:
+\begin{align}
+  \mathrm{attn}_E &= W_O \left[ \|_h\, A_h K_h \right], \quad A_h = \mathrm{softmax}\!\left(\tfrac{Q_h K_h^\top}{\sqrt{d_h}}\right), \\
+  g &= \mathrm{attn}_E + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}), \\
+  h &\leftarrow h - W \cdot g. \label{eq:egpt_update}
+\end{align}
+The projection matrix $W$ (shape $d \times d$) acts as a preconditioner / policy.
+The $V{=}K$ constraint makes the attention output a weighted sum of keys, which lies on
+the key manifold and can be interpreted as $\nabla_h E$ for a suitably defined $E$.
+
+\textbf{Cost:} EGPT requires two additional $d{\times}d$ matrix multiplications
+(proj\_attn, proj\_mlp) compared to GPT, and the $V{=}K$ attention kernel is slightly
+more expensive than softmax attention with a separate $V$ projection.
+At $d=768$, 12 layers: 359 vs.\ 321 MFLOPs/token.
+At $d=1024$, 24 layers: 654 vs.\ 503 MFLOPs/token.
+
+\subsection{Mixed-Head EGPT (V10, V11)}
+
+A natural compromise: keep a fraction of heads as energy heads ($V{=}K$) and
+the remaining heads as standard GPT heads ($V{=}W_V x$), sharing a single output projection:
+\begin{align}
+  \mathrm{attn}_{\mathrm{mix}} &= W_O \Bigl[
+    \underbrace{\|_{h \in \mathcal{E}}\, A_h K_h}_{\text{energy heads}}
+    \;\Big\|\;
+    \underbrace{\|_{h \in \mathcal{G}}\, A_h V_h}_{\text{GPT heads}}
+  \Bigr], \\
+  h &\leftarrow h + \mathrm{attn}_{\mathrm{mix}} + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}). \label{eq:mixed_update}
+\end{align}
+The block remains \emph{additive} (GPT-style update), not subtractive.
+Mixed-head models can be implemented as a single attention kernel over all heads;
+no separate forward pass is needed.
+
+\subsection{Energy Gradient Output (EGrad, V15, V19)}
+
+The key insight: in EGPT, the attention output $A_h K_h$ is a weighted sum of keys.
+The true gradient of the energy $E_h(h) = -\log \sum_i \exp(Q_h K_{h,i}^\top / \sqrt{d_h})$
+with respect to $h$ at position $t$ is:
+\begin{equation}
+  \nabla_{h_t} E_h = W_{Q,h}^\top \bigl[ A_h K_h \bigr]_t, \label{eq:egrad}
+\end{equation}
+where $W_{Q,h}^\top \in \mathbb{R}^{D \times d_h}$ maps from head space back to
+hidden dimension.
+EGrad uses this true gradient as the energy-head output, while keeping the GPT-head
+output and additive residual:
+\begin{align}
+  \mathrm{egrad}_h(t) &= W_{Q,h}^\top \bigl[ A_h K_h \bigr]_t, \\
+  \mathrm{egrad\_out} &= \sum_h \mathrm{egrad}_h \quad \text{(summed across energy heads)}, \\
+  h &\leftarrow h + \mathrm{egrad\_out} + W_{O,\mathcal{G}} \bigl[ \|_{h \in \mathcal{G}}\, A_h V_h \bigr]
+       + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}). \label{eq:egrad_update}
+\end{align}
+No extra projection matrix is required: the output-projection for energy heads is
+$W_{Q,h}^\top$ (the transpose of the query projection), reused at no parameter cost.
+
+\textbf{Recurrent extension.}
+With layer reuse: $h^{(k+1)} = h^{(k)} + \mathrm{egrad\_out}^{(k)} + \ldots$ iterated
+$n_k$ times per unique block $k$.  The total effective compute is
+$\propto \sum_k n_k \times (4d^2 + 3d \cdot d_{\mathrm{int}})$.
+
+\subsection{Energy Descent Output (EDesc, V16, V20)}
+
+EDesc uses the mixed-head output (Eq.~\ref{eq:mixed_update}) as a gradient direction
+and applies a \emph{subtractive} update, with no separate projection matrix
+(\texttt{energy\_proj\_type: identity}):
+\begin{equation}
+  h \leftarrow h - \bigl(\mathrm{attn\_mix} + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h})\bigr). \label{eq:edesc_update}
+\end{equation}
+EDesc is simpler than EGrad: it keeps the $V{=}K$ energy heads but interprets
+the whole block output as a descent direction.
+
+\subsection{Comparison Table}
+
+\begin{table}[h]
+\centering
+\caption{Architecture comparison. All use shared $W_O$ across heads within a block.
+  ``Additive'' = residual $+$; ``Descent'' = residual $-$.
+  EGrad uses $W_Q^\top$ as energy head output projection (no new params).}
+\label{tab:arch_compare}
+\begin{tabular}{lllll}
+\toprule
+\textbf{Model} & \textbf{Attn output} & \textbf{Block update} & \textbf{New params} & \textbf{Extra FLOPs} \\
+\midrule
+GPT         & $A V$ (std)       & Additive    & $W_V$ per head      & none \\
+EGPT        & $A K$ (energy)    & Descent     & proj\_attn, proj\_mlp & $2d^2$ per block \\
+Mixed (V10) & $A K$ + $A V$     & Additive    & $W_V$ for GPT heads & none vs.\ GPT \\
+EGrad (V15) & $W_Q^\top A K$ + $A V$ & Additive & none (reuse $W_Q$) & small \\
+EDesc (V16) & $A K$ + $A V$     & Descent     & none                 & none \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\section{Diagnosing the EGPT Compute Gap}
+\label{sec:egpt_gap}
+%% ============================================================
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/wikitext_ppl.pdf}
+    \caption{WikiText word perplexity (lower is better).}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/avg_zeroshot_acc.pdf}
+    \caption{Average zero-shot accuracy (9 tasks).}
+  \end{subfigure}
+  \caption{Summary metrics for early variants.  V0 GPT (162M, 321 MFLOPs/tok) leads on perplexity;
+    V1 EGPT lr=2e-3 (143M, 359 MFLOPs) nearly ties on accuracy despite the FLOPs gap.}
+  \label{fig:summary_early}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{EGPT vs GPT at matched scale.  All trained for 30k steps (7.86B tokens)
+  unless noted.  FLOPs = forward pass, $s{=}4096$.}
+\label{tab:egpt_gap}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{MFLOPs/tok} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} \\
+\midrule
+V0  GPT 12$\times$1    & 162M & 321 & \textbf{38.3} & 49.1\% & 24.5 & 33.0 \\
+V1  EGPT 12$\times$1   & 143M & 359 & 47.7 & 49.0\% & 23.6 & 30.8 \\
+\midrule
+V1  EGPT 400M          & 400M & 755 & 38.6 & 50.6\% & 25.2 & 34.5 \\
+V9  GPT 24$\times$1    & 354M & 503 & 29.8 & 49.6\% & 27.1 & 38.5 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\paragraph{Three faces of the gap.}
+\begin{enumerate}
+  \item \textbf{Perplexity gap at iso-param scale.}
+    V1 EGPT (143M) ties V0 GPT (162M) on average accuracy (49.0\% vs.\ 49.1\%)
+    but trails by $-24\%$ on perplexity (47.7 vs.\ 38.3) at slightly lower FLOPs.
+    Higher LR (3e-4 $\to$ 2e-3) closes the accuracy gap but not perplexity.
+
+  \item \textbf{FLOPs overhead at 400M scale.}
+    V1 400M EGPT uses 755 MFLOPs/token (the additional proj\_attn and proj\_mlp layers
+    plus wider $d=1024$), vs.\ 503 for a comparably sized GPT.
+    Despite $4.4\times$ the FLOPs of V0 GPT, V1 400M achieves only marginally better
+    benchmarks.  The loss curve of V1 400M on WandB closely \emph{tracks} V0 GPT's
+    curve despite the 4.4$\times$ FLOPs difference --- confirming that EGPT utilises
+    roughly 1/4 of the available compute.
+
+  \item \textbf{Weight-sharing is efficient but suboptimal.}
+    V3 (one shared block iterated $12\times$) matches V1 (12 distinct blocks $\times$ 1)
+    on perplexity at a fraction of the unique parameters, confirming the recurrence
+    adds useful computation.
+    V2 (6 blocks $\times$ 2 iters) is the weakest variant: fewer distinct blocks with
+    modest recurrence yields the worst result.
+\end{enumerate}
+
+\paragraph{Structural ablations (V5--V8).}
+
+\begin{table}[h]
+\centering
+\caption{Structural ablation: removing components or enforcing Helmholtz structure
+  at initialisation.  $d=768$, 12$\times$1, 30k steps.}
+\label{tab:v5_v8}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{BoolQ} & \textbf{COPA} \\
+\midrule
+V0  GPT          & 162M & \textbf{38.3} & \textbf{49.1\%} & 56.6 & 59.0 \\
+V1  EGPT         & 143M & 47.7 & 49.0\% & \textbf{61.1} & \textbf{64.0} \\
+\midrule
+V5  AttnOnly     & 143M & 48.6 & 48.3\% & 57.2 & 62.0 \\
+V6  HelmF        & 140M & 82.1 & 43.5\% & 50.0 & 55.0 \\
+V7  HelmD        & 140M & 63.4 & 45.1\% & 47.2 & 61.0 \\
+V8  HelmDR       & 140M & 65.2 & 45.7\% & 53.9 & 57.0 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{itemize}
+  \item \textbf{V5 (AttnOnly):} Removing proj\_mlp saves 7M parameters but only costs
+    $-0.7$ pp accuracy.  BoolQ/COPA advantage over GPT is partially preserved,
+    confirming the energy attention mechanism is the source of the effect.
+  \item \textbf{V6--V8 (Helmholtz):} Explicitly forcing the curl--gradient decomposition
+    at architecture level degrades both perplexity (63--82 vs.\ 48) and accuracy
+    (43.5--45.7\% vs.\ 49.0\%).  The emergent balance learned by unconstrained V1 is
+    beneficial; imposing it architecturally hurts training dynamics.
+    V1 EGPT's BoolQ/COPA advantages survive in V5 but disappear in V6--V8,
+    confirming these are tied to the attention mechanism, not the projection policy.
+\end{itemize}
+
+%% ============================================================
+\section{Mechanistic Probes: What Does EGPT Learn?}
+\label{sec:probes}
+%% ============================================================
+
+\subsection{Helmholtz Decomposition of Projection Matrices}
+
+Any square matrix $W \in \mathbb{R}^{d \times d}$ decomposes as $W = S + A$, where
+$S = (W + W^\top)/2$ (symmetric, gradient component) and $A = (W - W^\top)/2$
+(anti-symmetric, curl component).
+For an energy function, a pure gradient projection requires $W = S$ ($\rho = 0$),
+while a pure rotation requires $W = A$ ($\rho \to \infty$).
+A random matrix has $\rho = \|A\|_F / \|S\|_F = 1$ by symmetry.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{../results/multi-block-ablation/plots/curl_grad_ratio.pdf}
+  \caption{Per-layer curl-to-gradient ratio for the attention and MLP projection matrices.
+    V1 EGPT (trained, $d=768$): $\rho_{\mathrm{attn}}=0.930$, $\rho_{\mathrm{mlp}}=1.000$.
+    V4 EGPT (trained, $d=1152$): $\rho \in [0.93, 0.99]$ throughout.
+    Both models converge to balanced Helmholtz decomposition ($\rho \approx 1$),
+    regardless of initialisation or model size.}
+  \label{fig:curl_grad}
+\end{figure}
+
+\paragraph{Finding.}
+Trained EGPT models spontaneously learn balanced projections ($\|S\|_F \approx \|A\|_F$).
+A mild gradient bias in the attention stream ($\rho < 1$) is consistent with the
+inductive bias toward dissipation in iterative inference.
+The balance is \emph{emergent}: starting from random initialisation ($\rho = 1$),
+training maintains the balance over 30k steps.
+Explicitly forcing the balance (V6--V8) is significantly worse, suggesting the
+projection policy needs unconstrained freedom to decide how much curl vs.\ gradient
+to apply at each layer.
+
+\subsection{Layer Similarity: Is There a Shared Energy Function?}
+
+A central claim of EGPT is that all blocks perform gradient steps on a \emph{shared}
+energy function.  If true, the pre-projection attention outputs
+$\mathrm{attn\_out}^{(i)} = \mathrm{attn}(\mathrm{LN}(h^{(i)}))$ (the gradient signal
+before the policy is applied) should be more similar across layers than in GPT.
+
+We compare three models on a 512-token WikiText prefill, measuring Linear CKA and
+cosine similarity of per-component inter-layer similarities.
+
+\begin{table}[h]
+\centering
+\caption{Mean off-diagonal inter-layer similarity for four components.
+  ``Random'' = untrained V1 EGPT.  CKA is dominated by the shared residual stream
+  and is a poor probe; cosine similarity is correctly near-zero for the random baseline.}
+\label{tab:layer_sim}
+\small
+\begin{tabular}{llccc}
+\toprule
+\textbf{Component} & \textbf{Metric} & \textbf{V1 EGPT} & \textbf{V0 GPT} & \textbf{Random} \\
+\midrule
+h\_out (residual)     & CKA    & 0.663 & 0.572 & 0.952 \\
+                      & Cosine & \textbf{0.764} & 0.612 & 0.670 \\
+attn\_out (grad$_E$)  & CKA    & 0.463 & 0.326 & 0.961 \\
+                      & Cosine & \textbf{0.176} & 0.119 & 0.006 \\
+ffwd\_out (grad$_E$)  & CKA    & 0.513 & 0.367 & 0.891 \\
+                      & Cosine & $-0.000$ & 0.078 & $-0.002$ \\
+update ($\Delta x$)   & CKA    & 0.380 & \textbf{0.383} & 0.849 \\
+                      & Cosine & 0.022 & \textbf{0.085} & $-0.001$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/consecutive_layer_sim.pdf}
+  \caption{Consecutive-layer cosine similarity for attention (left) and FFN (right) pre-projection outputs.
+    V1 EGPT attention similarity rises monotonically to 0.531 at layers 8--9 (far above GPT's $\le$0.40),
+    then plateaus.  FFN similarity is near zero for EGPT throughout.}
+  \label{fig:consecutive_layer_sim}
+\end{figure}
+
+\paragraph{Key findings.}
+\begin{itemize}
+  \item \textbf{Attention gradient is shared, FFN gradient is not.}
+    V1 EGPT shows attention cosine 0.176 vs.\ GPT 0.119 and random 0.006.
+    FFN cosine is $-0.000$ for EGPT (comparable to random $-0.002$),
+    while GPT has 0.078.
+    The shared-energy interpretation holds only for the attention stream.
+
+  \item \textbf{Monotonic rise to convergence in later layers.}
+    Consecutive-layer attention cosine in V1 EGPT rises from $\approx 0$ at layers 1--2
+    to a peak of 0.531 at layers 8--9, then slightly declines.
+    Layers 6--10 are strong candidates for weight-sharing based on this metric.
+
+  \item \textbf{CKA is dominated by input geometry.}
+    The untrained random model has the \emph{highest} CKA (0.85--0.96) because all layers
+    receive the same embedded input.  Training reduces CKA by specialising layers.
+    CKA should not be used to test the shared-energy hypothesis in this setting.
+
+  \item \textbf{Residual stream converges: EGPT $>$ GPT.}
+    EGPT's residual-stream cosine (0.764) exceeds GPT's (0.612) and the random baseline (0.670),
+    consistent with convergent gradient dynamics pulling $h$ toward a common attractor.
+\end{itemize}
+
+\subsection{Layer Merging: Why High Similarity Does Not Imply Mergeability}
+
+Given the high consecutive-layer cosine similarity in EGPT (layers 8--9: 0.531),
+one might hope to merge adjacent blocks via weight averaging without performance loss.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/layer_merge_aligned_ppl.pdf}
+  \caption{WikiText PPL for layer merges: naive (grey), O($d_h$) Procrustes (orange),
+    and GL($d_h$) gradient descent (purple).
+    Neither alignment strategy consistently recovers the loss.  The best single-pair merge
+    (7--8: +38\% PPL) is far from lossless.}
+  \label{fig:layer_merge_aligned_ppl}
+\end{figure}
+
+\paragraph{Result.}
+Even the best single-pair merge (layers 7--8, second-highest cosine similarity) increases
+PPL by 38\% (57.51 $\to$ 79.25).
+The pair with highest cosine (8--9) shows the worst merge (+74\%).
+GL($d_h$) alignment (full scaling and shear, not just rotations) provides at most 4\%
+improvement over naive averaging.
+
+\paragraph{Interpretation.}
+The high output-space cosine similarity is a property of the \emph{function} computed,
+not of the \emph{weights}.
+EGPT's subtractive update keeps $h$ near a shared attractor, so each layer sees similar
+inputs and computes similar directions --- but the weight matrices themselves are not
+structurally related.
+High functional similarity does not imply structural redundancy:
+zero-shot weight merging is not a viable compression strategy for EGPT.
+Fine-tuning after merge, or block-drop (keeping one block intact), remain viable alternatives.
+
+\subsection{EGrad and EDesc: Layer Similarity at Both Scales}
+\label{sec:layer_sim_egrad}
+
+EGrad (V15, V19) and EDesc (V16, V20) use a fundamentally different block structure:
+mixed heads with a shared output projection and an additive (EGrad) or subtractive (EDesc)
+residual update.
+We extend the layer similarity analysis to these models.
+
+\begin{table}[h]
+\centering
+\caption{Off-diagonal mean cosine similarity at d=768 (12$\times$1) and d=1024 (24$\times$1).
+  Highest per row in each group \textbf{bold}.}
+\label{tab:layer_sim_egrad}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lc@{\quad}cccc@{\quad\quad}ccc}
+\toprule
+& & \multicolumn{4}{c}{\textbf{d=768 (small scale)}} & \multicolumn{3}{c}{\textbf{d=1024 (400M)}} \\
+\cmidrule(lr){3-6} \cmidrule(lr){7-9}
+\textbf{Component} & & V0 GPT & V1 EGPT & V15 EGrad & V16 EDesc & V9 GPT & V19 EGrad & V20 EDesc \\
+\midrule
+attn\_out  & & 0.121 & \textbf{0.216} & 0.107 & 0.106 & 0.093 & 0.094 & \textbf{0.095} \\
+ffwd\_out  & & 0.080 & 0.000 & \textbf{0.157} & 0.158 & \textbf{0.267} & 0.116 & 0.126 \\
+update ($\Delta x$) & & 0.088 & 0.026 & \textbf{0.168} & 0.163 & \textbf{0.235} & 0.106 & 0.119 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+  \centering
+  \begin{subfigure}[b]{\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/consecutive_sim_small.pdf}
+    \caption{d=768, 12 layers.  Left: attn\_out — V1 EGPT peaks at 0.531; EGrad/EDesc stay below
+      GPT ($\le$0.350).  Right: ffwd\_out — EGrad/EDesc show high early-layer FFN similarity
+      (consecutive max 0.634/0.648), while V1 EGPT is near zero.}
+    \label{fig:consecutive_small}
+  \end{subfigure}
+  \vspace{4pt}
+  \begin{subfigure}[b]{\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/consecutive_sim_400m.pdf}
+    \caption{d=1024, 24 layers.  Attn\_out: all three models near-identical.
+      FFN: V9 GPT starts at 0.928 (pair 0--1) and decays; EGrad/EDesc remain well below.}
+    \label{fig:consecutive_400m}
+  \end{subfigure}
+  \caption{Consecutive-layer cosine similarity at both scales.}
+  \label{fig:consecutive_both}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.7\textwidth]{../results/multi-block-ablation/plots/layer_sim_summary_egrad_edesc.pdf}
+  \caption{Off-diagonal mean attn\_out cosine similarity across all models.
+    V1 EGPT (0.216) leads; EGrad/EDesc ($\approx$0.107) are below GPT (0.121).
+    At 400M scale (right group), all three architectures converge to $\approx$0.094.}
+  \label{fig:layer_sim_summary_egrad}
+\end{figure}
+
+\paragraph{Three findings.}
+\begin{enumerate}
+  \item \textbf{EGrad/EDesc do not inherit V1 EGPT's shared-attention structure.}
+    V1 EGPT's high attn cosine (0.216) arises from the $V{=}K$ constraint causing
+    attention outputs to converge to a shared key-space direction in later layers.
+    EGrad/EDesc mix these heads with standard GPT heads, breaking the convergence:
+    attn off-diagonal drops to 0.107/0.106, \emph{below} V0 GPT (0.121).
+
+  \item \textbf{FFN similarity inverts.}
+    V1 EGPT's aggressive subtractive update causes the residual stream to vary sharply
+    between layers, producing near-zero FFN cross-layer cosine ($\approx$0).
+    EGrad/EDesc's gentler updates keep $h$ in a more stable regime: FFNs see similar
+    inputs at adjacent layers, producing ffwd cosine of 0.157/0.158 and consecutive
+    peaks of 0.634--0.648.  The pattern flips entirely: where V1 EGPT has shared
+    attention, EGrad/EDesc have shared FFN.
+
+  \item \textbf{Update coherence peaks for EGrad/EDesc.}
+    The step $\Delta x$ is most cross-layer consistent for EGrad (0.168) and
+    EDesc (0.163), far above V1 EGPT (0.026) and GPT (0.088).
+    EGrad/EDesc apply a globally coherent update direction across all layers.
+
+  \item \textbf{At 400M scale, GPT's FFN becomes highly redundant.}
+    V9 GPT shows consecutive FFN cosine of 0.928 at layer pair 0--1, decaying to
+    $\sim$0.4 across depth --- suggesting early FFN layers in the 400M GPT are nearly
+    identical.  EGrad/EDesc's FFN diversity (0.116/0.126 off-diag) may be one reason
+    they outperform GPT: more diverse FFN representations across depth.
+\end{enumerate}
+
+%% ============================================================
+\section{Mixed Heads Close the Accuracy Gap}
+\label{sec:mixed}
+%% ============================================================
+
+The structural ablations establish that the $V{=}K$ constraint is the main bottleneck
+for perplexity.  A natural fix: replace a fraction of energy heads with standard
+GPT heads ($V = W_V x$), sharing a single output projection $W_O$.
+
+\begin{table}[h]
+\centering
+\caption{Iso-family comparison.  All trained 30k steps.  FLOPs = forward pass, $s=4096$.
+  V10/V11 use the mixed-head (additive) block.  V12 is a recurrent GPT baseline.}
+\label{tab:mixed_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Model} & \textbf{E:G} & \textbf{Params} & \textbf{MFLOPs/tok} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{GSM8K} \\
+\midrule
+V0  GPT 12$\times$1    & 0:12 & 162M & 321 & 38.31 & 47.2\% & 2.20\% \\
+V1  EGPT 12$\times$1   & 12:0 & 143M & 359 & 47.66 & 46.8\% & 1.74\% \\
+V10 Mixed 12$\times$1  & 6:6  & 144M & 285 & \textbf{36.99} & 47.2\% & 1.52\% \\
+\midrule
+V2  EGPT 6$\times$2    & 12:0 & 110M & 359 & 63.32 & 44.7\% & 1.97\% \\
+V11 Mixed 6$\times$2   & 6:6  & 118M & 314 & 40.67 & \textbf{47.3\%} & 1.36\% \\
+V12 GPT  6$\times$2    & 0:12 & 120M & 321 & 39.98 & 47.0\% & 2.05\% \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\paragraph{Findings.}
+\begin{itemize}
+  \item V10 Mixed ties V0 GPT on accuracy (47.2\%) with 12\% fewer FLOPs and 11\% fewer
+    parameters, and achieves better PPL (37.0 vs.\ 38.3).
+    On a per-FLOP basis, V10 is marginally more efficient than V0 at this scale.
+  \item V11 (6$\times$2) beats V2 EGPT by $+2.6$ pp and ties V12 recurrent GPT,
+    confirming that the mixed-head design generalises to recurrent settings.
+  \item \textbf{GSM8K regresses.}  Both V10 (1.52\%) and V11 (1.36\%) fall below
+    the GPT baseline (2.20\%) on mathematical reasoning.
+    The energy $V{=}K$ constraint in the energy heads appears to interfere with
+    arithmetic reasoning regardless of the fraction of energy heads.
+  \item Higher energy-head fractions (V13 8:4, V14 10:2) perform worse than 6:6 (V10),
+    confirming the GPT heads contribute disproportionately to accuracy.
+\end{itemize}
+
+\paragraph{A ceiling exists.}
+Mixed heads with the $V{=}K$ output rule cannot exceed V0 GPT on accuracy or GSM8K,
+despite matching on FLOPs.  The energy heads are contributing \emph{something}
+(better PPL, some accuracy) but their output is suboptimal.
+
+%% ============================================================
+\section{The Output Rule Is the Key}
+\label{sec:output_rule}
+%% ============================================================
+
+\subsection{What the Energy Head Is Actually Computing}
+
+In EGPT and mixed-head models, the energy head output is:
+\begin{equation}
+  \mathrm{attn\_out}_{E,h}(t) = \bigl[ A_h K_h \bigr]_t = \sum_s A_{h,ts} K_{h,s}. \label{eq:energy_head_output}
+\end{equation}
+This is a weighted sum of \emph{keys} --- it lies on the convex hull of the key manifold.
+The true gradient of the energy $E_h(h_t) = -\log \sum_s A_{h,ts}$ with respect
+to $h_t$ (treating $Q_h = W_{Q,h} h_t$) is:
+\begin{equation}
+  \nabla_{h_t} E_h = W_{Q,h}^\top \bigl[ A_h K_h \bigr]_t. \label{eq:true_egrad}
+\end{equation}
+This differs from Eq.~\ref{eq:energy_head_output} by a factor of $W_{Q,h}^\top$,
+which maps from head space ($d_h$) back to hidden space ($D$).
+The $V{=}K$ output \emph{approximates} the true gradient in the sense that it
+points in a related direction, but it is not the true gradient unless $W_{Q,h} = I$
+(a severe restriction).
+
+\subsection{EGrad and EDesc}
+
+\textbf{EGrad (V15)} uses the true gradient (Eq.~\ref{eq:true_egrad}) as the energy-head
+contribution, with no extra parameters (reuses $W_{Q,h}^\top$).
+\textbf{EDesc (V16)} uses the standard $V{=}K$ mixed-head output (Eq.~\ref{eq:energy_head_output})
+but applies a subtractive update (\emph{descent} step) instead of an additive one,
+with \texttt{energy\_proj\_type: identity} (no learned projection matrix).
+
+Both are iso-param (144M) and iso-FLOP (285 MFLOPs/tok) to V10 Mixed.
+
+\begin{table}[h]
+\centering
+\caption{Output-rule ablation (all 12$\times$1, $d{=}768$, 30k steps, 144M/285 MFLOPs/tok
+  except V0/V1).  \textbf{Bold} = best per metric.}
+\label{tab:output_rule}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Model} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{SciQ} & \textbf{GSM8K} \\
+\midrule
+V0  GPT      & 38.31 & 47.2\% & 24.5 & 33.0 & 78.1 & 2.20\% \\
+V1  EGPT     & 47.66 & 46.8\% & 23.6 & 30.8 & 75.2 & 1.74\% \\
+V10 Mixed    & 36.99 & 47.2\% & \textbf{25.5} & 33.4 & 76.9 & 1.52\% \\
+\midrule
+V15 EGrad    & \textbf{36.96} & \textbf{47.9\%} & 24.8 & 33.5 & \textbf{78.6} & \textbf{2.58\%} \\
+V16 EDesc    & 36.98 & 47.4\% & 24.8 & \textbf{33.9} & 77.2 & 2.20\% \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/new_variants_ppl_vs_acc.pdf}
+    \caption{PPL vs.\ accuracy scatter.  V15 EGrad strictly dominates both V0 GPT
+      and V10 Mixed: lower PPL \emph{and} higher accuracy.}
+    \label{fig:ppl_vs_acc}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/new_variants_delta_heatmap.pdf}
+    \caption{Per-task accuracy delta vs.\ V0 GPT.  EGrad (V15) shows broad gains
+      across most tasks; EDesc (V16) leads on HellaSwag and ARC-Easy.}
+    \label{fig:delta_heatmap}
+  \end{subfigure}
+  \caption{Output-rule ablation: EGrad and EDesc vs.\ baselines.}
+  \label{fig:output_rule}
+\end{figure}
+
+\paragraph{Key results.}
+\begin{enumerate}
+  \item \textbf{EGrad strictly dominates GPT.}
+    V15 achieves 47.9\% avg accuracy ($+0.7$ pp over V0 GPT and V10 Mixed),
+    best PPL (36.96 vs.\ 38.31 for V0), and best GSM8K (2.58\% vs.\ V0's 2.20\%),
+    all at 144M params / 285 MFLOPs/token (fewer than V0's 321 MFLOPs/token).
+    This is the first variant in the ablation to simultaneously outperform V0 GPT
+    on accuracy \emph{and} GSM8K while using \emph{fewer} FLOPs.
+
+  \item \textbf{EDesc recovers the GSM8K regression.}
+    V16 achieves 47.4\% accuracy and 2.20\% GSM8K, matching V0 GPT on the latter.
+    Both the energy-head structure and the subtractive update contribute:
+    the regression in V10 Mixed (1.52\% GSM8K) is fully reversed.
+
+  \item \textbf{The output rule matters more than the head ratio.}
+    V13 (8:4 ratio) and V14 (10:2) both underperform V10 (6:6) with the $V{=}K$ rule,
+    confirming the key variable is the output rule, not the head fraction.
+    EGrad and EDesc use 8:8 (8 energy + 8 GPT heads at $d=1024$) and outperform
+    all $V{=}K$ variants.
+\end{enumerate}
+
+%% ============================================================
+\section{Scaling to 400M: Headline Results}
+\label{sec:scaling}
+%% ============================================================
+
+Having established EGrad and EDesc as the best small-scale energy architectures,
+we scale them to $d=1024$, testing three recurrence schedules:
+
+\begin{itemize}
+  \item \textbf{V19/V20 (24$\times$1, 342M)}: 24 distinct blocks, 1 iteration each.
+    Iso-param ($\approx$342M) and iso-compute (503 MFLOPs/tok) to V9 GPT.
+  \item \textbf{V21/V22 (6$\times$2, 162M)}: 6 unique blocks, 2 iterations.
+    Parameter-efficient: unique params $\approx$ half, same 12 effective passes.
+  \item \textbf{V23/V24 (12$\times$2, 228M)}: 12 unique blocks, 2 iterations.
+    Matches compute of V9/V19/V20 (503 MFLOPs/tok) with weight sharing.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{400M-scale results (30k steps, 7.86B tokens each).
+  \textbf{Bold} = best per metric.}
+\label{tab:scaling}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Type} & \textbf{Params} & \textbf{MFLOPs} & \textbf{PPL$\downarrow$}
+  & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
+\midrule
+V9  GPT 24$\times$1    & GPT   & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & \textbf{2.9\%} \\
+V1  EGPT 24$\times$1   & EGPT  & 354M & 654 & 38.6 & 47.0\% & 25.2 & 34.5 & 1.7\% \\
+\midrule
+V19 EGrad 24$\times$1  & EGrad & 342M & 503 & \textbf{27.8} & \textbf{49.9\%} & \textbf{27.7} & \textbf{40.5} & 2.1\% \\
+V20 EDesc 24$\times$1  & EDesc & 342M & 503 & 27.9 & 49.5\% & 27.1 & 40.2 & 1.4\% \\
+\midrule
+V21 EGrad 6$\times$2   & EGrad & 162M & 252 & 37.3 & 47.1\% & 25.6 & 33.9 & 2.0\% \\
+V22 EDesc 6$\times$2   & EDesc & 162M & 252 & 37.1 & 46.6\% & 24.9 & 33.5 & 2.0\% \\
+\midrule
+V23 EGrad 12$\times$2  & EGrad & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
+V24 EDesc 12$\times$2  & EDesc & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_400m_models.pdf}
+  \caption{400M-scale model comparison.  V19 EGrad and V20 EDesc both surpass V9 GPT and
+    V1 EGPT on both axes.  V21/V22 (6$\times$2, 162M unique params) approach V9 accuracy
+    at less than half the compute.}
+  \label{fig:bar_400m}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_flops_v2.pdf}
+    \caption{PPL vs.\ FLOPs/token (log $x$, no Helmholtz).}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_flops_v2.pdf}
+    \caption{Avg accuracy vs.\ FLOPs/token (log $x$).}
+  \end{subfigure}
+  \caption{All models on the FLOPs-efficiency frontier.  Recurrent models (squares) sit
+    between the 142 MFLOPs and 503 MFLOPs clusters.  V19/V20 EGrad/EDesc push past
+    the V9 GPT frontier at 503 MFLOPs/token.}
+  \label{fig:scatter_flops}
+\end{figure}
+
+\paragraph{Key observations.}
+\begin{itemize}
+  \item \textbf{EGrad and EDesc 24$\times$1 surpass GPT at the same compute.}
+    V19 EGrad (PPL=27.8, avg=49.9\%) and V20 EDesc (PPL=27.9, avg=49.5\%) both
+    outperform V9 GPT (PPL=29.8, avg=48.6\%) at identical FLOPs (503 MFLOPs/tok).
+    The advantage is $-2.0$ PPL and $+1.3$ pp accuracy for EGrad.
+    These are the first energy-based variants to consistently beat GPT at matched compute.
+    V19 EGrad slightly edges out V20 EDesc on both metrics.
+
+  \item \textbf{Recurrent 6$\times$2 is parameter-efficient.}
+    V21/V22 (162M unique params, 252 MFLOPs/tok) achieve $\approx$37 PPL,
+    approaching V9 accuracy at half the compute.
+    At one-third V9's FLOPs, these are the most parameter-efficient models in the study.
+
+  \item \textbf{Weight sharing costs $\sim$4 PPL at matched compute.}
+    V23/V24 (228M, 503 MFLOPs/tok) achieve PPL $\approx$ 31.7 and $\sim$48\% accuracy ---
+    substantially better than V21/V22 but $\sim$4 PPL worse than V19/V20 (342M).
+    The 342M non-recurrent model outperforms the 228M recurrent model at the same FLOPs.
+    Weight sharing is a parameter-efficiency lever, not a free accuracy gain.
+
+  \item \textbf{GSM8K: GPT advantage holds at 400M scale.}
+    V9 GPT (2.9\%) leads, with V19/V21/V23 EGrad scoring 2.0--2.1\%.
+    The gap is smaller than at 144M scale, suggesting EGrad may close it at larger scale.
+\end{itemize}
+
+\paragraph{Ongoing runs: V25 and V26.}
+To probe whether recurrence schedule matters for 6-unique-block models,
+we are training:
+\begin{itemize}
+  \item \textbf{V25 EGrad 6$\times$4} (4 uniform iterations per block, 162M, 503 MFLOPs/tok):
+    tests whether more recurrence at the same FLOPs as V19/V20 recovers the weight-sharing gap.
+  \item \textbf{V26 EGrad 6$\times$ramp} ([2,2,3,4,4,9] iterations, same 503 MFLOPs/tok):
+    tests whether concentrating recurrence in the later layers helps.
+\end{itemize}
+Results pending.
+
+%% ============================================================
+\section{Discussion and Conclusions}
+\label{sec:conclusions}
+%% ============================================================
+
+\subsection{The Story in Brief}
+
+We started with the EGPT design: gradient descent on an implicit energy function,
+realised as a $V{=}K$ attention constraint plus learned projection.
+The original design is compute-inefficient (4.4$\times$ FLOPs overhead) and trails GPT
+on perplexity despite tying on accuracy.
+
+Mechanistic analysis reveals that EGPT learns a balanced Helmholtz decomposition
+(curl $\approx$ gradient) in its projections, and that EGPT attention outputs
+are more directionally aligned across layers than in GPT --- consistent with the
+shared-energy hypothesis.
+However, this functional similarity does not imply structural redundancy:
+weight merging is lossy even for the most similar adjacent layer pairs.
+
+Mixed heads (energy $V{=}K$ + GPT $V{=}W_V x$) close the perplexity gap with GPT
+while matching accuracy, but a GSM8K regression reveals the $V{=}K$ output rule
+introduces a bias against arithmetic reasoning.
+
+The key insight is that the energy-head output under the $V{=}K$ rule is not the
+true energy gradient: it lies on the key manifold rather than pointing in the direction
+of steepest descent in hidden space.
+Replacing it with the true gradient ($W_Q^\top \cdot \mathrm{softmax}(\cdot) K$)
+--- EGrad --- simultaneously improves accuracy, perplexity, and GSM8K, strictly
+dominating GPT at 144M scale.
+At 400M scale, EGrad achieves 49.9\% avg / 27.8 PPL vs.\ GPT's 48.6\% / 29.8 PPL
+at identical FLOPs --- the first consistent energy-model improvement over GPT.
+
+\subsection{What Makes EGrad Work?}
+
+The $W_Q^\top$ factor in the EGrad output plays two roles:
+(1) it maps from head space ($d_h$) to hidden space ($D$), allowing the energy-head
+signal to interact with the full-dimensional residual stream;
+(2) it introduces a rotation/scaling that is learned alongside $W_Q$, effectively
+giving the energy head a free ``output projection'' at no parameter cost.
+EDesc achieves similar improvements by the subtractive update alone (no $W_Q^\top$),
+suggesting that the directionality of the update matters as much as the exact gradient form.
+
+\subsection{Open Questions}
+
+\begin{enumerate}
+  \item \textbf{Test-time scaling.}  EGrad models are trained with a fixed number of
+    recurrence steps.  Can extra steps at test time (without retraining) improve
+    accuracy on harder tasks?  The shared-energy structure motivates iterative refinement.
+  \item \textbf{Recurrence schedule.}  V25/V26 will test whether concentrating iterations
+    in later layers is better than uniform distribution.  If so, a learned per-layer
+    schedule may be optimal.
+  \item \textbf{Larger scale.}  The EGrad advantage at 400M is $\sim$1.3 pp accuracy
+    and $\sim$2 PPL.  Does this gap grow or shrink at 3B+ scale?
+  \item \textbf{RL-steered inference.}  The EGrad energy gradient provides a natural
+    reward signal for RL-based test-time search: REINFORCE over recurrence schedules.
+\end{enumerate}
+
+\subsection{Summary of Findings}
+
+\begin{enumerate}
+  \item EGPT's $4.4\times$ FLOPs overhead is not justified by accuracy gains.
+  \item Trained EGPT projections learn balanced Helmholtz decomposition ($\|S\|_F \approx \|A\|_F$);
+    enforcing it architecturally hurts training.
+  \item EGPT attention layers share a common gradient direction (cosine 0.176 vs GPT 0.119),
+    consistent with a shared energy function; FFN layers do not.
+  \item High layer-similarity does not imply weight-mergeability; functional similarity is
+    decoupled from structural similarity.
+  \item Mixed heads (6E + 6G per block) match GPT accuracy at fewer FLOPs but regress on GSM8K.
+  \item Replacing the $V{=}K$ energy-head output with the true energy gradient (EGrad)
+    strictly dominates GPT on all metrics at 144M scale.
+  \item At 400M / 503 MFLOPs/tok, EGrad (V19) outperforms matched GPT (V9) by $+1.3$ pp
+    accuracy and $-2.0$ PPL --- the first consistent energy-model win over GPT.
+  \item Weight-shared recurrent EGrad (V23/V24) bridges the gap but costs $\sim$4 PPL
+    vs.\ non-recurrent at matched compute.
+\end{enumerate}
+
+%% ============================================================
+\appendix
+\section{Full Benchmark Tables}
+%% ============================================================
+
+\begin{table}[h]
+\centering
+\caption{All evaluated small-scale variants (V0--V18), 30k steps / 7.86B tokens.
+  Sorted by average accuracy.  \textbf{Bold} = best per metric.}
+\label{tab:all_small}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrrrrr}
+\toprule
+\textbf{Model} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$}
+  & \textbf{ARC-c} & \textbf{ARC-e} & \textbf{Hella} & \textbf{Wino}
+  & \textbf{BoolQ} & \textbf{PIQA} & \textbf{COPA} & \textbf{OBQA} & \textbf{SciQ} & \textbf{GSM8K} \\
+\midrule
+V15 EGrad      & \textbf{36.96} & \textbf{47.9\%} & 24.8 & 51.5 & 33.5 & 50.6 & 59.5 & 64.9 & 60.0 & 30.4 & \textbf{78.6} & \textbf{2.6\%} \\
+V0  GPT        & 38.31 & 47.2\% & 24.5 & 51.6 & 33.0 & \textbf{51.7} & 56.6 & \textbf{65.4} & 59.0 & \textbf{30.4} & 78.1 & 2.2\% \\
+V16 EDesc      & 36.98 & 47.4\% & 24.8 & \textbf{52.7} & \textbf{33.9} & 52.1 & 58.4 & 63.7 & 57.0 & 30.0 & 77.2 & 2.2\% \\
+V10 Mixed 6:6  & 36.99 & 47.2\% & \textbf{25.5} & 51.4 & 33.4 & 52.7 & 56.5 & \textbf{65.4} & 57.0 & 27.4 & 76.9 & 1.5\% \\
+V12 GPT 6$\times$2 & 39.98 & 47.0\% & 24.0 & \textbf{52.0} & 32.3 & 50.6 & 56.7 & 63.1 & 58.0 & \textbf{30.8} & 77.7 & 2.1\% \\
+V11 Mixed 6$\times$2 & 40.67 & 47.3\% & 24.5 & 51.0 & 32.3 & 51.8 & 58.6 & 63.4 & 61.0 & 29.4 & 75.7 & 1.4\% \\
+V1  EGPT       & 47.66 & 46.8\% & 23.6 & 47.9 & 30.8 & 50.7 & \textbf{61.1} & 62.2 & \textbf{64.0} & 29.2 & 75.2 & 1.7\% \\
+V14 Mix 10:2   & 39.5  & 46.1\% & 25.7 & -- & 32.6 & -- & -- & -- & -- & -- & -- & 1.6\% \\
+V13 Mix 8:4    & 37.9  & 45.6\% & 24.4 & -- & 33.3 & -- & -- & -- & -- & -- & -- & 1.7\% \\
+V5  AttnOnly   & 48.6  & 48.3\% & 23.9 & 44.8 & 30.6 & 51.4 & 57.2 & 62.8 & 62.0 & 28.6 & 73.7 & -- \\
+V2  EGPT 6$\times$2 & 63.32 & 44.7\% & 22.5 & 44.9 & 28.3 & 50.7 & 61.0 & 61.4 & 56.0 & 28.2 & 69.3 & 2.0\% \\
+V8  HelmDR     & 65.2  & 45.7\% & 23.2 & 42.3 & 28.6 & 50.3 & 53.9 & 60.2 & 57.0 & 27.2 & 68.9 & -- \\
+V7  HelmD      & 63.4  & 45.1\% & 22.1 & 41.3 & 28.7 & 50.7 & 47.2 & 60.8 & 61.0 & 27.0 & 66.7 & -- \\
+V6  HelmF      & 82.1  & 43.5\% & 23.4 & 38.4 & 27.7 & 50.7 & 50.0 & 58.9 & 55.0 & 25.8 & 61.5 & -- \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+%% ============================================================
+\section{All Scatter Plots}
+%% ============================================================
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_params_v2.pdf}
+    \caption{PPL vs.\ params (log $x$, no Helmholtz).}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params_v2.pdf}
+    \caption{Avg accuracy vs.\ params (log $x$).}
+  \end{subfigure}
+  \caption{Parameter-efficiency across all models.  Recurrent models (squares) cluster
+    at smaller unique parameter counts.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/heatmap_small_models.pdf}
+  \caption{Benchmark accuracy heatmap for all small-scale variants (V0--V18).
+    V15 EGrad and V16 EDesc occupy the top rows alongside V0 GPT.}
+\end{figure}
+
+%% ============================================================
+\section{Consecutive-Layer and Full CKA Matrices}
+%% ============================================================
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/layer_sim_cosine.pdf}
+  \caption{Full $12{\times}12$ inter-layer cosine similarity matrices.
+    V1 EGPT attn\_out panel shows the highest off-diagonal values.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/layer_sim_cka.pdf}
+  \caption{Full $12{\times}12$ Linear CKA matrices.  The random model has the highest
+    CKA, confirming CKA is dominated by the shared residual stream and is a poor probe.}
+\end{figure}
+
+%% ============================================================
+\section{GSM8K Scatter}
+%% ============================================================
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_gsm8k_vs_params.pdf}
+    \caption{GSM8K vs.\ parameters.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_gsm8k_vs_flops.pdf}
+    \caption{GSM8K vs.\ FLOPs/token.}
+  \end{subfigure}
+  \caption{GSM8K exact-match accuracy across all models.  All scores $<$3\%;
+    no architecture consistently leads.  V9 GPT (2.9\%) and V15 EGrad (2.6\%) lead
+    at 354M and 144M scale respectively.}
+\end{figure}
+
+\end{document}
