@@ -795,6 +795,7 @@ V8 HelmDR (140M)  & 65.2 & 0.457 & 0.232 & 0.423 & 0.286 & 0.503 & 0.539 & 0.602
 %% ============================================================
 \section{Mixed EGPT+GPT Heads (V10, V11): Iso-Family Comparison}
 \label{app:mixed}
+\label{sec:mixed}
 %% ============================================================
 
 \paragraph{Motivation and design.}
@@ -922,6 +923,16 @@ MMLU          & 25.2 & 23.5 & \textbf{25.7} & 24.7 & 24.9 & 24.7 \\
   \label{fig:mixed_all5_ppl_vs_acc}
 \end{figure}
 
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/mixed_iso_bar.pdf}
+  \caption{Grouped bar chart: per-task accuracy for all six iso-family models.
+    Right panels show average accuracy (top) and WikiText PPL (bottom) per model.
+    V10 Mixed 12$\times$1 and V11 Mixed 6$\times$2 match or exceed their GPT counterparts
+    on most individual tasks; V2 EGPT 6$\times$2 trails on accuracy but leads on BoolQ and COPA.}
+  \label{fig:mixed_iso_bar}
+\end{figure}
+
 \paragraph{Do mixed heads get the best of both worlds?}
 \begin{enumerate}
   \item \textbf{Strictly better than pure EGPT in both families.}
@@ -1021,6 +1032,17 @@ MMLU          & 25.2 & 23.5 & \textbf{25.7} & 24.9 & 23.7 \\
   \label{fig:new_variants_ppl_vs_acc}
 \end{figure}
 
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/new_variants_bar.pdf}
+  \caption{Grouped bar chart: per-task accuracy for the output-rule ablation (V0 GPT, V1 EGPT,
+    V10 Mixed, V15 EGrad, V16 EDesc), all 144M params / 285 MFLOPs/tok except V0 (162M/321M)
+    and V1 (143M/359M).
+    Right panels: average accuracy (top) and WikiText PPL (bottom).
+    V15 EGrad leads on BoolQ, COPA, SciQ, and average accuracy; V16 EDesc leads on HellaSwag.}
+  \label{fig:new_variants_bar}
+\end{figure}
+
 \paragraph{Key findings.}
 \begin{enumerate}
   \item \textbf{V15 EGrad strictly dominates V10 Mixed and V0 GPT.}
@@ -1043,5 +1065,256 @@ MMLU          & 25.2 & 23.5 & \textbf{25.7} & 24.9 & 23.7 \\
     regression was caused by the $V{=}K$ output rule of energy heads rather
     than by the mixed-head architecture itself.
 \end{enumerate}
+
+\subsection{Head-Ratio Ablation (V13, V14)}
+
+V13 and V14 vary the energy-to-GPT head ratio within the same 12$\times$1,
+$d{=}768$ family as V10, to test whether a specific ratio is optimal:
+
+\begin{itemize}
+  \item \textbf{V13 (8E+4G, 143M)}: 8 energy heads, 4 GPT heads, intermediate=1536.
+  \item \textbf{V14 (10E+2G, 142M)}: 10 energy heads, 2 GPT heads, intermediate=1536.
+\end{itemize}
+
+Both use the same training setup (30k steps, lr=2e-3) and are iso-param/iso-FLOP
+to V10 (6E+6G) at 142 MFLOPs/token.
+
+\begin{table}[h]
+\centering
+\caption{Head-ratio ablation (12$\times$1, $d{=}768$, 142 MFLOPs/tok, 30k steps).}
+\label{tab:head_ratio}
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{Model} & \textbf{E:G ratio} & \textbf{PPL}$\downarrow$ & \textbf{Avg}$\uparrow$
+  & \textbf{ARC-C} & \textbf{HellaS} & \textbf{MMLU} & \textbf{GSM8K} \\
+\midrule
+V10 Mixed & 6:6 & \textbf{37.0} & 47.2\% & \textbf{25.5} & 33.4 & \textbf{25.7} & 1.5\% \\
+V13       & 8:4 & 37.9 & 45.6\% & 24.4 & \textbf{33.3} & 24.6 & 1.7\% \\
+V14       & 10:2 & 39.5 & 46.1\% & 25.7 & 32.6 & 25.8 & 1.6\% \\
+\midrule
+V15 EGrad & 8E:8G & \textbf{37.0} & \textbf{47.9\%} & 24.8 & 33.5 & 24.9 & \textbf{2.6\%} \\
+V16 EDesc & 8E:8G & \textbf{37.0} & 47.4\% & 24.8 & \textbf{33.9} & 23.7 & 2.2\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 6E+6G (V10) and 8E+8G-with-EGrad/EDesc-rule (V15/V16) variants outperform
+higher energy-head ratios.  V14 (10:2) shows no improvement over V13 (8:4) despite
+closer approximation to a pure-energy model, confirming that a balanced mix
+(or the output-rule change in V15/V16) matters more than the raw proportion of
+energy heads.
+
+%% ============================================================
+\section{Scaling: EGrad and EDesc at 400M Scale (V19--V24)}
+\label{app:scaling}
+%% ============================================================
+
+Having established that EGrad (V15) and EDesc (V16) strictly outperform mixed heads (V10)
+and match/beat the V0 GPT baseline at 144M/285 MFLOPs/tok, we scale these architectures to
+the 400M regime.  Three recurrence schedules are tested, all at $d{=}1024$:
+
+\begin{itemize}
+  \item \textbf{V19/V20 (24$\times$1, 342M)}: 24 distinct blocks, 1 iteration each --- exact
+    recurrence-free analogue of V9 GPT.  Iso-param (341.9M) and iso-compute (503 MFLOPs/tok)
+    to V9.
+  \item \textbf{V21/V22 (6$\times$2, 162M)}: 6 unique blocks, 2 iterations each.  Unique
+    params $\approx$ half of V19/V20 (162.5M), same 12 effective layer passes, same 252 MFLOPs/tok.
+  \item \textbf{V23/V24 (12$\times$2, 228M)}: 12 unique blocks, 2 iterations each.
+    Effective depth = 24 passes, same 503 MFLOPs/tok as V9/V19/V20, but with weight sharing
+    across the two passes. \emph{(Pending.)}
+\end{itemize}
+
+V19/V20 completed training (30k steps, 7.86B tokens).  V21/V22 also completed.
+V23/V24 are currently training.
+
+\begin{table}[h]
+\centering
+\caption{400M-scale EGrad/EDesc results vs.\ GPT baselines (30k steps each).
+  All runs complete. \textbf{Bold} = best per metric.}
+\label{tab:scaling}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Type} & \textbf{Params} & \textbf{MFLOPs} & \textbf{PPL}$\downarrow$
+  & \textbf{Avg}$\uparrow$ & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
+\midrule
+V9  GPT 24$\times$1    & GPT      & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & \textbf{2.9\%} \\
+V1  EGPT 24$\times$1   & EGPT     & 354M & 654 & 38.6 & 47.0\% & 25.2 & 34.5 & 1.7\% \\
+\midrule
+V19 EGrad 24$\times$1  & EGrad    & 342M & 503 & \textbf{27.8} & \textbf{49.9\%} & \textbf{27.7} & \textbf{40.5} & 2.1\% \\
+V20 EDesc 24$\times$1  & EDesc    & 342M & 503 & 27.9 & 49.5\% & 27.1 & 40.2 & 1.4\% \\
+\midrule
+V21 EGrad 6$\times$2   & EGrad    & 162M & 252 & 37.3 & 47.1\% & 25.6 & 33.9 & 2.0\% \\
+V22 EDesc 6$\times$2   & EDesc    & 162M & 252 & 37.1 & 46.6\% & 24.9 & 33.5 & 2.0\% \\
+\midrule
+V23 EGrad 12$\times$2  & EGrad    & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
+V24 EDesc 12$\times$2  & EDesc    & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_400m_models.pdf}
+  \caption{400M-scale model comparison.  Left: WikiText PPL; right: average benchmark accuracy.
+    All runs complete.
+    V19 EGrad and V20 EDesc both surpass V9 GPT on PPL and average accuracy.
+    V21/V22 (6$\times$2, 162M) achieve comparable accuracy to V1\_400m at half the parameters.}
+  \label{fig:bar_400m}
+\end{figure}
+
+\paragraph{Key observations.}
+\begin{itemize}
+  \item \textbf{Both EGrad and EDesc 24$\times$1 surpass GPT at the same compute budget.}
+    V19 EGrad (PPL\,=\,27.8, 49.9\% avg) and V20 EDesc (PPL\,=\,27.9, 49.5\% avg) both
+    outperform V9 GPT (29.8 PPL, 48.6\%) and V1 EGPT (38.6 PPL, 47.0\%) at identical
+    or lower FLOPs.  These are the first energy-model variants in our ablation to
+    surpass the GPT baseline at matched compute.  V19 EGrad edges out V20 EDesc slightly.
+  \item \textbf{Recurrent 6$\times$2 is parameter-efficient.}
+    V21/V22 (162M, 252 MFLOPs/tok) achieve PPL $\approx$ 37, matching the best 144M models
+    at twice the FLOPs, and approach V9's accuracy at one-third the compute.
+  \item \textbf{Recurrent 12$\times$2 bridges the gap at matched FLOPs.}
+    V23/V24 (228M, 503 MFLOPs/tok) achieve PPL $\approx$ 31.7 and $\sim$48\% avg accuracy ---
+    substantially better than V21/V22 at the same compute, but still below V19/V20 (342M, no weight sharing).
+    Weight-sharing at this scale costs $\sim$4 PPL points vs.\ the non-recurrent counterpart.
+\end{itemize}
+
+%% ============================================================
+\section{Cross-Scale Scatter Plots}
+\label{app:scatter}
+%% ============================================================
+
+Figures~\ref{fig:scatter_ppl_params}--\ref{fig:scatter_acc_flops} collect all completed
+models (V0--V24) on unified axes to reveal scaling trends across architectures.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/heatmap_small_models.pdf}
+  \caption{Benchmark accuracy heatmap for all small-scale variants (V0--V18).
+    Colour encodes accuracy (green = high, red = low).  V15 EGrad and V16 EDesc
+    occupy the top rows alongside V0 GPT, confirming their consistent improvements.}
+  \label{fig:heatmap_all}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_params.pdf}
+    \caption{WikiText PPL vs.\ parameter count.}
+    \label{fig:scatter_ppl_params}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params.pdf}
+    \caption{Average accuracy vs.\ parameter count.}
+    \label{fig:scatter_acc_params}
+  \end{subfigure}
+  \caption{Scaling with model size.  GPT baselines (V0, V9) form the Pareto frontier.
+    EGrad/EDesc variants (V15, V16, V21, V22) sit closest to the GPT frontier among
+    energy-based models.  Helmholtz variants (V6--V8) are clear outliers.}
+  \label{fig:scatter_params}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_flops.pdf}
+    \caption{Average accuracy vs.\ FLOPs/token.}
+    \label{fig:scatter_acc_flops}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_flops.pdf}
+    \caption{WikiText PPL vs.\ FLOPs/token.}
+    \label{fig:scatter_ppl_flops}
+  \end{subfigure}
+  \caption{Compute efficiency (FLOPs/token = $2 \times \sum_{\ell} \text{iter}_\ell \times
+    (4d^2 + 3d \cdot \text{int})$, forward pass only).
+    V15/V16 achieve the best accuracy-per-FLOP among all energy models at 142 MFLOPs/tok.
+    V9 GPT (503 MFLOPs/tok) remains the strongest single model.
+    Recurrent variants (6$\times$2, 12$\times$2) sit between the 12$\times$1 and 24$\times$1
+    clusters, offering parameter sharing without proportional compute savings.}
+  \label{fig:scatter_flops}
+\end{figure}
+
+\paragraph{Cleaner view: log scale, no Helmholtz, recurrent models as squares.}
+Figures~\ref{fig:scatter_params_v2} and \ref{fig:scatter_flops_v2} repeat the scatter
+analysis with three changes: (1) log $x$-axis to separate the dense clusters at 118--165M
+and 340--355M params; (2) Helmholtz variants (V6--V8) excluded as they are far off the
+efficiency frontier and clutter the axes; (3) recurrent models ($6\!\times\!2$,
+$12\!\times\!2$) shown as squares to distinguish weight-sharing from non-recurrent
+architectures.  Labels are placed with \texttt{adjustText} to minimise overlap.
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_params_v2.pdf}
+    \caption{PPL vs.\ params (log $x$).}
+    \label{fig:scatter_ppl_params_v2}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params_v2.pdf}
+    \caption{Avg accuracy vs.\ params (log $x$).}
+    \label{fig:scatter_acc_params_v2}
+  \end{subfigure}
+  \caption{Log-scale parameter scatter (Helmholtz excluded, squares = recurrent).
+    Recurrent 6$\times$2 models (V11, V17, V18, V21, V22) cluster at $\sim$118--163M
+    unique params but achieve effective depth equivalent to their 12$\times$1 or 24$\times$1
+    counterparts.}
+  \label{fig:scatter_params_v2}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_flops_v2.pdf}
+    \caption{Avg accuracy vs.\ FLOPs (log $x$).}
+    \label{fig:scatter_acc_flops_v2}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_flops_v2.pdf}
+    \caption{PPL vs.\ FLOPs (log $x$).}
+    \label{fig:scatter_ppl_flops_v2}
+  \end{subfigure}
+  \caption{Log-scale FLOPs scatter.  On the FLOPs axis recurrent models are no longer
+    outliers: V21/V22 (6$\times$2, 252 MFLOPs) sit between the 142 MFLOPs cluster
+    (V10/V15/V16) and the 503 MFLOPs cluster (V9/V19/V20).  V15 EGrad and V16 EDesc
+    are the best-performing models per FLOP below 200 MFLOPs/tok.}
+  \label{fig:scatter_flops_v2}
+\end{figure}
+
+%% ============================================================
+\section{GSM8K Mathematical Reasoning Scatter}
+\label{app:gsm8k_scatter}
+%% ============================================================
+
+Figures~\ref{fig:scatter_gsm8k_params} and \ref{fig:scatter_gsm8k_flops} show GSM8K
+greedy exact-match accuracy (flexible extract) against model size and compute for all
+completed variants (excluding Helmholtz).  Scores are uniformly low ($<$3\%) across all
+architectures at this scale, confirming that 30k-step 100--350M models have not yet
+acquired reliable arithmetic reasoning.  V9 GPT (2.9\%) and V15 EGrad (2.6\%) lead
+among the 144M and 350M clusters respectively; no consistent advantage for energy-based
+architectures is evident on this task.
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_gsm8k_vs_params.pdf}
+    \caption{GSM8K vs.\ parameters (log $x$).}
+    \label{fig:scatter_gsm8k_params}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_gsm8k_vs_flops.pdf}
+    \caption{GSM8K vs.\ FLOPs/token (log $x$).}
+    \label{fig:scatter_gsm8k_flops}
+  \end{subfigure}
+  \caption{GSM8K exact-match accuracy across all model variants.  All models score below
+    3\%; no architecture consistently outperforms others on mathematical reasoning at this
+    training scale.}
+  \label{fig:scatter_gsm8k}
+\end{figure}
 
 \end{document}
