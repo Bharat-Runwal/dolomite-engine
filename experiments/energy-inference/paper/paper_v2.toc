@@ -25,17 +25,17 @@
 \contentsline {paragraph}{A ceiling exists.}{11}{section*.23}%
 \contentsline {section}{\numberline {6}The Output Rule Is the Key}{11}{section.6}%
 \contentsline {subsection}{\numberline {6.1}What the Energy Head Is Actually Computing}{11}{subsection.6.1}%
-\contentsline {subsection}{\numberline {6.2}Mixed-Head Output-Rule Variants V15/V16 (EGrad/EDesc pending V27/V28)}{12}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.2}True EGrad/EDesc vs.\ MixedHead: V27/V28/V29/V30/V33/V34}{12}{subsection.6.2}%
 \contentsline {paragraph}{Key results.}{12}{section*.26}%
-\contentsline {section}{\numberline {7}Scaling to 400M: Headline Results}{12}{section.7}%
-\contentsline {paragraph}{Key observations.}{13}{section*.30}%
-\contentsline {paragraph}{Ongoing runs: V25 and V26.}{13}{section*.31}%
+\contentsline {section}{\numberline {7}Scaling to 400M: Headline Results}{13}{section.7}%
+\contentsline {paragraph}{Key observations.}{13}{section*.33}%
+\contentsline {paragraph}{Ongoing runs: V25 and V26.}{14}{section*.34}%
 \contentsline {section}{\numberline {8}Discussion and Conclusions}{14}{section.8}%
 \contentsline {subsection}{\numberline {8.1}The Story in Brief}{14}{subsection.8.1}%
 \contentsline {subsection}{\numberline {8.2}What Makes EGrad Work?}{14}{subsection.8.2}%
-\contentsline {subsection}{\numberline {8.3}Open Questions}{14}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.3}Open Questions}{15}{subsection.8.3}%
 \contentsline {subsection}{\numberline {8.4}Summary of Findings}{15}{subsection.8.4}%
-\contentsline {section}{\numberline {A}Full Benchmark Tables}{15}{appendix.A}%
-\contentsline {section}{\numberline {B}All Scatter Plots}{15}{appendix.B}%
-\contentsline {section}{\numberline {C}Consecutive-Layer and Full CKA Matrices}{15}{appendix.C}%
-\contentsline {section}{\numberline {D}GSM8K Scatter}{15}{appendix.D}%
+\contentsline {section}{\numberline {A}Full Benchmark Tables}{16}{appendix.A}%
+\contentsline {section}{\numberline {B}All Scatter Plots}{16}{appendix.B}%
+\contentsline {section}{\numberline {C}Consecutive-Layer and Full CKA Matrices}{16}{appendix.C}%
+\contentsline {section}{\numberline {D}GSM8K Scatter}{16}{appendix.D}%
