@@ -18,6 +18,8 @@ _CACHE_CLASSES = {
     "causal_convolution": _RNNCache,
     "energy_attention": _SoftmaxAttentionCache,
     "mixed_head_attention": _SoftmaxAttentionCache,
+    "energy_grad_mixed_head_attention": _SoftmaxAttentionCache,
+    "mixed_head_energy_descent": _SoftmaxAttentionCache,
     "gru": _RNNCache,
     "mamba2": _Mamba2Cache,
     "multihead_latent_attention": _SoftmaxAttentionCache,
