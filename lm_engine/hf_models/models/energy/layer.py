@@ -389,7 +389,7 @@ class EnergyBlock(nn.Module):
         hidden_size = config.hidden_size
 
         self.sequence_mixer_type = config.sequence_mixer_blocks[layer_idx].sequence_mixer_type
-        if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent", "energy_grad_mixed_head_attention"):
+        if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent"):
             # Use energy-specific norm if configured, otherwise fall back to global
             norm_type = getattr(config, 'energy_norm_type', None) or config.normalization_function
             self.ln = get_normalization_function(

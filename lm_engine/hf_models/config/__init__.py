@@ -276,7 +276,10 @@ class CommonConfig(PretrainedConfig):
                     "intermediate_size", 2 * self.hidden_size
                 )
 
-            sequence_mixer_blocks.append(_SEQUENCE_MIXER_CONFIG_CLASSES[sequence_mixer_type](**sequence_mixer_block))
+            block_config = _SEQUENCE_MIXER_CONFIG_CLASSES[sequence_mixer_type](**sequence_mixer_block)
+            if block_config.sequence_mixer_type != sequence_mixer_type:
+                setattr(block_config, "sequence_mixer_type", sequence_mixer_type)
+            sequence_mixer_blocks.append(block_config)
 
         self.sequence_mixer_blocks = sequence_mixer_blocks
 

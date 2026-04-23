@@ -1,0 +1,119 @@
+# V15: Energy-gradient mixed heads (12×1) — energy heads use W_Q^T @ softmax @ K (true energy gradient)
+# GPT additive residual; energy heads output true energy gradient (not V=K nearest-neighbor)
+# ~141M: W_O replaced by smaller W_O_gpt (ng*dh=384 vs 768 rows)
+# muP LR: same as V0/V1 (d=768 baseline, lr=2e-3)
+# 30k steps × 4 GPUs × batch=4 × grad_accum=4 × seq=4096 = 7.86B tokens
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    initializer_range: 0.02
+    layer_norm_epsilon: 0.00001
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+      - {sequence_mixer_type: energy_grad_mixed_head_attention, num_attention_heads: 12, num_key_value_heads: 12, num_energy_heads: 6, add_bias: false, attention_multiplier: 0.125}
+    mlp_blocks:
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 1536, add_bias: false}
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/v27_egrad_attn_12x1_d768_lr2e3
+  save_interval: 5000
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: v27_egrad_attn_12x1_d768_lr2e3
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+      - 0.9
+      - 0.95
+    eps: 1e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

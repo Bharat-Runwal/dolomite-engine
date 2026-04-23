@@ -1,0 +1,41 @@
+\contentsline {section}{\numberline {1}Introduction and Motivation}{3}{section.1}%
+\contentsline {paragraph}{Roadmap.}{3}{section*.2}%
+\contentsline {section}{\numberline {2}Architecture Variants}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Standard Transformer (GPT)}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Original Energy GPT (EGPT)}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Mixed-Head EGPT (V10, V11)}{4}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Energy Gradient Output (EGrad, V27, V31) — V15/V19 mislabeled, see correction below}{4}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Energy Descent Output (EDesc, V28, V32) — V16/V20 mislabeled, see correction above}{5}{subsection.2.5}%
+\contentsline {subsection}{\numberline {2.6}Comparison Table}{5}{subsection.2.6}%
+\contentsline {section}{\numberline {3}Diagnosing the EGPT Compute Gap}{5}{section.3}%
+\contentsline {paragraph}{Three faces of the gap.}{5}{section*.6}%
+\contentsline {paragraph}{Structural ablations (V5--V8).}{6}{table.caption.8}%
+\contentsline {section}{\numberline {4}Mechanistic Probes: What Does EGPT Learn?}{7}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Helmholtz Decomposition of Projection Matrices}{7}{subsection.4.1}%
+\contentsline {paragraph}{Finding.}{7}{section*.10}%
+\contentsline {subsection}{\numberline {4.2}Layer Similarity: Is There a Shared Energy Function?}{8}{subsection.4.2}%
+\contentsline {paragraph}{Key findings.}{8}{section*.13}%
+\contentsline {subsection}{\numberline {4.3}Layer Merging: Why High Similarity Does Not Imply Mergeability}{9}{subsection.4.3}%
+\contentsline {paragraph}{Result.}{9}{section*.15}%
+\contentsline {paragraph}{Interpretation.}{9}{section*.16}%
+\contentsline {subsection}{\numberline {4.4}EGrad and EDesc: Layer Similarity at Both Scales}{10}{subsection.4.4}%
+\contentsline {paragraph}{Three findings.}{10}{section*.20}%
+\contentsline {section}{\numberline {5}Mixed Heads Close the Accuracy Gap}{10}{section.5}%
+\contentsline {paragraph}{Findings.}{11}{section*.22}%
+\contentsline {paragraph}{A ceiling exists.}{11}{section*.23}%
+\contentsline {section}{\numberline {6}The Output Rule Is the Key}{11}{section.6}%
+\contentsline {subsection}{\numberline {6.1}What the Energy Head Is Actually Computing}{11}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Mixed-Head Output-Rule Variants V15/V16 (EGrad/EDesc pending V27/V28)}{12}{subsection.6.2}%
+\contentsline {paragraph}{Key results.}{12}{section*.26}%
+\contentsline {section}{\numberline {7}Scaling to 400M: Headline Results}{12}{section.7}%
+\contentsline {paragraph}{Key observations.}{13}{section*.30}%
+\contentsline {paragraph}{Ongoing runs: V25 and V26.}{13}{section*.31}%
+\contentsline {section}{\numberline {8}Discussion and Conclusions}{14}{section.8}%
+\contentsline {subsection}{\numberline {8.1}The Story in Brief}{14}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}What Makes EGrad Work?}{14}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}Open Questions}{14}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}Summary of Findings}{15}{subsection.8.4}%
+\contentsline {section}{\numberline {A}Full Benchmark Tables}{15}{appendix.A}%
+\contentsline {section}{\numberline {B}All Scatter Plots}{15}{appendix.B}%
+\contentsline {section}{\numberline {C}Consecutive-Layer and Full CKA Matrices}{15}{appendix.C}%
+\contentsline {section}{\numberline {D}GSM8K Scatter}{15}{appendix.D}%
