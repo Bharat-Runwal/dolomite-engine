@@ -24,6 +24,7 @@ bsub \
     -e "${HOME}/${JOB_NAME}_merge_%J.stderr" \
     <<BSUB_SCRIPT
 #!/bin/bash
+set -euo pipefail
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 

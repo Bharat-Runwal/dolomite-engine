@@ -21,6 +21,9 @@ import torch
 REPO = "/proj/dmfexp/nima/Code/dolomite-engine"
 sys.path.insert(0, REPO)
 
+# Must import before any AutoModelForCausalLM usage to register custom model types
+import lm_engine.hf_models  # noqa: F401 — triggers register_model_classes()
+
 
 def _load_sharded_model(ckpt_dir: str):
     """Load FSDP-sharded dolomite-engine checkpoint into a single-device model."""
