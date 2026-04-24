@@ -96,7 +96,9 @@ def procrustes_merge(sd_a: dict, sd_b: dict) -> dict:
 def merge_model(model, strategy: str = "naive", out_n_layers: int = 6):
     """Return a new model whose layers are pairwise merges of the original."""
     import copy
-    n = len(model.model.transformer.h)
+    # EnergyForCausalLM: model.transformer.h  (base_model_prefix = "transformer")
+    orig_transformer = model.transformer
+    n = len(orig_transformer.h)
     assert n == 2 * out_n_layers, f"Expected {2 * out_n_layers} layers, got {n}"
 
     merge_fn = naive_merge if strategy == "naive" else procrustes_merge
@@ -113,15 +115,14 @@ def merge_model(model, strategy: str = "naive", out_n_layers: int = 6):
     new_model = AutoModelForCausalLM.from_config(new_config)
     new_model = new_model.to(dtype=torch.bfloat16)
 
-    # Copy embedding and lm_head from original
-    new_model.model.transformer.wte.weight.data.copy_(
-        model.model.transformer.wte.weight.data)
-    if hasattr(new_model.model.transformer, 'ln_f'):
-        new_model.model.transformer.ln_f.weight.data.copy_(
-            model.model.transformer.ln_f.weight.data)
+    new_transformer = new_model.transformer
+    # Copy embedding and optional final layernorm
+    new_transformer.wte.weight.data.copy_(orig_transformer.wte.weight.data)
+    if hasattr(new_transformer, 'ln_f') and hasattr(orig_transformer, 'ln_f'):
+        new_transformer.ln_f.weight.data.copy_(orig_transformer.ln_f.weight.data)
 
-    orig_blocks = model.model.transformer.h
-    new_blocks  = new_model.model.transformer.h
+    orig_blocks = orig_transformer.h
+    new_blocks  = new_transformer.h
 
     for i in range(out_n_layers):
         a_idx = 2 * i
