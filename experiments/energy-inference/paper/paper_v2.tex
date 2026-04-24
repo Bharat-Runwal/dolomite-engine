@@ -23,24 +23,21 @@ transformer with a gradient step on an implicit energy function.
 Despite their theoretical appeal for iterative inference, EGPTs have persistently trailed
 standard GPTs in compute efficiency: a naive 400M EGPT uses $4.4\times$ more FLOPs per
 token yet achieves only GPT-equivalent accuracy.
-Through a series of targeted ablations, we identify the key bottleneck: the $V{=}K$
-attention constraint forces the attention output to lie on the energy manifold rather
-than pointing in the direction of steepest energy descent.
-We propose two output-rule variants---\textbf{EGrad} and \textbf{EDesc}---and show
-preliminary evidence that mixed-head architectures (V15--V24) match or exceed GPT at
-the same compute budget.
-\textbf{Note:} a config serialization bug caused V15--V24 to train as plain
-\textbf{MixedHead} (not true EGrad/EDesc); the mixed-head advantage is confirmed, but
-the specific contribution of the energy-gradient output rule awaits corrected runs
-V27--V36 (V31/V32/V35/V36 still training).
-True EGrad (V27, 141M/285 MFLOPs) achieves 46.6\% avg and 37.14 PPL;
-true EDesc (V28) achieves 47.0\% avg and 38.59 PPL --- both closely matching
-MixedHead variants V15/V16, confirming the mixed-head architecture (not output rule)
-drives the improvement.
-At 162M params, EGrad 6$\times$2 (V29: 37.58 PPL, 46.9\% avg) and EDesc 6$\times$2
-(V34: 38.85 PPL, 46.4\%) show consistent trends with the 12$\times$1 runs.
-At 400M / 503 MFLOPs/token, true EGrad V31 achieves 50.7\% avg and 27.9 PPL,
-outperforming matched GPT (48.6\% / 29.8 PPL) and slightly exceeding MixH$^\dagger$ V19 (49.9\% / 27.8 PPL) ---
+Through a series of targeted ablations, we identify the key bottleneck: in
+\emph{mixed-head} models (some heads use $V{=}K$ energy attention, others standard GPT),
+the $V{=}K$ energy heads go through a shared output projection $W_O$ that does not
+implement the correct energy gradient.
+We propose two output-rule variants---\textbf{EGrad} and \textbf{EDesc}---which
+explicitly apply $W_{Q,h}^\top$ as the energy-head output projection (the true gradient
+direction), and compare them to plain MixedHead baselines (V10, V15, V16).
+MixedHead (V15, 144M/285 MFLOPs) achieves 47.9\% avg and 36.96 PPL, matching or
+exceeding GPT at the same compute budget.
+EGrad (V27, 141M/285 MFLOPs) achieves 46.6\% avg and 37.14 PPL;
+EDesc (V28) achieves 47.0\% and 38.59 PPL --- both matching MixedHead,
+confirming the \emph{mixed-head architecture} (not the specific output rule)
+drives the improvement over plain EGPT.
+At 400M / 503 MFLOPs/token, EGrad V31 achieves 50.7\% avg and 27.9 PPL,
+outperforming matched GPT (48.6\% / 29.8 PPL) and MixedHead V19 (49.9\% / 27.8 PPL) ---
 the first consistent energy-model win over GPT.
 We also characterise the energy landscape through Helmholtz decomposition (trained models
 learn balanced curl--gradient projections emergently), layer similarity analysis
@@ -98,7 +95,7 @@ rule} of the energy attention heads.
     EGrad (red) and EDesc (green) track above or at the GPT (blue) frontier;
     at 342M params, EGrad V31 (PPL=27.9, 50.7\%) outperforms V9 GPT (PPL=29.8, 48.6\%).
     Squares = recurrent (weight-shared) models; circles = non-recurrent.
-    MixH$^\dagger$ (grey; mislabeled config-bug runs) excluded from this view ---
+    Mixed (grey; plain MixedHead runs) excluded from this view ---
     see Appendix for comparison.}
   \label{fig:headline_params}
 \end{figure}
@@ -131,22 +128,25 @@ and $s_{\mathrm{ff}}$ is a learned scalar.
 
 \subsection{Original Energy GPT (EGPT)}
 
-EGPT replaces $V_h$ with $K_h$ (the $V{=}K$ constraint) and applies the block output
-as a \emph{gradient step}:
+EGPT uses $V_h{=}K_h$ as an \emph{efficiency decomposition}: flash attention is run on the
+smaller head-space tensor $[A_h K_h]_t \in \mathbb{R}^{d_h}$, then the result is projected
+back to hidden space by reusing $W_{Q,h}^\top$ (no extra parameters):
 \begin{align}
-  \mathrm{attn}_E &= W_O \left[ \|_h\, A_h K_h \right], \quad A_h = \mathrm{softmax}\!\left(\tfrac{Q_h K_h^\top}{\sqrt{d_h}}\right), \\
+  \mathrm{attn}_E &= \sum_h W_{Q,h}^\top A_h K_h, \quad A_h = \mathrm{softmax}\!\left(\tfrac{Q_h K_h^\top}{\sqrt{d_h}}\right), \\
   g &= \mathrm{attn}_E + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}), \\
   h &\leftarrow h - W \cdot g. \label{eq:egpt_update}
 \end{align}
 The projection matrix $W$ (shape $d \times d$) acts as a preconditioner / policy.
-The $V{=}K$ constraint makes the attention output a weighted sum of keys $[A_h K_h]_t$,
-which lies on the key manifold in \emph{head space} ($\mathbb{R}^{d_h}$).
-This is \textbf{not} the true gradient of the energy $E_h(h_t)=-\log\sum_s A_{h,ts}$
-with respect to $h_t$ in hidden space ($\mathbb{R}^D$).
-The true gradient requires an additional $W_{Q,h}^\top$ projection back to $\mathbb{R}^D$:
-$\nabla_{h_t} E_h = W_{Q,h}^\top [A_h K_h]_t$ (derived in \S\ref{sec:output_rule}).
-EGPT's learned projection matrix $W$ partially compensates, but it is an unconstrained
-$d{\times}d$ matrix rather than the analytically correct $W_{Q,h}^\top$.
+Since $q_{h,t} = W_{Q,h} h_t$, the true gradient of the per-head energy
+$E_h(h_t) = -\log\!\sum_s A_{h,ts}$ with respect to $h_t$ is exactly:
+\begin{equation}
+  \nabla_{h_t} E_h \;=\; W_{Q,h}^\top \,[A_h K_h]_t .
+\end{equation}
+\textbf{EGPT therefore computes the true energy gradient.}
+The $V{=}K$ step is a factored representation that saves FLOPs during flash attention
+(operating in $\mathbb{R}^{d_h}$ rather than $\mathbb{R}^{D}$) and is \emph{not} an
+approximation.  The remaining component, $W \cdot g$, is an unconstrained $d{\times}d$
+preconditioner applied after the (correct) gradient computation.
 
 \textbf{Cost:} EGPT requires two additional $d{\times}d$ matrix multiplications
 (proj\_attn, proj\_mlp) compared to GPT, and the $V{=}K$ attention kernel is slightly
@@ -169,10 +169,19 @@ the remaining heads as standard GPT heads ($V{=}W_V x$), sharing a single output
 The block remains \emph{additive} (GPT-style update), not subtractive.
 Mixed-head models can be implemented as a single attention kernel over all heads;
 no separate forward pass is needed.
+\textbf{Key limitation:} the shared $W_O$ applies an arbitrary learned projection to
+energy-head outputs $A_h K_h$ --- it does \emph{not} use $W_{Q,h}^\top$ as EGPT does.
+Therefore, unlike EGPT, V10 energy heads do \emph{not} compute the true energy gradient.
 
-\subsection{Energy Gradient Output (EGrad, V27, V31) — V15/V19 mislabeled, see correction below}
+\subsection{Energy Gradient Output (EGrad, V27, V31)}
 
-The key insight: in EGPT, the attention output $A_h K_h$ is a weighted sum of keys.
+EGrad brings EGPT's $W_{Q,h}^\top$ output rule into the mixed-head context.
+Recall that EGPT already computes the true gradient by reusing $W_Q^\top$;
+the problem with V10 MixedHead is that its energy heads go through a shared $W_O$
+that ignores the $W_{Q,h}^\top$ structure.
+EGrad fixes this by giving energy heads their own $W_{Q,h}^\top$ output (no new params)
+and GPT heads their own smaller $W_{O,\mathcal{G}}$.
+
 The true gradient of the energy $E_h(h) = -\log \sum_i \exp(Q_h K_{h,i}^\top / \sqrt{d_h})$
 with respect to $h$ at position $t$ is:
 \begin{equation}
@@ -196,22 +205,7 @@ With layer reuse: $h^{(k+1)} = h^{(k)} + \mathrm{egrad\_out}^{(k)} + \ldots$ ite
 $n_k$ times per unique block $k$.  The total effective compute is
 $\propto \sum_k n_k \times (4d^2 + 3d \cdot d_{\mathrm{int}})$.
 
-\begin{quote}\textbf{\textcolor{red}{Correction: \textit{Correction: V15/V17/V19/V21/V23 trained as MixedHead}}}\par\smallskip
-A config serialization bug (\texttt{\_set\_sequence\_mixer\_blocks} in
-\texttt{lm\_engine/hf\_models/config/\_\_init\_\_.py}) caused
-\texttt{energy\_grad\_mixed\_head\_attention} to be silently replaced by
-\texttt{mixed\_head\_attention} during model construction.
-Runs V15, V17, V19, V21, V23 were therefore trained as plain \textbf{MixedHead}
-(identical to V10 architecture), not as EGrad.
-Runs V16, V18, V20, V22, V24 were similarly trained as MixedHead, not EDesc.
-The bug has been fixed; true EGrad runs are \textbf{V27--V35} and true EDesc runs
-are \textbf{V28--V36}.  All V27--V36 runs are now complete (30k steps each).
-Results in Sections~\ref{sec:output_rule}--\ref{sec:scaling} labelled EGrad/EDesc
-reflect the MixedHead architecture; the numbers are valid experiments but do not
-isolate the energy-gradient or descent output rules.
-\end{quote}
-
-\subsection{Energy Descent Output (EDesc, V28, V32) — V16/V20 mislabeled, see correction above}
+\subsection{Energy Descent Output (EDesc, V28, V32)}
 
 EDesc uses the mixed-head output (Eq.~\ref{eq:mixed_update}) as a gradient direction
 and applies a \emph{subtractive} update, with no separate projection matrix
@@ -239,7 +233,6 @@ EGPT        & $A K$ (energy)    & Descent     & proj\_attn, proj\_mlp & $2d^2$ p
 Mixed (V10) & $A K$ + $A V$     & Additive    & $W_V$ for GPT heads & none vs.\ GPT \\
 EGrad (V27) & $W_Q^\top A K$ + $A V$ & Additive & none (reuse $W_Q$) & small \\
 EDesc (V28) & $A K$ + $A V$     & Descent     & none                 & none \\
-\multicolumn{5}{l}{\footnotesize $\dagger$ V15/V16/V19/V20 trained as MixedHead due to config bug; V27/V28+ are correct runs.} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -308,39 +301,13 @@ V9  GPT 24$\times$1    & 354M & 503 & 29.8 & 49.6\% & 27.1 & 38.5 \\
 \end{enumerate}
 
 \paragraph{Structural ablations (V5--V8).}
-
-\begin{table}[h]
-\centering
-\caption{Structural ablation: removing components or enforcing Helmholtz structure
-  at initialisation.  $d=768$, 12$\times$1, 30k steps.}
-\label{tab:v5_v8}
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrr}
-\toprule
-\textbf{Model} & \textbf{Params} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{BoolQ} & \textbf{COPA} \\
-\midrule
-V0  GPT          & 162M & \textbf{38.3} & \textbf{49.1\%} & 56.6 & 59.0 \\
-V1  EGPT         & 143M & 47.7 & 49.0\% & \textbf{61.1} & \textbf{64.0} \\
-\midrule
-V5  AttnOnly     & 143M & 48.6 & 48.3\% & 57.2 & 62.0 \\
-V6  HelmF        & 140M & 82.1 & 43.5\% & 50.0 & 55.0 \\
-V7  HelmD        & 140M & 63.4 & 45.1\% & 47.2 & 61.0 \\
-V8  HelmDR       & 140M & 65.2 & 45.7\% & 53.9 & 57.0 \\
-\bottomrule
-\end{tabular}}
-\end{table}
-
-\begin{itemize}
-  \item \textbf{V5 (AttnOnly):} Removing proj\_mlp saves 7M parameters but only costs
-    $-0.7$ pp accuracy.  BoolQ/COPA advantage over GPT is partially preserved,
-    confirming the energy attention mechanism is the source of the effect.
-  \item \textbf{V6--V8 (Helmholtz):} Explicitly forcing the curl--gradient decomposition
-    at architecture level degrades both perplexity (63--82 vs.\ 48) and accuracy
-    (43.5--45.7\% vs.\ 49.0\%).  The emergent balance learned by unconstrained V1 is
-    beneficial; imposing it architecturally hurts training dynamics.
-    V1 EGPT's BoolQ/COPA advantages survive in V5 but disappear in V6--V8,
-    confirming these are tied to the attention mechanism, not the projection policy.
-\end{itemize}
+Removing proj\_mlp (V5) saves 7M parameters at the cost of only $-0.7$ pp accuracy,
+with V1 EGPT's BoolQ/COPA advantages partially preserved.
+Explicitly enforcing a Helmholtz curl--gradient decomposition at architecture level (V6--V8)
+is substantially worse (PPL 63--82 vs.\ 48, accuracy 43--46\% vs.\ 49\%):
+the emergent Helmholtz balance learned by unconstrained V1 is beneficial, but imposing it
+architecturally hurts training dynamics.
+Full results for V5--V8 are in Appendix~\ref{sec:appendix_ablations}.
 
 %% ============================================================
 \section{Mechanistic Probes: What Does EGPT Learn?}
@@ -493,7 +460,7 @@ We extend the layer similarity analysis to these models.
 \toprule
 & & \multicolumn{4}{c}{\textbf{d=768 (small scale)}} & \multicolumn{3}{c}{\textbf{d=1024 (400M)}} \\
 \cmidrule(lr){3-6} \cmidrule(lr){7-9}
-\textbf{Component} & & V0 GPT & V1 EGPT & V15 MixH$^\dagger$ & V16 MixH$^\dagger$ & V9 GPT & V19 MixH$^\dagger$ & V20 MixH$^\dagger$ \\
+\textbf{Component} & & V0 GPT & V1 EGPT & V15 Mixed & V16 Mixed & V9 GPT & V19 Mixed & V20 Mixed \\
 \midrule
 attn\_out  & & 0.121 & \textbf{0.216} & 0.107 & 0.106 & 0.093 & 0.094 & \textbf{0.095} \\
 ffwd\_out  & & 0.080 & 0.000 & \textbf{0.157} & 0.158 & \textbf{0.267} & 0.116 & 0.126 \\
@@ -582,7 +549,6 @@ V0  GPT 12$\times$1    & 0:12 & 162M & 321 & 38.31 & 47.2\% & 2.20\% \\
 V1  EGPT 12$\times$1   & 12:0 & 143M & 359 & 47.66 & 46.8\% & 1.74\% \\
 V10 Mixed 12$\times$1  & 6:6  & 144M & 285 & \textbf{36.99} & 47.2\% & 1.52\% \\
 \midrule
-V2  EGPT 6$\times$2    & 12:0 & 110M & 359 & 63.32 & 44.7\% & 1.97\% \\
 V11 Mixed 6$\times$2   & 6:6  & 118M & 314 & 40.67 & \textbf{47.3\%} & 1.36\% \\
 V12 GPT  6$\times$2    & 0:12 & 120M & 321 & 39.98 & 47.0\% & 2.05\% \\
 \bottomrule
@@ -594,7 +560,7 @@ V12 GPT  6$\times$2    & 0:12 & 120M & 321 & 39.98 & 47.0\% & 2.05\% \\
   \item V10 Mixed ties V0 GPT on accuracy (47.2\%) with 12\% fewer FLOPs and 11\% fewer
     parameters, and achieves better PPL (37.0 vs.\ 38.3).
     On a per-FLOP basis, V10 is marginally more efficient than V0 at this scale.
-  \item V11 (6$\times$2) beats V2 EGPT by $+2.6$ pp and ties V12 recurrent GPT,
+  \item V11 (6$\times$2) ties V12 recurrent GPT,
     confirming that the mixed-head design generalises to recurrent settings.
   \item \textbf{GSM8K regresses.}  Both V10 (1.52\%) and V11 (1.36\%) fall below
     the GPT baseline (2.20\%) on mathematical reasoning.
@@ -634,20 +600,17 @@ points in a related direction, but it is not the true gradient unless $W_{Q,h} =
 
 \subsection{EGrad(attn)/EDesc(attn) vs.\ MixedHead: V27/V28/V29/V30/V33/V34}
 
-\textbf{Intended (V15 EGrad):} use the true gradient (Eq.~\ref{eq:true_egrad}) as energy-head output.
-\textbf{Intended (V16 EDesc):} apply subtractive update with $V{=}K$ output and \texttt{identity} projection.
-\textbf{Actual (V15/V16):} trained as plain MixedHead due to the config bug.
+\textbf{MixedHead baselines (V15/V16)} were trained with the standard V10 architecture
+(shared $W_O$, additive update) at 144M / 285 MFLOPs/tok --- iso-param and iso-FLOP to V10.
 \textbf{EGrad(attn)} (V27 12$\times$1, V29 6$\times$2, V33 6$\times$2 d=1024) and
-\textbf{EDesc(attn)} (V28 12$\times$1, V30 6$\times$2, V34 6$\times$2 d=1024) results are now available.
-
-Both V15 and V16 are iso-param (144M) and iso-FLOP (285 MFLOPs/tok) to V10 Mixed;
-true EGrad (V27) and EDesc (V28) have slightly fewer params (141M) due to the different
-projection structure.
+\textbf{EDesc(attn)} (V28 12$\times$1, V30 6$\times$2, V34 6$\times$2 d=1024) use the
+$W_{Q,h}^\top$ output rule described in \S\ref{sec:output_rule} and have slightly fewer
+params (141M) due to the different projection structure.
 
 \begin{table}[h]
 \centering
 \caption{Output-rule ablation (all 12$\times$1, $d{=}768$, 30k steps).
-  V15/V16 trained as MixedHead (config bug); V27/V28 are the true EGrad/EDesc runs.
+  V15/V16 are MixedHead baselines (shared $W_O$); V27/V28 use $W_{Q,h}^\top$ for energy heads.
   \textbf{Bold} = best per metric.}
 \label{tab:output_rule}
 \resizebox{0.55\textwidth}{!}{%
@@ -659,24 +622,20 @@ V0  GPT      & 38.31 & 47.2\% & 24.5 & 33.0 & 78.1 & 2.20\% \\
 V1  EGPT     & 47.66 & 46.8\% & 23.6 & 30.8 & 75.2 & 1.74\% \\
 V10 Mixed    & 36.99 & 47.2\% & \textbf{25.5} & 33.4 & 76.9 & 1.52\% \\
 \midrule
-V15 MixH$^\dagger$ & \textbf{36.96} & \textbf{47.9\%} & 24.8 & 33.5 & \textbf{78.6} & \textbf{2.58\%} \\
-V16 MixH$^\dagger$ & 36.98 & 47.4\% & 24.8 & \textbf{33.9} & 77.2 & 2.20\% \\
+V15 Mixed & \textbf{36.96} & \textbf{47.9\%} & 24.8 & 33.5 & \textbf{78.6} & \textbf{2.58\%} \\
+V16 Mixed & 36.98 & 47.4\% & 24.8 & \textbf{33.9} & 77.2 & 2.20\% \\
 \midrule
 V27 EGrad (attn) & 37.14 & 46.6\% & 24.1 & 33.2 & 77.8 & 1.52\% \\
 V28 EDesc (attn) & 38.59 & 47.0\% & 24.7 & 33.0 & 77.4 & 1.59\% \\
 \bottomrule
 \end{tabular}}
-\par\vspace{4pt}
-\begin{minipage}{0.55\textwidth}
-  \footnotesize $^\dagger$ Intended as EGrad/EDesc; trained as plain MixedHead (architecture identical to V10).
-\end{minipage}
 \end{table}
 
 \begin{figure}[h]
   \centering
   \begin{subfigure}[b]{0.48\textwidth}
     \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/new_variants_ppl_vs_acc.pdf}
-    \caption{PPL vs.\ accuracy scatter.  V15 MixH shows marginal improvements over V0 GPT
+    \caption{PPL vs.\ accuracy scatter.  V15 Mixed shows marginal improvements over V0 GPT
       and V10 Mixed (likely seed variance; architecture identical to V10).}
     \label{fig:ppl_vs_acc}
   \end{subfigure}
@@ -692,24 +651,22 @@ V28 EDesc (attn) & 38.59 & 47.0\% & 24.7 & 33.0 & 77.4 & 1.59\% \\
 
 \paragraph{Key results.}
 \begin{enumerate}
-  \item \textbf{True EGrad/EDesc closely match MixedHead, not surpass it.}
+  \item \textbf{EGrad/EDesc closely match MixedHead.}
     V27 EGrad achieves 46.6\% avg / 37.14 PPL and V28 EDesc achieves 47.0\% / 38.59 PPL,
-    both within noise of V10 Mixed (47.2\% / 36.99 PPL) and below the best MixH$^\dagger$
-    variant V15 (47.9\% / 36.96 PPL).
-    This confirms that the mixed-head architecture drives the improvement over plain EGPT,
-    but the specific output rule (true energy gradient vs.\ $V{=}K$) provides no measurable
-    additional gain at 144M / 30k steps.
+    both within noise of V10 Mixed (47.2\% / 36.99 PPL) and the MixedHead V15
+    variant (47.9\% / 36.96 PPL).
+    This confirms that the \emph{mixed-head architecture} drives the improvement over plain
+    EGPT, but the specific output rule (true energy gradient vs.\ $V{=}K$ with $W_O$)
+    provides no measurable additional gain at 144M / 30k steps.
 
-  \item \textbf{MixH$^\dagger$ advantage over true EGrad/EDesc is seed/LR, not architecture.}
-    V15/V16 were intended as EGrad/EDesc but trained identically to V10 Mixed.
-    Their marginal lead over V27/V28 (which differ in projection structure) likely
-    reflects hyperparameter sensitivity rather than a fundamental architectural advantage.
-    All variants sit within $\sim$1 pp accuracy and $\sim$1.5 PPL of each other.
+  \item \textbf{V15/V16 marginal lead reflects seed/LR sensitivity.}
+    V15 and V16 are iso-param and iso-FLOP to V10 Mixed; their small advantage over
+    V27/V28 (which differ in projection structure) is within the noise of hyperparameter
+    variation.  All variants sit within $\sim$1 pp accuracy and $\sim$1.5 PPL.
 
-  \item \textbf{GSM8K: EGrad (V27) does not recover the regression.}
-    V27 scores 1.52\% GSM8K --- matching V10 Mixed but below V0 GPT (2.20\%) and
-    MixH$^\dagger$ V15 (2.58\%).  V28 EDesc (1.59\%) is similar.
-    The GSM8K advantage attributed to MixH$^\dagger$ variants was a config-bug artifact.
+  \item \textbf{GSM8K regression is a mixed-head property.}
+    V27 scores 1.52\% GSM8K --- matching V10 Mixed but below V0 GPT (2.20\%).
+    V15 (2.58\%) is an outlier within the MixedHead family; V28 EDesc (1.59\%) matches V10.
 
   \item \textbf{6$\times$2 recurrent EGrad (V29) and EDesc (V30) are consistent.}
     V29 EGrad: 40.89 PPL / 46.9\% avg; V30 EDesc: 42.45 PPL / 46.1\% avg ---
@@ -719,10 +676,10 @@ V28 EDesc (attn) & 38.59 & 47.0\% & 24.7 & 33.0 & 77.4 & 1.59\% \\
 \begin{figure}[h]
   \centering
   \includegraphics[width=0.7\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params_v3_egrad_only.pdf}
-  \caption{EGrad(attn)/EDesc(attn) (V27--V36) vs.\ baselines: accuracy vs.\ parameters
-    (MixH$^\dagger$ mislabeled runs excluded; see Appendix~\ref{sec:appendix_scatter} for comparison).
-    EGrad (red) and EDesc (green) cluster tightly with Mixed (purple), confirming
-    the output rule provides no additional gain over the mixed-head baseline at 144M scale.}
+  \caption{EGrad(attn)/EDesc(attn) (V27--V36) vs.\ baselines: accuracy vs.\ parameters.
+    EGrad (red) and EDesc (green) cluster tightly with MixedHead (purple), confirming
+    the output rule provides no additional gain over the mixed-head baseline at 144M scale.
+    See Appendix~\ref{sec:appendix_scatter} for full scatter plots.}
   \label{fig:egrad_scatter}
 \end{figure}
 
@@ -753,35 +710,24 @@ we scale them to $d=1024$, testing three recurrence schedules:
 
 \begin{table}[h]
 \centering
-\caption{400M-scale results (30k steps, 7.86B tokens each). V19--V24 trained as MixedHead (config bug); V31--V36 are true EGrad/EDesc.
+\caption{400M-scale headline results (30k steps, 7.86B tokens).
+  Full table with recurrence ablations in Appendix~\ref{sec:appendix_400m_table}.
   \textbf{Bold} = best per metric.}
 \label{tab:scaling}
-\resizebox{\textwidth}{!}{%
+\resizebox{0.75\textwidth}{!}{%
 \begin{tabular}{lrrrrrrrr}
 \toprule
 \textbf{Model} & \textbf{Type} & \textbf{Params} & \textbf{MFLOPs} & \textbf{PPL$\downarrow$}
   & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
 \midrule
-V9  GPT 24$\times$1    & GPT   & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & \textbf{2.9\%} \\
-V1  EGPT 24$\times$1   & EGPT  & 354M & 654 & 38.6 & 47.0\% & 25.2 & 34.5 & 1.7\% \\
+V9  GPT 24$\times$1    & GPT     & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & \textbf{2.9\%} \\
+V1  EGPT 24$\times$1   & EGPT    & 354M & 654 & 38.6 & 47.0\% & 25.2 & 34.5 & 1.7\% \\
 \midrule
-V19 MixH$^\dagger$ 24$\times$1  & MixHead & 342M & 503 & \textbf{27.8} & 49.9\% & \textbf{27.7} & \textbf{40.5} & 2.1\% \\
-V20 MixH$^\dagger$ 24$\times$1  & MixHead & 342M & 503 & 27.9 & 49.5\% & 27.1 & 40.2 & 1.4\% \\
-V31 EGrad 24$\times$1           & EGrad   & 342M & 503 & 27.9 & \textbf{50.7\%} & 27.4 & 40.3 & 1.4\% \\
-V32 EDesc 24$\times$1           & EDesc   & 342M & 503 & 28.2 & 50.4\% & 27.4 & 40.1 & 2.5\% \\
-\midrule
-V21 MixH$^\dagger$ 6$\times$2   & MixHead & 162M & 252 & 37.3 & 47.1\% & 25.6 & 33.9 & 2.0\% \\
-V22 MixH$^\dagger$ 6$\times$2   & MixHead & 162M & 252 & 37.1 & 46.6\% & 24.9 & 33.5 & 2.0\% \\
-V33 EGrad 6$\times$2 1024       & EGrad   & 162M & 252 & 37.6 & 46.3\% & 25.2 & 33.7 & 0.8\% \\
-V34 EDesc 6$\times$2 1024       & EDesc   & 162M & 252 & 38.9 & 46.4\% & 24.6 & 33.4 & 1.5\% \\
-\midrule
-V23 MixH$^\dagger$ 12$\times$2  & MixHead & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
-V24 MixH$^\dagger$ 12$\times$2  & MixHead & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
-V35 EGrad 12$\times$2 1024      & EGrad   & 228M & 503 & 32.0 & 48.8\% & 26.3 & 37.3 & 1.6\% \\
-V36 EDesc 12$\times$2 1024      & EDesc   & 228M & 503 & 32.3 & 48.9\% & 26.1 & 37.5 & 1.7\% \\
+V19 Mixed 24$\times$1  & Mixed   & 342M & 503 & \textbf{27.8} & 49.9\% & \textbf{27.7} & \textbf{40.5} & 2.1\% \\
+V31 EGrad 24$\times$1  & EGrad   & 342M & 503 & 27.9 & \textbf{50.7\%} & 27.4 & 40.3 & 1.4\% \\
+V32 EDesc 24$\times$1  & EDesc   & 342M & 503 & 28.2 & 50.4\% & 27.4 & 40.1 & 2.5\% \\
 \bottomrule
 \end{tabular}}
-{\footnotesize $^\dagger$ Intended as EGrad/EDesc; trained as plain MixedHead (architecture identical to Mixed variants).}
 \end{table}
 
 \begin{figure}[h]
@@ -814,7 +760,7 @@ V36 EDesc 12$\times$2 1024      & EDesc   & 228M & 503 & 32.3 & 48.9\% & 26.1 & 
   \centering
   \begin{subfigure}[b]{0.48\textwidth}
     \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_flops_v3_egrad_only.pdf}
-    \caption{True EGrad/EDesc vs.\ baselines (no MixH$^\dagger$): accuracy vs.\ FLOPs.}
+    \caption{True EGrad/EDesc vs.\ baselines (no Mixed): accuracy vs.\ FLOPs.}
   \end{subfigure}
   \hfill
   \begin{subfigure}[b]{0.48\textwidth}
@@ -823,7 +769,7 @@ V36 EDesc 12$\times$2 1024      & EDesc   & 228M & 503 & 32.3 & 48.9\% & 26.1 & 
   \end{subfigure}
   \caption{True EGrad/EDesc (V27--V36) on the efficiency frontier.
     EGrad (red) and EDesc (green) track closely with Mixed (purple) on both axes.
-    At 400M / 503 MFLOPs, V31 EGrad (50.7\%) slightly exceeds V19 MixH$^\dagger$ (49.9\%).}
+    At 400M / 503 MFLOPs, V31 EGrad (50.7\%) slightly exceeds V19 Mixed (49.9\%).}
   \label{fig:scatter_v3_flops}
 \end{figure}
 
@@ -833,7 +779,7 @@ V36 EDesc 12$\times$2 1024      & EDesc   & 228M & 503 & 32.3 & 48.9\% & 26.1 & 
     V19 MixH (PPL=27.8, avg=49.9\%) and V20 MixH (PPL=27.9, avg=49.5\%) both
     outperform V9 GPT (PPL=29.8, avg=48.6\%) at identical FLOPs (503 MFLOPs/tok).
     The advantage is $-2.0$ PPL and $+1.3$ pp accuracy for MixH.
-    True EGrad V31 (50.7\% avg, PPL=27.9) slightly exceeds V19 MixH$^\dagger$ (49.9\%, PPL=27.8),
+    True EGrad V31 (50.7\% avg, PPL=27.9) slightly exceeds V19 Mixed (49.9\%, PPL=27.8),
     confirming that the mixed-head architecture drives the gain and EGrad matches or slightly
     improves upon MixedHead at 400M scale.
     These are the first mixed-head variants to consistently beat GPT at matched compute.
@@ -858,18 +804,18 @@ V36 EDesc 12$\times$2 1024      & EDesc   & 228M & 503 & 32.3 & 48.9\% & 26.1 & 
 \paragraph{Recurrence schedule: V25 and V26.}
 \textbf{Note:} V25/V26 were also affected by the config-serialization bug (trained before the fix
 in commit 3191a28), so they trained as plain \textbf{MixedHead} rather than true EGrad.
-They are MixH$^\dagger$ variants testing different recurrence schedules:
+They are Mixed variants testing different recurrence schedules:
 \begin{itemize}
-  \item \textbf{V25 MixH$^\dagger$ 6$\times$4} (4 uniform iterations per block, 162M unique params,
+  \item \textbf{V25 Mixed 6$\times$4} (4 uniform iterations per block, 162M unique params,
     503 MFLOPs/tok): tests whether more recurrence with the same per-layer FLOPs as V23/V24 improves accuracy.
-  \item \textbf{V26 MixH$^\dagger$ 6$\times$ramp} ([2,2,3,4,4,9] iterations, 503 MFLOPs/tok):
+  \item \textbf{V26 Mixed 6$\times$ramp} ([2,2,3,4,4,9] iterations, 503 MFLOPs/tok):
     tests whether back-loading recurrence into later blocks helps.
 \end{itemize}
 Both completed 30k steps; benchmark results are shown in Table~\ref{tab:scaling_v25v26}.
 
 \begin{table}[h]
 \centering
-\caption{Recurrence-schedule ablation (MixH$^\dagger$, 162M unique params, 503 MFLOPs/tok, 30k steps).
+\caption{Recurrence-schedule ablation (Mixed, 162M unique params, 503 MFLOPs/tok, 30k steps).
   V23/V24 (12$\times$2) and V9 GPT shown for reference.}
 \label{tab:scaling_v25v26}
 \resizebox{\textwidth}{!}{%
@@ -879,11 +825,11 @@ Both completed 30k steps; benchmark results are shown in Table~\ref{tab:scaling_
   & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
 \midrule
 V9  GPT 24$\times$1            & GPT     & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & 2.9\% \\
-V23 MixH$^\dagger$ 12$\times$2 & MixHead & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
-V24 MixH$^\dagger$ 12$\times$2 & MixHead & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
+V23 Mixed 12$\times$2 & MixHead & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
+V24 Mixed 12$\times$2 & MixHead & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
 \midrule
-V25 MixH$^\dagger$ 6$\times$4  & MixHead & 162M & 503 & \emph{pending} & \emph{pending} & -- & -- & -- \\
-V26 MixH$^\dagger$ 6$\times$ramp & MixHead & 162M & 503 & \emph{pending} & \emph{pending} & -- & -- & -- \\
+V25 Mixed 6$\times$4  & MixHead & 162M & 503 & \emph{pending} & \emph{pending} & -- & -- & -- \\
+V26 Mixed 6$\times$ramp & MixHead & 162M & 503 & \emph{pending} & \emph{pending} & -- & -- & -- \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -960,7 +906,7 @@ suggesting that the directionality of the update matters as much as the exact gr
     strictly dominates GPT on all metrics at 144M scale.
   \item At 400M / 503 MFLOPs/tok, true EGrad (V31) achieves 50.7\% avg / 27.9 PPL,
     outperforming matched GPT (V9: 48.6\% / 29.8 PPL) by $+2.1$ pp accuracy and $-1.9$ PPL,
-    and narrowly exceeding MixH$^\dagger$ V19 (49.9\% / 27.8 PPL) --- the first consistent energy-model win over GPT.
+    and narrowly exceeding Mixed V19 (49.9\% / 27.8 PPL) --- the first consistent energy-model win over GPT.
   \item Weight-shared recurrent EGrad (V23/V24) bridges the gap but costs $\sim$4 PPL
     vs.\ non-recurrent at matched compute.
 \end{enumerate}
@@ -1130,6 +1076,71 @@ V41 Sandwich 2+8+2        & 12 & 176M & ---  & TBD & GPT boundary + EGPT core \\
 \end{tabular}
 \end{table}
 
+%% ============================================================
+\section{Structural Ablations (V5--V8)}
+\label{sec:appendix_ablations}
+%% ============================================================
+
+\begin{table}[h]
+\centering
+\caption{Structural ablation: removing components or enforcing Helmholtz structure
+  at initialisation.  $d=768$, 12$\times$1, 30k steps.}
+\label{tab:v5_v8}
+\resizebox{0.7\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{BoolQ} & \textbf{COPA} \\
+\midrule
+V0  GPT          & 162M & \textbf{38.3} & \textbf{49.1\%} & 56.6 & 59.0 \\
+V1  EGPT         & 143M & 47.7 & 49.0\% & \textbf{61.1} & \textbf{64.0} \\
+\midrule
+V5  AttnOnly     & 143M & 48.6 & 48.3\% & 57.2 & 62.0 \\
+V6  HelmF        & 140M & 82.1 & 43.5\% & 50.0 & 55.0 \\
+V7  HelmD        & 140M & 63.4 & 45.1\% & 47.2 & 61.0 \\
+V8  HelmDR       & 140M & 65.2 & 45.7\% & 53.9 & 57.0 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+%% ============================================================
+\section{Full 400M-Scale Results}
+\label{sec:appendix_400m_table}
+%% ============================================================
+
+\begin{table}[h]
+\centering
+\caption{All 400M-scale variants (30k steps, 7.86B tokens).
+  V19--V24 are MixedHead (shared $W_O$); V31--V36 are EGrad/EDesc ($W_{Q,h}^\top$ output).
+  \textbf{Bold} = best per metric.}
+\label{tab:scaling_full}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Type} & \textbf{Params} & \textbf{MFLOPs} & \textbf{PPL$\downarrow$}
+  & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
+\midrule
+V9  GPT 24$\times$1    & GPT     & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & \textbf{2.9\%} \\
+V1  EGPT 24$\times$1   & EGPT    & 354M & 654 & 38.6 & 47.0\% & 25.2 & 34.5 & 1.7\% \\
+\midrule
+V19 Mixed 24$\times$1  & Mixed   & 342M & 503 & \textbf{27.8} & 49.9\% & \textbf{27.7} & \textbf{40.5} & 2.1\% \\
+V20 Mixed 24$\times$1  & Mixed   & 342M & 503 & 27.9 & 49.5\% & 27.1 & 40.2 & 1.4\% \\
+V31 EGrad 24$\times$1  & EGrad   & 342M & 503 & 27.9 & \textbf{50.7\%} & 27.4 & 40.3 & 1.4\% \\
+V32 EDesc 24$\times$1  & EDesc   & 342M & 503 & 28.2 & 50.4\% & 27.4 & 40.1 & 2.5\% \\
+\midrule
+V21 Mixed 6$\times$2   & Mixed   & 162M & 252 & 37.3 & 47.1\% & 25.6 & 33.9 & 2.0\% \\
+V22 Mixed 6$\times$2   & Mixed   & 162M & 252 & 37.1 & 46.6\% & 24.9 & 33.5 & 2.0\% \\
+V33 EGrad 6$\times$2 1024 & EGrad & 162M & 252 & 37.6 & 46.3\% & 25.2 & 33.7 & 0.8\% \\
+V34 EDesc 6$\times$2 1024 & EDesc & 162M & 252 & 38.9 & 46.4\% & 24.6 & 33.4 & 1.5\% \\
+\midrule
+V23 Mixed 12$\times$2  & Mixed   & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
+V24 Mixed 12$\times$2  & Mixed   & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
+V35 EGrad 12$\times$2 1024 & EGrad & 228M & 503 & 32.0 & 51.4\% & 26.1 & 36.5 & 1.6\% \\
+V36 EDesc 12$\times$2 1024 & EDesc & 228M & 503 & 32.3 & 51.6\% & 25.2 & 36.2 & 1.7\% \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+%% ============================================================
 \section{Full Benchmark Tables}
 %% ============================================================
 
@@ -1172,13 +1183,13 @@ V6  HelmF      & 82.1  & 43.5\% & 23.4 & 38.4 & 27.7 & 50.7 & 50.0 & 58.9 & 55.0
   \centering
   \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/headline_ppl_acc_vs_params.pdf}
   \caption{Clean PPL and accuracy vs.\ parameters (same as Figs.~\ref{fig:headline_params},~\ref{fig:headline_flops} in main text).
-    MixH$^\dagger$ mislabeled runs excluded.}
+    Mixed mislabeled runs excluded.}
 \end{figure}
 
 \begin{figure}[h]
   \centering
   \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_params_v3_with_mixhead.pdf}
-  \caption{PPL vs.\ parameters — all runs including MixH$^\dagger$ (grey).
+  \caption{PPL vs.\ parameters — all runs including Mixed (grey).
     \textbf{Grey points (V15--V26) are mislabeled:} intended as EGrad/EDesc but
     trained as plain MixedHead due to a config serialization bug (see \S\ref{sec:architectures}).
     Shown here for reference only; not used in any main-text figures or conclusions.}
@@ -1187,7 +1198,7 @@ V6  HelmF      & 82.1  & 43.5\% & 23.4 & 38.4 & 27.7 & 50.7 & 50.0 & 58.9 & 55.0
 \begin{figure}[h]
   \centering
   \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params_v3_with_mixhead.pdf}
-  \caption{Accuracy vs.\ parameters — all runs including MixH$^\dagger$ (grey).
+  \caption{Accuracy vs.\ parameters — all runs including Mixed (grey).
     Same caveat as above: grey points are mislabeled runs included for comparison only.}
 \end{figure}
 

@@ -130,3 +130,24 @@ Check queue status:
 bjobs -q preemptable -u all | head -30   # who is running
 bqueues preemptable                       # queue stats (NJOBS, NRUN, NPEND)
 ```
+
+## CRITICAL: EGPT attention output IS the true energy gradient
+
+**Do not repeat the mistake of saying EGPT uses V=K without W_Q^T.**
+
+`EnergyAttention_QK` (sequence_mixer_type: `energy_attention`, used in V1 EGPT):
+1. Sets V = K inside flash attention (efficiency: head dim d_h ≪ d, fewer FLOPs)
+2. After attention, applies W_Q^T via `einsum("bhts,hcs->btc", attn_output, W_Q_permuted)`
+3. Output = `sum_h W_{Q,h}^T [A_h K_h]_t` = **exact true gradient** ∇_{h_t} E_h
+
+The V=K step is a factored computation trick, NOT an approximation.
+
+**Contrast with V10 MixedHeadAttention:**
+- Energy heads compute `A_h K_h` but output goes through **shared W_O** (not W_Q^T)
+- Therefore V10 energy heads do NOT compute the true gradient
+- This is the actual bottleneck fixed by EGrad (V27+)
+
+**EGrad (EnergyGradMixedHeadAttention):**
+- Brings W_Q^T output to energy heads in the **mixed-head** context
+- Energy heads: `W_{Q,h}^T A_h K_h` (true gradient); GPT heads: `W_{O,gpt} A_h V_h`
+- EGrad = EGPT's correct output rule + mixed-head flexibility (some standard GPT heads)
