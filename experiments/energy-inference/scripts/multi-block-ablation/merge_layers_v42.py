@@ -144,8 +144,16 @@ def main():
     parser.add_argument("--out_n_layers", type=int, default=6)
     args = parser.parse_args()
 
-    ckpt_dir = _get_latest_step_dir(args.ckpt_path)
-    model = _load_sharded_model(ckpt_dir)
+    # Prefer top-level unsharded dir (most V* models have this)
+    top_unsharded = os.path.join(args.ckpt_path, "unsharded")
+    if os.path.isdir(top_unsharded):
+        load_dir = top_unsharded
+    else:
+        ckpt_dir = _get_latest_step_dir(args.ckpt_path)
+        load_dir = os.path.join(ckpt_dir, "unsharded") if os.path.isdir(os.path.join(ckpt_dir, "unsharded")) else ckpt_dir
+    from transformers import AutoModelForCausalLM
+    print(f"Loading model from {load_dir}")
+    model = AutoModelForCausalLM.from_pretrained(load_dir, torch_dtype=torch.bfloat16, device_map="cpu")
     print(f"Loaded {model.config.num_layers}-layer EGPT. Merging → {args.out_n_layers} layers "
           f"using strategy='{args.strategy}'...")
 
