@@ -2,6 +2,41 @@
 
 <!-- New results go at the top (reverse chronological). -->
 
+## Full EGrad (V37/V38): EGrad(attn) + Mixed_Energy_MLP — 2026-04-23
+
+**Goal**: Test whether adding energy-gradient FFN (Mixed_Energy_MLP = ∂E_FF/∂h + standard GELU MLP,
+iso-param) improves over EGrad(attn)-only baseline (V27/V31).
+
+### Models
+
+| Variant | Architecture | d | Layers | Params | LR | Job | Status |
+|---------|-------------|---|--------|--------|----|-----|--------|
+| V37 | Full EGrad 12×1, d=768, energy+standard=1152+1152 | 768 | 12 | ~141M | 2e-3 | 37396 | PEND/RUN |
+| V38 | Full EGrad 24×1, d=1024, energy+standard=1536+1536 | 1024 | 24 | ~342M | 1.5e-3 | 37397 | PEND/RUN |
+
+**Iso-param check**:
+- V37: 2×768×1152 + 2×768×1152 = 3×768×1536 (same as SwiGLU-1536 in V27) ✓
+- V38: 2×1024×1536 + 2×1024×1536 = 3×1024×2048 (same as SwiGLU-2048 in V31) ✓
+
+**Token count**: 30k steps × 4 GPUs × batch=4 × grad_accum=4 × seq=4096 = 7.86B tokens
+
+**New code**: `Mixed_Energy_MLP` in `lm_engine/hf_models/modeling_utils/mlp_blocks/mlp.py`
+— forward: `∂E_FF/∂h = φ'(W1x)·W2^T + φ(W1x)·W1^T` (two-projection energy) + standard GELU MLP.
+
+### Scripts/Configs
+
+```bash
+# Configs
+configs/multi_block_ablation/v37_full_egrad_12x1_d768_lr2e3.yml
+configs/multi_block_ablation/v38_full_egrad_24x1_d1024_lr1e3.yml
+
+# Submitted 2026-04-23
+bash experiments/energy-inference/scripts/multi-block-ablation/run_v37_full_egrad_12x1_d768_lr2e3.sh
+bash experiments/energy-inference/scripts/multi-block-ablation/run_v38_full_egrad_24x1_d1024_lr1e3.sh
+```
+
+---
+
 ## Output-rule ablation: V17-V20 (6×2 and 400M scale-ups) — 2026-04-21
 
 **Goal**: Scale up V15 (energy-gradient mixed heads) and V16 (energy-descent identity proj) to

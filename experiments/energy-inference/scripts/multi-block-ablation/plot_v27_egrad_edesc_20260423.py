@@ -52,6 +52,8 @@ MODELS = {
     "V22":     ("V22: MixH† 6×2 1024",    "v22_energy_desc_6x2_d1024_lr1e3",            162.5,  6, 2, 1024, 2048, "mixhead_dag"),
     "V23":     ("V23: MixH† 12×2 1024",   "v23_energy_grad_12x2_d1024_lr1e3",           228.0, 12, 2, 1024, 2048, "mixhead_dag"),
     "V24":     ("V24: MixH† 12×2 1024",   "v24_energy_desc_12x2_d1024_lr1e3",           228.0, 12, 2, 1024, 2048, "mixhead_dag"),
+    "V25":     ("V25: MixH† 6×4 1024",    "v25_energy_grad_6x4_d1024_lr1e3",            162.5,  6, 4, 1024, 2048, "mixhead_dag"),
+    "V26":     ("V26: MixH† 6×ramp 1024", "v26_energy_grad_6x_ramp_d1024_lr1e3",        162.5,  6, 4, 1024, 2048, "mixhead_dag"),
     # True EGrad/EDesc (V27-V36)
     "V27":     ("V27: EGrad 12×1 d768",   "v27_egrad_attn_12x1_d768_lr2e3",             140.8, 12, 1, 768,  1536, "egrad"),
     "V28":     ("V28: EDesc 12×1 d768",   "v28_edesc_12x1_d768_lr2e3",                  140.8, 12, 1, 768,  1536, "edesc"),
@@ -63,6 +65,9 @@ MODELS = {
     "V34":     ("V34: EDesc 6×2 1024",    "v34_edesc_6x2_d1024_lr1e3",                  162.5,  6, 2, 1024, 2048, "edesc"),
     "V35":     ("V35: EGrad 12×2 1024",   "v35_egrad_attn_12x2_d1024_lr1e3",            228.0, 12, 2, 1024, 2048, "egrad"),
     "V36":     ("V36: EDesc 12×2 1024",   "v36_edesc_12x2_d1024_lr1e3",                 228.0, 12, 2, 1024, 2048, "edesc"),
+    # Full EGrad (V37-V38): EGrad(attn) + Mixed_Energy_MLP
+    "V37":     ("V37: Full EGrad 12×1 768",  "v37_full_egrad_12x1_d768_lr2e3",          140.8, 12, 1, 768,  1536, "full_egrad"),
+    "V38":     ("V38: Full EGrad 24×1 1024", "v38_full_egrad_24x1_d1024_lr1e3",         341.9, 24, 1, 1024, 2048, "full_egrad"),
 }
 
 GROUP_COLORS = {
@@ -72,10 +77,12 @@ GROUP_COLORS = {
     "mixhead_dag": "#BDBDBD",   # grey — mislabeled runs
     "egrad":       "#F44336",
     "edesc":       "#4CAF50",
+    "full_egrad":  "#E91E63",
 }
 GROUP_LABELS = {
     "gpt": "GPT", "energy": "EGPT", "mixed": "Mixed",
-    "mixhead_dag": "MixH† (bug)", "egrad": "EGrad (true)", "edesc": "EDesc (true)",
+    "mixhead_dag": "MixH† (bug)", "egrad": "EGrad (attn)", "edesc": "EDesc (attn)",
+    "full_egrad": "Full EGrad",
 }
 
 BENCH_TASKS = [
@@ -151,7 +158,7 @@ for key, (disp, subdir, params, ul, itr, d, int_s, grp) in MODELS.items():
 print(f"\n{'Model':<30} {'Params':>7} {'PPL':>7} {'AvgAcc':>8} {'GSM8K':>7}")
 print("-" * 65)
 
-GROUPS_ORDER = ["gpt", "energy", "mixed", "mixhead_dag", "egrad", "edesc"]
+GROUPS_ORDER = ["gpt", "energy", "mixed", "mixhead_dag", "egrad", "edesc", "full_egrad"]
 for grp in GROUPS_ORDER:
     keys_in_grp = [k for k in MODELS if data[k]["group"] == grp]
     for k in keys_in_grp:
@@ -301,7 +308,7 @@ bars = ax.bar(range(len(bar_entries)), bar_accs, color=bar_colors, edgecolor="wh
 ax.set_xticks(range(len(bar_entries)))
 ax.set_xticklabels(bar_labels, rotation=45, ha="right", fontsize=8)
 ax.set_ylabel("Avg Accuracy (10 tasks) ↑")
-ax.set_title("Average Benchmark Accuracy — True EGrad/EDesc vs Baselines")
+ax.set_title("Average Benchmark Accuracy — EGrad(attn)/EDesc vs Baselines")
 ax.set_ylim(min(bar_accs) * 0.97, max(bar_accs) * 1.02)
 ax.grid(axis="y", alpha=0.3)
 legend_patches = [mpatches.Patch(color=GROUP_COLORS[g], label=GROUP_LABELS[g])
@@ -343,5 +350,46 @@ for ext in ["png", "pdf"]:
     fig.savefig(PLOTS_DIR / f"heatmap_egrad_edesc_v27_v36.{ext}", dpi=150, bbox_inches="tight")
 plt.close(fig)
 print("Saved heatmap_egrad_edesc_v27_v36")
+
+
+# ── Headline figures (clean — no grey MixH† runs) ────────────────────────────
+def save_2panel(entries, stem, x_key, x_label, y1_key, y1_label, y2_key, y2_label):
+    """Two side-by-side scatter panels sharing the same x-axis."""
+    entries_l = [e for e in entries if e[x_key] and e[y1_key]]
+    entries_r = [e for e in entries if e[x_key] and e[y2_key]]
+    groups_present = {e["group"] for e in entries_l + entries_r}
+    legend_patches = [mpatches.Patch(color=GROUP_COLORS[g], label=GROUP_LABELS[g])
+                      for g in GROUPS_ORDER if g in groups_present]
+    rec_legend = [
+        plt.scatter([], [], marker="o", color="#888", s=60, label="non-recurrent"),
+        plt.scatter([], [], marker="s", color="#888", s=60, label="recurrent"),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    make_scatter(axes[0], entries_l, x_key, y1_key, log_x=True, invert_y=(y1_key == "ppl"))
+    axes[0].set_xlabel(x_label, fontsize=11)
+    axes[0].set_ylabel(y1_label, fontsize=11)
+    make_scatter(axes[1], entries_r, x_key, y2_key, log_x=True, invert_y=(y2_key == "ppl"))
+    axes[1].set_xlabel(x_label, fontsize=11)
+    axes[1].set_ylabel(y2_label, fontsize=11)
+    axes[1].legend(handles=legend_patches + rec_legend, fontsize=8, loc="best", ncol=2, framealpha=0.85)
+    fig.tight_layout()
+    for ext in ["png", "pdf"]:
+        fig.savefig(PLOTS_DIR / f"{stem}.{ext}", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {stem}")
+
+
+save_2panel(
+    entries_clean, "headline_ppl_acc_vs_params",
+    "params", "Parameters (M, log scale)",
+    "ppl", "WikiText PPL ↓",
+    "avg_acc", "Avg Accuracy ↑",
+)
+save_2panel(
+    entries_clean, "headline_ppl_acc_vs_flops",
+    "mflops", "FLOPs/token (M, log scale)",
+    "ppl", "WikiText PPL ↓",
+    "avg_acc", "Avg Accuracy ↑",
+)
 
 print("\nAll plots saved to", PLOTS_DIR)

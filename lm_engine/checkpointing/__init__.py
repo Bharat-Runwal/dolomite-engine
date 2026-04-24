@@ -403,6 +403,14 @@ def load_checkpoint_and_unshard(args: UnshardingArgs) -> tuple[ModelWrapper, Tra
             f"{_get_model_optimizer_path(_get_base_path(load_path, iteration))}/", "*.pt", "", save_model=False
         )
 
+    # backward-compat: rename W_O → W_O_gpt for EGrad checkpoints trained before commit 3191a28
+    # Only applies when checkpoint has W_O and model (per current code) expects W_O_gpt.
+    model_keys = set(model.state_dict().keys())
+    if (any(".sequence_mixer.W_O." in k for k in state) and
+            not any(".sequence_mixer.W_O." in k for k in model_keys) and
+            any(".sequence_mixer.W_O_gpt." in k for k in model_keys)):
+        state = {k.replace(".sequence_mixer.W_O.", ".sequence_mixer.W_O_gpt."): v for k, v in state.items()}
+
     model.load_state_dict(state)
 
     return model, args_from_checkpoint, state

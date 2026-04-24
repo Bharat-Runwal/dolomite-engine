@@ -10,7 +10,7 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs
+from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MixedEnergyMLPArgs
 from .sequence_mixer import (
     _CausalConvolution,
     _GatedDeltaNetArgs,
@@ -81,7 +81,7 @@ _SEQUENCE_MIXER_CONFIG_CLASSES = {
     "mixed_head_energy_descent": _MixedHeadAttentionArgs,
 }
 
-_MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs}
+_MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs, "Mixed_Energy_MLP": _MixedEnergyMLPArgs}
 
 
 class CommonConfig(PretrainedConfig):

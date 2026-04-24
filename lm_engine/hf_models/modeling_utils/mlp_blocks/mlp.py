@@ -321,6 +321,75 @@ class MLP(nn.Module):
         return x
 
 
+class Mixed_Energy_MLP(nn.Module):
+    """Half Energy_MLP (∂E_FF/∂h) + half standard GELU MLP.
+
+    Implements the full-block energy gradient: attention heads already compute ∂E_attn/∂h;
+    this FFN adds ∂E_FF/∂h so the combined block output is the full energy gradient.
+
+    Iso-param vs SwiGLU with intermediate I: use energy_size = standard_size = 0.75*I.
+    E.g. I=1536 (d=768) → each=1152; I=2048 (d=1024) → each=1536.
+    """
+
+    _SIGMOID_SCALE: float = (2.0 / math.pi) ** 0.5
+
+    def __init__(
+        self,
+        hidden_size: int,
+        energy_intermediate_size: int,
+        standard_intermediate_size: int,
+        init_method: str,
+        activation_function: str,
+        dropout: float,
+        initializer_range: float,
+        m_width: float,
+        num_layers: int,
+        add_bias: bool = False,
+        layer_idx: int | None = None,
+        **kwargs,  # absorb unused intermediate_size from base kwargs
+    ) -> None:
+        super().__init__()
+        self.layer_idx = layer_idx
+        self._cached_metrics = None
+
+        std = _get_std_for_linear(initializer_range, init_method, m_width)
+
+        # Energy FFN: two projections, output = ∂E_FF/∂h
+        self.W1 = ParameterizedLinear(hidden_size, energy_intermediate_size, bias=add_bias, std=std)
+        self.W2 = ParameterizedLinear(hidden_size, energy_intermediate_size, bias=add_bias, std=std)
+        mark_parameter_as_mup_learning_rate(self.W1.weight)
+        mark_parameter_as_mup_learning_rate(self.W2.weight)
+
+        # Standard GELU MLP: W_in → act → W_out
+        self.c_fc = ParameterizedLinear(hidden_size, standard_intermediate_size, bias=add_bias, std=std)
+        self.c_proj = ParameterizedLinear(
+            standard_intermediate_size, hidden_size, bias=add_bias, std=std / math.sqrt(2 * num_layers)
+        )
+        self.act = get_activation_function(activation_function)
+        self.dropout = Dropout(dropout)
+        mark_parameter_as_mup_learning_rate(self.c_fc.weight)
+        mark_parameter_as_mup_learning_rate(self.c_proj.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Energy gradient: ∂/∂h [-phi(W1 h)^T (W2 h)] = W2^T phi(W1h) + W1^T [phi'(W1h) * W2h]
+        W1x = self.W1(x)
+        W2x = self.W2(x)
+        phi = F.gelu(W1x)
+        phi_prime_W2x = torch.sigmoid(self._SIGMOID_SCALE * W1x) * 0.5 * W2x
+        energy_out = phi @ self.W2.weight + phi_prime_W2x @ self.W1.weight
+
+        # Standard MLP
+        standard_out = self.c_proj(self.dropout(self.act(self.c_fc(x))))
+
+        out = energy_out + standard_out
+        if not torch.compiler.is_compiling():
+            self._cached_metrics = {"output_norm": out.norm(dim=-1).mean().item()}
+        return out
+
+    def get_metrics(self):
+        return self._cached_metrics
+
+
 def _get_std_for_linear(initializer_range: float, init_method: str, m_width: float | None) -> float:
     std = initializer_range
     if init_method == "mup":

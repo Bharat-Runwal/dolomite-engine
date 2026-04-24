@@ -52,6 +52,27 @@ class _CompositionalEnergyMLPArgs(BaseArgs):
         )
 
 
+class _MixedEnergyMLPArgs(BaseArgs):
+    """Config for Mixed_Energy_MLP: half Energy_MLP + half standard MLP.
+
+    Iso-param sizing: energy_intermediate_size + standard_intermediate_size = 1.5 * base_intermediate_size
+    gives the same param count as a SwiGLU MLP with base_intermediate_size.
+    Example: base=1536 → energy=1152, standard=1152 (GELU).
+    """
+    mlp_type: str = "Mixed_Energy_MLP"
+    intermediate_size: int = 0  # unused; required by base class machinery
+    energy_intermediate_size: int = 1152
+    standard_intermediate_size: int = 1152
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "Mixed_Energy_MLP"
+        if self.intermediate_size == 0:
+            self.intermediate_size = self.energy_intermediate_size + self.standard_intermediate_size
+
+
 class _MoEArgs(_MLPArgs):
     mlp_type: str = "MoE"
     shared_intermediate_size: int | None = None
