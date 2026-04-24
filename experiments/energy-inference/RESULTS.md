@@ -2,6 +2,60 @@
 
 <!-- New results go at the top (reverse chronological). -->
 
+## Layer Merger Experiments (V39–V43) — 2026-04-24
+
+**Goal**: Investigate whether EGPT layers can be merged (collapsed) to produce a shallower
+but near-equivalent model.  Three strategies:
+1. **CosReg regulariser**: add `(cos_sim(attn_out[i], attn_out[i+1]) - 1)^2` penalty during training to encourage adjacent layer similarity (V39/V40)
+2. **Naive merge + fine-tune**: average weight pairs 12→6 layers, then fine-tune 5k steps (V42)
+3. **Procrustes merge + fine-tune**: align-then-average 12→6 layers, then fine-tune 5k steps (V43)
+4. **Sandwich architecture**: 2 GPT + 8 EGPT + 2 GPT to isolate the EGPT core (V41)
+
+### Code Changes
+
+- `lm_engine/hf_models/models/energy/layer.py`: `EnergyBlock.forward()` stores `self._attn_out` after attention call
+- `lm_engine/model_wrapper/pretraining.py`: added `_compute_attn_cos_reg()` helper + injection in `get_loss()`
+- New cos_reg config fields: `cos_reg_loss_coef` (float, default 0), `cos_reg_interval` (int, default 1)
+
+### Runs Submitted 2026-04-24
+
+| Variant | Description | d | Layers | Params | LR | Job | Status |
+|---------|-------------|---|--------|--------|----|-----|--------|
+| V39 | EGPT 12×1 + cos_reg λ=0.01 | 768 | 12 | ~176M | 2e-3 | 37576 | RUN |
+| V40 | EGPT 24×1 + cos_reg λ=0.01 | 1024 | 24 | ~405M | 7e-4 | 37577 | RUN |
+| V41 | Sandwich 2GPT+8EGPT+2GPT | 768 | 12 | ~176M | 2e-3 | 37578 | RUN |
+| V42 | Naive merge 12→6 + FT 5k | 768 | 6 | ~96M | 2e-4 | 37579 | RUN (merge) |
+| V43 | Procrustes merge 12→6 + FT 5k | 768 | 6 | ~96M | 2e-4 | 37583 | RUN (merge) |
+
+**Baseline (V1 EGPT 12-layer)**: PPL=47.7, 46.8% avg acc
+
+### Configs
+
+```
+configs/multi_block_ablation/v39_egpt_cosreg_12x1_d768_lr2e3.yml
+configs/multi_block_ablation/v40_egpt_cosreg_24x1_d1024_lr7e4.yml
+configs/multi_block_ablation/v41_sandwich_2gpt8e2gpt_d768_lr2e3.yml
+configs/multi_block_ablation/v42_egpt_6layer_naive_merge_finetune_d768_lr2e3.yml
+configs/multi_block_ablation/v43_egpt_6layer_procrustes_merge_finetune_d768_lr2e3.yml
+```
+
+### Scripts
+
+```bash
+experiments/energy-inference/scripts/multi-block-ablation/run_v39_egpt_cosreg_d768_lr2e3.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v40_egpt_cosreg_d1024_lr7e4.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v41_sandwich_d768_lr2e3.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v42_merge_finetune.sh   # merge_layers_v42.py, then finetune
+experiments/energy-inference/scripts/multi-block-ablation/run_v43_procrustes_merge_finetune.sh
+experiments/energy-inference/scripts/multi-block-ablation/merge_layers_v42.py          # merge util (strategy=naive|procrustes)
+```
+
+### Results
+
+_Pending. Will update once runs complete._
+
+---
+
 ## Full EGrad (V37/V38): EGrad(attn) + Mixed_Energy_MLP — 2026-04-23
 
 **Goal**: Test whether adding energy-gradient FFN (Mixed_Energy_MLP = ∂E_FF/∂h + standard GELU MLP,

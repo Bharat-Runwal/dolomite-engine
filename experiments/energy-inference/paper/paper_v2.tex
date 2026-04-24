@@ -967,6 +967,169 @@ suggesting that the directionality of the update matters as much as the exact gr
 
 %% ============================================================
 \appendix
+
+%% ============================================================
+\section{Layer Merger Experiments}
+\label{sec:layer_merger}
+%% ============================================================
+
+\subsection{Motivation}
+
+A key empirical finding from \S\ref{sec:probes} (shown in Fig.~\ref{fig:consecutive_layer_sim}) is that
+EGPT attention outputs exhibit substantially higher consecutive-layer cosine similarity than
+standard GPT: $0.176$ vs.\ $0.119$ (adjacent pairs), rising to $\sim 0.53$ for the middle
+layers 8--9 of a 12-layer V1 EGPT.  This suggests that EGPT layers may be doing
+\emph{redundant} work --- a prerequisite for structural compression via layer merging.
+Ideally one could (i) train a 12-layer EGPT and then collapse it to 6 layers at near-zero
+cost, recovering most of the original performance.
+
+However, initial naive experiments (averaging adjacent weight pairs, no fine-tuning)
+showed that the post-merge perplexity is too high to be useful, despite the high activation
+cosine similarity.  The discrepancy suggests that functional similarity in activation space
+does not automatically transfer to structural mergability in weight space: adjacent layers
+may apply \emph{similar} transformations but be \emph{calibrated} differently (e.g.\ with
+opposite signs on certain sub-spaces, or rotated representations).
+
+We pursue three complementary strategies to close this gap.
+
+%% -----------------------------------
+\subsection{Strategy A: Cosine-Similarity Regularisation During Training}
+\label{sec:cosreg}
+%% -----------------------------------
+
+\paragraph{Method.}
+We add a differentiable cosine-similarity term to the training objective:
+\begin{equation}
+  \mathcal{L}_{\mathrm{cos}} = \lambda \sum_{(i,j)\in\mathcal{P}}
+      \bigl(\cos\!\operatorname{sim}(\mathbf{a}_i, \mathbf{a}_j) - 1\bigr)^2 ,
+\end{equation}
+where $\mathbf{a}_i\in\mathbb{R}^{B\cdot T\times D}$ is the attention output of energy block $i$
+(stored during the forward pass to avoid FSDP weight gathering),
+$\lambda$ is the regularisation coefficient, and $\mathcal{P}$ contains the \emph{sparse}
+offset pairs $(i,i{+}1)$, $(i,i{+}2)$, $(i,i{+}4)$ to also encourage medium-range similarity.
+To reduce overhead, the regularisation is only applied every $k$ steps
+($k{=}10$ in all runs, i.e.\ 10\% of steps contribute the regularisation gradient).
+
+The regularisation is applied in \texttt{ModelWrapperForPretraining.get\_loss()} via the
+helper \texttt{\_compute\_attn\_cos\_reg()}, which walks \texttt{model.model.transformer.h},
+reads the stored \texttt{block.\_attn\_out}, and computes the penalty.  This is purely
+activation-based and introduces no new learnable parameters.
+
+\paragraph{Runs.}
+\begin{itemize}
+  \item \textbf{V39} (160M, $\lambda{=}0.01$, $k{=}10$): EGPT 12$\times$1, $d{=}768$, lr=2e-3.
+        Identical to V1 except for the regulariser.  30k steps.
+  \item \textbf{V40} (400M, $\lambda{=}0.01$, $k{=}10$): EGPT 24$\times$1, $d{=}1024$, lr=7e-4.
+        Identical to the 400M V1 except for the regulariser.  30k steps.
+\end{itemize}
+
+\paragraph{Expected outcomes.}
+If $\lambda$ is too large the regulariser will dominate the LM loss and degrade PPL.
+If too small it will have negligible effect.  The target regime is: slightly higher
+consecutive cosine similarity compared to V1, with $\leq$0.5~PPL points degradation,
+and noticeably better post-merge (collapsed-layer) PPL when we apply the merger.
+
+\paragraph{Results.}
+\emph{V39 and V40 are currently training (jobs 37576, 37577 submitted Apr 24, 2026).
+Results will be added once training completes.}
+
+%% -----------------------------------
+\subsection{Strategy B: Post-Training Layer Merger with Fine-Tuning}
+\label{sec:merge_finetune}
+%% -----------------------------------
+
+\paragraph{Method.}
+Starting from the fully trained V1 EGPT 12-layer checkpoint, we merge adjacent pairs
+$(0{+}1), (2{+}3), \ldots, (10{+}11)$ into a 6-layer model, then fine-tune for 5k steps
+at lr=2e-4 (10$\times$ lower than the scratch LR).  We compare two merge strategies:
+
+\textbf{Naive merge (V42)}: average all corresponding tensors element-wise:
+$\tilde{W} = (W_i + W_j)/2$.
+
+\textbf{Procrustes-aligned merge (V43)}: for each 2D weight matrix, find the orthogonal
+rotation $R$ minimising $\|W_i - W_j R\|_F$ via SVD
+$(U, S, V^\top) = W_i^\top W_j \Rightarrow R = VU^\top$,
+then set $\tilde{W} = (W_i + W_j R)/2$.  The alignment corrects for any arbitrary
+rotation symmetry between the two layers before averaging, reducing the destructive
+interference that plagues naive averaging.
+
+The merged model is saved as a standalone HF checkpoint and loaded by the fine-tune
+config as a pre-trained initialisation.
+
+\paragraph{Runs.}
+\begin{itemize}
+  \item \textbf{V42}: Naive merge of V1 $\to$ 6 layers, fine-tuned 5k steps (lr=2e-4).
+  \item \textbf{V43}: Procrustes-aligned merge of V1 $\to$ 6 layers, fine-tuned 5k steps.
+\end{itemize}
+The merge step runs on a single GPU (job 37579 / 37583 respectively) and auto-submits
+the 4-GPU fine-tune job on completion.
+
+\paragraph{Baseline.}
+For comparison we also record the zero-shot (pre-fine-tune) PPL of the merged models to
+quantify how much is recovered by fine-tuning.  The 12-layer V1 achieves PPL=47.7;
+a 6-layer EGPT trained from scratch should fall between V1 and a 6-layer GPT.
+
+\paragraph{Results.}
+\emph{V42 and V43 merge+fine-tune jobs submitted Apr 24, 2026 (jobs 37579, 37583).
+Results will be added once training completes.}
+
+%% -----------------------------------
+\subsection{Strategy C: Sandwich Architecture (GPT Encoder + EGPT Core + GPT Decoder)}
+\label{sec:sandwich}
+%% -----------------------------------
+
+\paragraph{Motivation.}
+The full-layer cosine-similarity analysis (\S\ref{sec:probes}) shows a consistent pattern:
+\emph{the first and last EGPT layers are least similar to their neighbours},
+while the middle layers form a high-similarity cluster.  This suggests the boundary layers
+serve a qualitatively different role --- adapting the input representation to the energy
+manifold (layer 0) and projecting back out (layer 11).
+
+We hypothesise that replacing these boundary layers with standard GPT
+(softmax-attention + residual MLP) layers could provide a cleaner interface for the EGPT
+core, potentially improving both raw performance and post-training mergeability of the
+inner layers.
+
+\paragraph{Architecture.}
+\textbf{V41}: 2 standard GPT layers (softmax\_attention + MLP, additive residual) $+$ 8
+EGPT layers (energy\_attention + Energy\_MLP, subtractive energy descent) $+$ 2 standard GPT
+layers.  Total 12 layers, $d{=}768$, $\sim$176M parameters --- iso-param to V1.
+
+\paragraph{Expected outcomes.}
+\begin{enumerate}
+  \item Lower PPL than V1 (boundary layers are easier for GPT; EGPT core trains with
+        better-conditioned inputs / residuals).
+  \item Higher cosine similarity among the 8 inner EGPT layers than the V1 inner layers.
+  \item Post-merge of the 8 inner EGPT layers should be easier than V1 full-model merge.
+\end{enumerate}
+
+\paragraph{Results.}
+\emph{V41 sandwich training submitted Apr 24, 2026 (job 37578, 30k steps).  Layer
+cosine-similarity analysis and merger experiments on V41 will be added once training
+completes.}
+
+\subsection{Summary Table (to be completed)}
+
+\begin{table}[h]
+\centering
+\caption{Layer merger experiment overview.  PPL$_0$ = zero-shot post-merge PPL;
+  PPL$_{\mathrm{ft}}$ = PPL after 5k fine-tuning steps.
+  \emph{All entries pending — jobs running.}}
+\label{tab:layer_merger}
+\begin{tabular}{lrrrrl}
+\toprule
+\textbf{Model} & \textbf{Layers} & \textbf{Params} & \textbf{PPL$_0$} & \textbf{PPL$_{\mathrm{ft}}$} & \textbf{Notes} \\
+\midrule
+V1  EGPT (reference)      & 12 & 176M & 47.7 & --- & no merge \\
+V42 Naive merge + FT      &  6 & 96M  & TBD  & TBD & avg weights \\
+V43 Procrustes merge + FT &  6 & 96M  & TBD  & TBD & align-then-avg \\
+V39 CosReg 160M           & 12 & 176M & ---  & TBD & $\lambda$=0.01 regularised \\
+V40 CosReg 400M           & 24 & 405M & ---  & TBD & $\lambda$=0.01 at 400M scale \\
+V41 Sandwich 2+8+2        & 12 & 176M & ---  & TBD & GPT boundary + EGPT core \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \section{Full Benchmark Tables}
 %% ============================================================
 

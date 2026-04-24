@@ -525,6 +525,8 @@ class EnergyBlock(nn.Module):
                 max_seqlen=max_seqlen,
                 layer_id=layer_id,
             )
+            # Store for cosine-similarity regularizer (activation-based, avoids FSDP weight gather)
+            self._attn_out = attn_out
             ffwd_out = self.ffwd(ln_x)
 
             # Dual projection: separate matrices for attn and MLP (scale_ff frozen at 1.0)

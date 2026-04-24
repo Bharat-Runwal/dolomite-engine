@@ -23,6 +23,59 @@ from .base import ModelWrapper
 from .utils import broadcast_tensor_parallel_input
 
 
+def _compute_attn_cos_reg(model, coef: float):
+    """Compute cosine-similarity regularizer between adjacent energy block attn outputs.
+
+    Encourages cos_sim(attn_out[i], attn_out[i+1]) → 1 for pairs (i, i+1), (i, i+2), (i, i+4).
+    Uses activations stored as block._attn_out during the forward pass to avoid FSDP weight gather.
+    Returns coef * mean_reg, or None if no energy blocks have stored activations.
+    """
+    import torch.nn.functional as F
+    blocks = None
+    # Unwrap FSDP / DDP
+    inner = model
+    for attr in ("module", "model"):
+        if hasattr(inner, attr):
+            inner = getattr(inner, attr)
+    # Navigate to transformer blocks
+    try:
+        blocks = inner.model.transformer.h
+    except AttributeError:
+        try:
+            blocks = inner.transformer.h
+        except AttributeError:
+            return None
+
+    # Collect (layer_idx, attn_out) for energy blocks that stored activations
+    pairs = []
+    for idx, blk in enumerate(blocks):
+        out = getattr(blk, "_attn_out", None)
+        if out is not None:
+            pairs.append((idx, out))
+
+    if len(pairs) < 2:
+        return None
+
+    idx_map = {idx: out for idx, out in pairs}
+    reg_terms = []
+    offsets = [1, 2, 4]
+    for idx, out_i in pairs:
+        for off in offsets:
+            out_j = idx_map.get(idx + off)
+            if out_j is None:
+                continue
+            # Mean over batch and sequence, then cos-sim per hidden dim
+            flat_i = out_i.reshape(-1, out_i.shape[-1])
+            flat_j = out_j.reshape(-1, out_j.shape[-1])
+            # cos_sim per token, then mean
+            cs = F.cosine_similarity(flat_i, flat_j, dim=-1)  # (B*T,)
+            reg_terms.append((cs - 1.0).pow(2).mean())
+
+    if not reg_terms:
+        return None
+    return coef * torch.stack(reg_terms).mean()
+
+
 class ModelWrapperForPretraining(ModelWrapper):
     def __init__(
         self,
@@ -169,6 +222,18 @@ class ModelWrapperForPretraining(ModelWrapper):
         )
 
         lm_loss = lm_loss * lm_loss_multiplier
+
+        cos_reg_coef = getattr(getattr(self.model, "config", None), "cos_reg_loss_coef", 0.0) or 0.0
+        cos_reg_interval = getattr(getattr(self.model, "config", None), "cos_reg_interval", 1) or 1
+        if cos_reg_coef > 0 and (self.model.training):
+            # Only apply every cos_reg_interval steps to save compute
+            step = getattr(self, "_cos_reg_step", 0)
+            self._cos_reg_step = step + 1
+            if step % cos_reg_interval == 0:
+                cos_reg = _compute_attn_cos_reg(self.model, cos_reg_coef)
+                if cos_reg is not None:
+                    lm_loss = lm_loss + cos_reg
+
         aux_loss = getattr(model_outputs, "aux_loss", 0)
 
         if is_aux_loss_zero(aux_loss):
