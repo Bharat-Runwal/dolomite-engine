@@ -25,7 +25,31 @@ class _EnergyAttentionArgs(BaseArgs):
         if self.qkv_bias is None:
             self.qkv_bias = self.add_bias
 
-        assert self.sequence_mixer_type == "energy_attention"
+        assert self.sequence_mixer_type in ("energy_attention", "vk_residual")
+
+
+class _MixedHeadAttentionArgs(BaseArgs):
+    sequence_mixer_type: str = "mixed_head_attention"
+    num_attention_heads: int = 12
+    num_key_value_heads: int = 12
+    num_energy_heads: int = 6
+    softmax_dropout: float = 0
+    dropout: float = 0
+    add_bias: bool = False
+    attention_multiplier: float | None = None
+    sliding_window: int | None = None
+    qkv_bias: bool = None
+    position_embedding_type: str | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.qkv_bias is None:
+            self.qkv_bias = self.add_bias
+        assert self.sequence_mixer_type in (
+            "mixed_head_attention",
+            "energy_grad_mixed_head_attention",
+            "mixed_head_energy_descent",
+        )
+        assert 0 < self.num_energy_heads < self.num_attention_heads
 
 
 class _SoftmaxAttentionArgs(BaseArgs):
@@ -44,7 +68,7 @@ class _SoftmaxAttentionArgs(BaseArgs):
         if self.qkv_bias is None:
             self.qkv_bias = self.add_bias
 
-        assert self.sequence_mixer_type == "softmax_attention"
+        assert self.sequence_mixer_type in ("softmax_attention", "projected_softmax")
 
 
 class _MultiHeadLatentAttentionArgs(BaseArgs):

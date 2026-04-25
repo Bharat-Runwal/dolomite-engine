@@ -58,12 +58,14 @@ class EnergyAttention_QK(nn.Module):
         use_padding_free_transformer: bool,
         stop_grad_key: bool = False,
         add_wv_wo: bool = False,
+        vk_pre_rope: bool = False,
     ) -> EnergyAttention_QK:
         super().__init__()
 
         self.causal = causal
         self.stop_grad_key = stop_grad_key
         self.add_wv_wo = add_wv_wo
+        self.vk_pre_rope = vk_pre_rope
         self.hidden_size = hidden_size
         self.num_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
@@ -183,21 +185,23 @@ class EnergyAttention_QK(nn.Module):
             query = query.transpose(1, 2).contiguous()
             key = key.transpose(1, 2).contiguous()
 
-        # Apply RoPE if configured (before setting V = K)
+        # Apply RoPE if configured
         if self.position_embedding_type == "rope" and rope_cos_sin is not None:
+            # Save pre-RoPE key for V=K if using pre-rope values
+            key_pre_rope = key if self.vk_pre_rope else None
             query = apply_rotary_pos_emb(query, rope_cos_sin)
             key = apply_rotary_pos_emb(key, rope_cos_sin)
+        else:
+            key_pre_rope = None
 
-        # Stop-gradient on K: makes forward output = exact ∂E/∂h_i (no key-role contamination).
-        # Without this, K = f(h_i) contributes an extra term to the backprop gradient that is
-        # absent from the forward energy gradient, causing the structural misalignment we measured.
-        # add_wv_wo always implies stop-grad since proper W_V/W_O already break the key-role path.
+        # Stop-gradient on K: makes forward output = exact dE/dh_i (no key-role contamination).
         if self.stop_grad_key or self.add_wv_wo:
             key = key.detach()
+            if key_pre_rope is not None:
+                key_pre_rope = key_pre_rope.detach()
 
         if self.add_wv_wo:
             # Option 1b: proper V = W_V(h), output via W_O.
-            # E(h_i) = (W_O * attn_weights * W_V * h_{<i})^T * h_i -- exact energy gradient.
             if self.use_padding_free_transformer:
                 value = self.W_V(original_hidden_states)
                 value = value.view(total_q, self.num_heads, self.head_dim).detach()
@@ -207,9 +211,12 @@ class EnergyAttention_QK(nn.Module):
                 value = value.transpose(1, 2).contiguous().detach()
         else:
             # V = K (core energy attention property)
-            # Normalize value vectors to unit norm per position to bound attention output magnitude
-            # This prevents c_attn weight growth from amplifying attention output
-            value = key  # / (key.norm(dim=-1, keepdim=True) + 1e-6)
+            if key_pre_rope is not None:
+                # Use pre-RoPE key as value: RoPE only affects scores, not output space
+                value = key_pre_rope
+            else:
+                # Default: V = K (post-RoPE), output space entangled with position
+                value = key
 
         if past_key_values is not None:
             # Use layer_id (iteration-aware index) when available, else fall back to block index

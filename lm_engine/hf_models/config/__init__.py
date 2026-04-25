@@ -19,7 +19,8 @@ from .sequence_mixer import (
     _MultiHeadLatentAttentionArgs,
     _RNNArgs,
     _SoftmaxAttentionArgs,
-    _EnergyAttentionArgs
+    _EnergyAttentionArgs,
+    _MixedHeadAttentionArgs,
 )
 
 
@@ -75,6 +76,11 @@ _SEQUENCE_MIXER_CONFIG_CLASSES = {
     "softmax_attention": _SoftmaxAttentionArgs,
     "gated_deltanet": _GatedDeltaNetArgs,
     "energy_attention": _EnergyAttentionArgs,
+    "projected_softmax": _SoftmaxAttentionArgs,
+    "vk_residual": _EnergyAttentionArgs,
+    "mixed_head_attention": _MixedHeadAttentionArgs,
+    "energy_grad_mixed_head_attention": _MixedHeadAttentionArgs,
+    "mixed_head_energy_descent": _MixedHeadAttentionArgs,
 }
 
 _MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs}
@@ -120,8 +126,11 @@ class CommonConfig(PretrainedConfig):
         energy_proj_type: str = "unconstrained",
         energy_stop_grad_key: bool = False,
         energy_attn_add_wv_wo: bool = False,
+        energy_apply_ln_jacobian: bool = False,
         scale_ff_init: float | list[float] | None = None,
         energy_descent_loss_coef: float = 0.0,
+        energy_nce_loss_coef: float = 0.0,
+        energy_nce_margin: float = 1.0,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -157,8 +166,11 @@ class CommonConfig(PretrainedConfig):
         self.energy_proj_type = energy_proj_type
         self.energy_stop_grad_key = energy_stop_grad_key
         self.energy_attn_add_wv_wo = energy_attn_add_wv_wo
+        self.energy_apply_ln_jacobian = energy_apply_ln_jacobian
         self.scale_ff_init = scale_ff_init
         self.energy_descent_loss_coef = energy_descent_loss_coef
+        self.energy_nce_loss_coef = energy_nce_loss_coef
+        self.energy_nce_margin = energy_nce_margin
 
         if layer_iterations is not None:
             self.layer_iterations = layer_iterations
@@ -266,6 +278,7 @@ class CommonConfig(PretrainedConfig):
                     "intermediate_size", 2 * self.hidden_size
                 )
 
+            sequence_mixer_block["sequence_mixer_type"] = sequence_mixer_type
             sequence_mixer_blocks.append(_SEQUENCE_MIXER_CONFIG_CLASSES[sequence_mixer_type](**sequence_mixer_block))
 
         self.sequence_mixer_blocks = sequence_mixer_blocks

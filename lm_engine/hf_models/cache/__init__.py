@@ -17,11 +17,16 @@ from .rnn import _RNNCache
 _CACHE_CLASSES = {
     "causal_convolution": _RNNCache,
     "energy_attention": _SoftmaxAttentionCache,
+    "vk_residual": _SoftmaxAttentionCache,
     "gru": _RNNCache,
     "mamba2": _Mamba2Cache,
     "multihead_latent_attention": _SoftmaxAttentionCache,
     "rnn": _RNNCache,
     "softmax_attention": _SoftmaxAttentionCache,
+    "projected_softmax": _SoftmaxAttentionCache,
+    "mixed_head_attention": _SoftmaxAttentionCache,
+    "energy_grad_mixed_head_attention": _SoftmaxAttentionCache,
+    "mixed_head_energy_descent": _SoftmaxAttentionCache,
 }
 
 CACHE_TYPE = torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None

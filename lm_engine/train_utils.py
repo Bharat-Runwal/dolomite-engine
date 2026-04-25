@@ -241,7 +241,7 @@ def get_model_tflops(
             )
         elif sequence_mixer_type == "gated_deltanet":
             return 0
-        elif sequence_mixer_type == "energy_attention":
+        elif sequence_mixer_type in ("energy_attention", "vk_residual", "mixed_head_attention", "energy_grad_mixed_head_attention", "mixed_head_energy_descent", "projected_softmax"):
             return 0 # TODO add flops calculation for energy attention
         else:
             raise NotImplementedError(f"unexpected sequence_mixer_type ({sequence_mixer_type})")

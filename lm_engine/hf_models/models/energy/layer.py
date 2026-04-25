@@ -91,6 +91,40 @@ class LowRankAntisymmetricProjection(nn.Module):
         return torch.matmul(self.U, self.V.T) - torch.matmul(self.V, self.U.T)
 
 
+class SymmetricPlusRotationProjection(nn.Module):
+    """PSD symmetric + low-rank antisymmetric: Pi = A A^T + (U V^T - V U^T).
+
+    The PSD part (A A^T) guarantees descent: g^T A A^T g = ||A^T g||^2 >= 0.
+    The antisymmetric part (U V^T - V U^T) adds low-rank rotation.
+    Update: h := h - Pi @ grad_E  (descent + rotation).
+
+    Parameter count: d * (r_sym + 2 * r_rot) instead of d^2.
+    """
+
+    def __init__(self, hidden_size: int, rot_rank: int = 32, sym_rank: int = 32):
+        super().__init__()
+        self.rot_rank = rot_rank
+        self.sym_rank = sym_rank
+        # Rotation: J = U V^T - V U^T
+        self.U = nn.Parameter(torch.randn(hidden_size, rot_rank) * 0.01)
+        self.V = nn.Parameter(torch.randn(hidden_size, rot_rank) * 0.01)
+        # Symmetric PSD: S = A A^T
+        self.A = nn.Parameter(torch.randn(hidden_size, sym_rank) * 0.01)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # J = U V^T - V U^T (antisymmetric)
+        Jx = torch.matmul(torch.matmul(x, self.V), self.U.T) - torch.matmul(torch.matmul(x, self.U), self.V.T)
+        # S = A A^T (PSD symmetric)
+        Sx = torch.matmul(torch.matmul(x, self.A), self.A.T)
+        return Sx + Jx
+
+    def get_J(self) -> torch.Tensor:
+        return torch.matmul(self.U, self.V.T) - torch.matmul(self.V, self.U.T)
+
+    def get_S(self) -> torch.Tensor:
+        return torch.matmul(self.A, self.A.T)
+
+
 class LowRankPortHamiltonianProjection(nn.Module):
     """V5: Low-rank rotation + low-rank dissipation.
 
@@ -146,7 +180,12 @@ class EnergyBlock(nn.Module):
         hidden_size = config.hidden_size
 
         self.sequence_mixer_type = config.sequence_mixer_blocks[layer_idx].sequence_mixer_type
-        if self.sequence_mixer_type=="energy_attention":
+        self.apply_ln_jacobian = getattr(config, 'energy_apply_ln_jacobian', False)
+
+        # Energy-style blocks: energy_attention, mixed_head (with Pi), mixed_head_energy_descent (identity Pi)
+        _energy_style_types = ("energy_attention", "mixed_head_attention", "mixed_head_energy_descent")
+
+        if self.sequence_mixer_type in _energy_style_types:
             # Use energy-specific norm if configured, otherwise fall back to global
             norm_type = getattr(config, 'energy_norm_type', None) or config.normalization_function
             self.ln = get_normalization_function(
@@ -194,6 +233,13 @@ class EnergyBlock(nn.Module):
                 rank = getattr(config, 'energy_proj_rank', 32)
                 dissipation_rank = getattr(config, 'energy_dissipation_rank', 16)
                 self.proj = LowRankPortHamiltonianProjection(hidden_size, rank=rank, dissipation_rank=dissipation_rank)
+            elif proj_type == "sym_plus_rotation":
+                # PSD symmetric (descent) + low-rank antisymmetric (rotation)
+                # Pi = A A^T + (U V^T - V U^T)
+                # Guarantees cos theta <= 0 (descent), with rotation on top
+                rot_rank = getattr(config, 'energy_proj_rank', 32)
+                sym_rank = getattr(config, 'energy_sym_rank', 32)
+                self.proj = SymmetricPlusRotationProjection(hidden_size, rot_rank=rot_rank, sym_rank=sym_rank)
             elif proj_type == "dual_unconstrained":
                 # Dual projection: separate unconstrained matrices for attn and MLP
                 # h := h - proj_attn(attn_out) - proj_mlp(ffwd_out)
@@ -203,11 +249,74 @@ class EnergyBlock(nn.Module):
                 self.proj_mlp = nn.Linear(hidden_size, hidden_size, bias=False)
                 self.proj = None  # not used; forward handles separately
                 self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            elif proj_type == "mlp_only":
+                # MLP-only projection: rotate only the MLP gradient, pass attn through
+                # h := h - attn_out - proj_mlp(ffwd_out)
+                # Motivation: Helmholtz analysis shows proj_attn barely contributes
+                # (low norm, ill-conditioned) while proj_mlp dominates the update.
+                # Saves hidden^2 params per energy block.
+                self.proj_mlp = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.proj = None
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
             else:
                 raise ValueError(f"Unknown energy_proj_type: {proj_type}")
 
             # Store proj_type for reference
             self.proj_type = proj_type
+
+        elif self.sequence_mixer_type == "projected_softmax":
+            # Standard softmax attention + standard MLP, but with the energy-style
+            # projected update: h = h - Π(attn(LN(h)) + s_ff * mlp(LN(h)))
+            # Tests whether the energy formulation matters or just Π matters.
+            hidden_size = config.hidden_size
+
+            self.ln = get_normalization_function(
+                config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
+            )
+            # Standard softmax attention (has W_V, W_O unlike energy attention)
+            self.attn = get_sequence_mixer(config, True, use_padding_free_transformer, layer_idx)
+            # Standard MLP (SwiGLU, not energy MLP)
+            self.ffwd = get_mlp_block(
+                config, use_padding_free_transformer=use_padding_free_transformer, layer_idx=layer_idx
+            )
+
+            self.scale_ff = nn.Parameter(torch.ones(1) * 1.0, requires_grad=True)
+
+            proj_type = getattr(config, 'energy_proj_type', 'unconstrained')
+            if proj_type == "unconstrained":
+                self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+            elif proj_type == "dual_unconstrained":
+                self.proj_attn = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.proj_mlp = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.proj = None
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            elif proj_type == "mlp_only":
+                self.proj_mlp = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.proj = None
+                self.scale_ff = nn.Parameter(torch.ones(1), requires_grad=False)
+            else:
+                self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.proj_type = proj_type
+
+        elif self.sequence_mixer_type in ("vk_residual", "energy_grad_mixed_head_attention"):
+            # V=K (energy) attention but with STANDARD two-LN residual update (no Pi).
+            # h = h + attn_vk(LN1(h)); h = h + mlp(LN2(h))
+            # Isolates V=K attention from the projected update structure.
+            # If this shows distributed refinement, V=K alone is sufficient.
+            # If not, V=K + Pi together are needed.
+            hidden_size = config.hidden_size
+            self.m_residual = config.m_residual
+            self.ln_1 = get_normalization_function(
+                config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
+            )
+            self.sequence_mixer = get_sequence_mixer(config, True, use_padding_free_transformer, layer_idx)
+            self.ln_2 = get_normalization_function(
+                config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
+            )
+            self.mlp_block = get_mlp_block(
+                config, use_padding_free_transformer=use_padding_free_transformer, layer_idx=layer_idx
+            )
+
         else:
 
             hidden_size = config.hidden_size
@@ -235,7 +344,7 @@ class EnergyBlock(nn.Module):
         layer_id: int | None = None, #TODO: Handle KV Caching for Energy Models
     ) -> torch.Tensor:
 
-        if self.sequence_mixer_type=="energy_attention":
+        if self.sequence_mixer_type in ("energy_attention", "mixed_head_attention", "mixed_head_energy_descent"):
 
             ln_x = self.ln(hidden_states)
             attn_out = self.attn(
@@ -249,9 +358,18 @@ class EnergyBlock(nn.Module):
             )
             ffwd_out = self.ffwd(ln_x)
 
+            # Apply RMSNorm Jacobian correction: map gradient from LN-space to h-space
+            # g_h = J_RMS^T * g_ln, giving the exact dE/dh for energy descent in input space
+            if self.apply_ln_jacobian:
+                attn_out = self._apply_rmsnorm_jt(hidden_states, attn_out)
+                ffwd_out = self._apply_rmsnorm_jt(hidden_states, ffwd_out)
+
             # Dual projection: separate matrices for attn and MLP (scale_ff frozen at 1.0)
             if self.proj_type == "dual_unconstrained":
                 hidden_states = hidden_states - self.proj_attn(attn_out) - self.proj_mlp(ffwd_out)
+            # MLP-only projection: pass attn through, rotate only MLP
+            elif self.proj_type == "mlp_only":
+                hidden_states = hidden_states - attn_out - self.proj_mlp(ffwd_out)
             # Rotation projections (antisymmetric, etc.): h := h + proj(grad_E)
             elif self.proj_type in ["antisymmetric", "port_hamiltonian", "low_rank_antisymmetric", "low_rank_port_hamiltonian"]:
                 grad_E = attn_out + self.scale_ff * ffwd_out
@@ -261,6 +379,31 @@ class EnergyBlock(nn.Module):
                 grad_E = attn_out + self.scale_ff * ffwd_out
                 hidden_states = hidden_states - self.proj(grad_E)
             return hidden_states
+
+        elif self.sequence_mixer_type == "projected_softmax":
+            # Standard softmax attn + standard MLP, but with projected update
+            # h = h - Π(attn(LN(h)) + s_ff * mlp(LN(h)))
+            ln_x = self.ln(hidden_states)
+            attn_out = self.attn(
+                ln_x,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                rope_cos_sin=rope_cos_sin,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                layer_id=layer_id,
+            )
+            ffwd_out = self.ffwd(ln_x)
+
+            if self.proj_type == "dual_unconstrained":
+                hidden_states = hidden_states - self.proj_attn(attn_out) - self.proj_mlp(ffwd_out)
+            elif self.proj_type == "mlp_only":
+                hidden_states = hidden_states - attn_out - self.proj_mlp(ffwd_out)
+            else:
+                combined = attn_out + self.scale_ff * ffwd_out
+                hidden_states = hidden_states - self.proj(combined)
+            return hidden_states
+
         else:
             return self.forward_gpt(hidden_states,past_key_values,attention_mask,rope_cos_sin,cu_seqlens,max_seqlen,layer_id=layer_id)
 
@@ -270,19 +413,61 @@ class EnergyBlock(nn.Module):
         ln_x = self.ln(x)
         return self.attn.energy_per_token(ln_x, rope_cos_sin=rope_cos_sin) + self.scale_ff * self.ffwd.energy_per_token(ln_x)
 
-    def forward_gradient(self, x: torch.Tensor, rope_cos_sin=None) -> torch.Tensor:
+    def forward_gradient(self, x: torch.Tensor, rope_cos_sin=None, apply_ln_jacobian: bool = False) -> torch.Tensor:
         """Return the pre-projection gradient: attn(ln_x) + scale_ff * ffwd(ln_x).
 
         This is exactly what the forward pass computes and treats as the gradient,
-        using the causal partial gradient (query-role only) — no autograd key-role bias.
-        Use this instead of autograd(energy_per_token) for causal-correct Helmholtz analysis.
+        using the causal partial gradient (query-role only) -- no autograd key-role bias.
+
+        Args:
+            apply_ln_jacobian: If True, multiply by J_RMSNorm^T to get dE/dh
+                (gradient in pre-norm h-space) instead of dE/d(LN(h)).
+                For RMSNorm: J = (gamma/rms) * (I - h*h^T / (d*rms^2)), symmetric so J^T = J.
         """
         with torch.no_grad():
             ln_x = self.ln(x)
             attn_out = self.attn(ln_x, past_key_values=None, attention_mask=None,
                                  rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None)
             ffwd_out = self.ffwd(ln_x)
-        return attn_out + self.scale_ff * ffwd_out
+            g = attn_out + self.scale_ff * ffwd_out
+
+            if apply_ln_jacobian:
+                g = self._apply_rmsnorm_jt(x, g)
+
+        return g
+
+    def _apply_rmsnorm_jt(self, h: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+        """Compute J_RMSNorm^T @ g to map gradient from LN-space to h-space.
+
+        RMSNorm(h) = gamma * h / rms(h),  rms(h) = sqrt(mean(h^2) + eps)
+        J = (gamma / rms) * (I - h h^T / (d * rms^2))    [symmetric]
+        J^T g = (gamma / rms) * (g - h * (h . g) / (d * rms^2))
+        """
+        gamma = self.ln.weight if hasattr(self.ln, 'weight') else torch.ones(h.shape[-1], device=h.device, dtype=h.dtype)
+        eps = getattr(self.ln, 'eps', 1e-5)
+        d = h.shape[-1]
+
+        h_f = h.float()
+        g_f = g.float()
+        rms = torch.sqrt(h_f.pow(2).mean(dim=-1, keepdim=True) + eps)
+        h_dot_g = (h_f * g_f).sum(dim=-1, keepdim=True)
+
+        result = (gamma.float() / rms) * (g_f - h_f * h_dot_g / (d * rms.pow(2)))
+        return result.to(g.dtype)
+
+    def forward_gradient_separate(self, x: torch.Tensor, rope_cos_sin=None):
+        """Return attn and MLP gradients separately (for dual projection Helmholtz analysis).
+
+        Returns:
+            attn_out: attention gradient (query-role partial)
+            ffwd_out: MLP gradient (exact)
+        """
+        with torch.no_grad():
+            ln_x = self.ln(x)
+            attn_out = self.attn(ln_x, past_key_values=None, attention_mask=None,
+                                 rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None)
+            ffwd_out = self.ffwd(ln_x)
+        return attn_out, ffwd_out
 
     def get_projection_diagnostics(self, grad_E: torch.Tensor) -> dict:
         """Compute geometry diagnostics for the projection.
@@ -377,7 +562,7 @@ class EnergyBlock(nn.Module):
         max_seqlen: int | None = None,
         layer_id: int | None = None,
     ) -> torch.Tensor:
-        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention"]:
+        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention", "vk_residual", "energy_grad_mixed_head_attention"]:
             hidden_states = self.sequence_mixer(
                 hidden_states,
                 past_key_values=past_key_values,
