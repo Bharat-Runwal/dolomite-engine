@@ -12,8 +12,8 @@ bsub \
     -n 1 \
     -M 32G \
     -W 00:30 \
-    -o "${HOME}/perlayer_alpha_%J.stdout" \
-    -e "${HOME}/perlayer_alpha_%J.stderr" \
+    -o "${HOME}/bsub_logs/perlayer_alpha_%J.stdout" \
+    -e "${HOME}/bsub_logs/perlayer_alpha_%J.stderr" \
     <<EOF
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate

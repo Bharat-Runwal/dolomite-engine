@@ -17,8 +17,8 @@ bsub \
     -n 1 \
     -M 32G \
     -W 01:00 \
-    -o "${HOME}/${JOB_NAME}_merge_%J.stdout" \
-    -e "${HOME}/${JOB_NAME}_merge_%J.stderr" \
+    -o "${HOME}/bsub_logs/bsub_logs/${JOB_NAME}_merge_%J.stdout" \
+    -e "${HOME}/bsub_logs/bsub_logs/${JOB_NAME}_merge_%J.stderr" \
     <<BSUB_SCRIPT
 #!/bin/bash
 set -euo pipefail
@@ -41,8 +41,8 @@ bsub \
     -n 1 \
     -M 64G \
     -W 02:00 \
-    -o "${HOME}/${JOB_NAME}_%J.stdout" \
-    -e "${HOME}/${JOB_NAME}_%J.stderr" \
+    -o "${HOME}/bsub_logs/bsub_logs/${JOB_NAME}_%J.stdout" \
+    -e "${HOME}/bsub_logs/bsub_logs/${JOB_NAME}_%J.stderr" \
     <<INNER
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate

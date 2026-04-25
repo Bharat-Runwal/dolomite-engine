@@ -13,8 +13,8 @@ bsub \
     -n 1 \
     -M 48G \
     -W 01:00 \
-    -o "${HOME}/struct_proj_no_warmstart_%J.stdout" \
-    -e "${HOME}/struct_proj_no_warmstart_%J.stderr" \
+    -o "${HOME}/bsub_logs/struct_proj_no_warmstart_%J.stdout" \
+    -e "${HOME}/bsub_logs/struct_proj_no_warmstart_%J.stderr" \
     <<EOF
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate

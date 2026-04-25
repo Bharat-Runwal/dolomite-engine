@@ -12,8 +12,8 @@ bsub \
     -n 1 \
     -M 48G \
     -W 02:00 \
-    -o "${HOME}/struct_mab_only_%J.stdout" \
-    -e "${HOME}/struct_mab_only_%J.stderr" \
+    -o "${HOME}/bsub_logs/struct_mab_only_%J.stdout" \
+    -e "${HOME}/bsub_logs/struct_mab_only_%J.stderr" \
     <<EOF
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate

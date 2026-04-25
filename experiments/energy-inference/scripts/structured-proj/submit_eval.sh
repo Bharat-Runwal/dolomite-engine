@@ -27,8 +27,8 @@ bsub \
     -n 1 \
     -M 48G \
     -W 02:00 \
-    -o "${HOME}/${JOB_NAME}_%J.stdout" \
-    -e "${HOME}/${JOB_NAME}_%J.stderr" \
+    -o "${HOME}/bsub_logs/${JOB_NAME}_%J.stdout" \
+    -e "${HOME}/bsub_logs/${JOB_NAME}_%J.stderr" \
     <<EOF
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate

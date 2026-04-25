@@ -14,8 +14,8 @@ bsub \
     -n 1 \
     -M 48G \
     -W 00:20 \
-    -o "${HOME}/sanity_frozen_%J.stdout" \
-    -e "${HOME}/sanity_frozen_%J.stderr" \
+    -o "${HOME}/bsub_logs/sanity_frozen_%J.stdout" \
+    -e "${HOME}/bsub_logs/sanity_frozen_%J.stderr" \
     <<EOF
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
@@ -41,8 +41,8 @@ bsub \
     -n 1 \
     -M 48G \
     -W 00:30 \
-    -o "${HOME}/sanity_train_%J.stdout" \
-    -e "${HOME}/sanity_train_%J.stderr" \
+    -o "${HOME}/bsub_logs/sanity_train_%J.stdout" \
+    -e "${HOME}/bsub_logs/sanity_train_%J.stderr" \
     <<EOF
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate

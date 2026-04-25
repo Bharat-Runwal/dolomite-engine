@@ -13,8 +13,8 @@ bsub \
     -n 1 \
     -M 64G \
     -W 03:00 \
-    -o "${HOME}/struct_proj_two_lr_%J.stdout" \
-    -e "${HOME}/struct_proj_two_lr_%J.stderr" \
+    -o "${HOME}/bsub_logs/struct_proj_two_lr_%J.stdout" \
+    -e "${HOME}/bsub_logs/struct_proj_two_lr_%J.stderr" \
     <<'BSUB_SCRIPT'
 #!/bin/bash
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
