@@ -194,7 +194,10 @@ class CausalLMModelMixin(PreTrainedModelMixin):
         if stopping_criteria_list is not None:
             stopping_criteria_list = StoppingCriteriaList(stopping_criteria_list)
 
-        assert len(kwargs) == 0
+        # Pop and ignore repetition_penalty for HF compatibility
+        kwargs.pop("repetition_penalty", None)
+
+        assert len(kwargs) == 0, f"unexpected kwargs: {kwargs}"
 
         # prefill
         output = self(input_ids=input_ids, attention_mask=attention_mask)

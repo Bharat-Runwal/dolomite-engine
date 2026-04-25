@@ -143,6 +143,11 @@ class BaseModelMixin(PreTrainedModelMixin):
         # Only applies to blocks with energy_attention. Set 0.0 (default) to disable.
         self.energy_descent_loss_coef = getattr(config, 'energy_descent_loss_coef', 0.0)
 
+        # Energy NCE loss: trains energy to discriminate correct vs corrupted tokens.
+        # E(h_correct) < E(h_corrupted) with margin. Makes energy a useful verifier.
+        self.energy_nce_loss_coef = getattr(config, 'energy_nce_loss_coef', 0.0)
+        self.energy_nce_margin = getattr(config, 'energy_nce_margin', 1.0)
+
 
 
     def _init_model(self, config: CommonConfig, **kwargs) -> None:
@@ -236,6 +241,14 @@ class BaseModelMixin(PreTrainedModelMixin):
         else:
             mamba_mask_computed = False
             energy_descent_loss = torch.tensor(0.0, device=hidden_states.device)
+            energy_nce_loss = torch.tensor(0.0, device=hidden_states.device)
+
+            # NCE: create corrupted hidden states by rolling embeddings
+            # (each position gets the next position's embedding = wrong token)
+            if self.training and self.energy_nce_loss_coef > 0:
+                corrupted_hidden = torch.roll(hidden_states.detach(), shifts=1, dims=1).clone()
+            else:
+                corrupted_hidden = None
 
             layer_id = 0
             for i, num_iter in enumerate(self.layer_iterations):
@@ -253,12 +266,13 @@ class BaseModelMixin(PreTrainedModelMixin):
                 else:
                     effective_iter = num_iter
 
-                # Energy descent aux loss: track per-iteration energy for energy blocks
+                # Energy block detection
                 block = self.h[i]
+                has_energy_block = (hasattr(block, 'energy_per_token') and
+                                    getattr(block, 'sequence_mixer_type', '') == 'energy_attention')
                 has_energy = (self.training and
                               self.energy_descent_loss_coef > 0 and
-                              hasattr(block, 'energy_per_token') and
-                              getattr(block, 'sequence_mixer_type', '') == 'energy_attention')
+                              has_energy_block)
                 prev_energy = None
 
                 for j in range(effective_iter):
@@ -299,6 +313,37 @@ class BaseModelMixin(PreTrainedModelMixin):
                         noise_scale = (2 * self.iter_noise_eta) ** 0.5
                         hidden_states = hidden_states + noise_scale * torch.randn_like(hidden_states)
 
+                # Energy NCE loss: E(correct) < E(corrupted) with margin
+                if corrupted_hidden is not None and has_energy_block:
+                    # Run corrupted hidden states through this block (detached, no grad on corruption path)
+                    with torch.no_grad():
+                        h_corrupt = corrupted_hidden
+                        corrupt_layer_id = layer_id - effective_iter  # reset to block start
+                        for j in range(effective_iter):
+                            h_corrupt = block(
+                                h_corrupt, past_key_values=None, attention_mask=None,
+                                rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None,
+                                layer_id=corrupt_layer_id + j)
+                        corrupted_hidden = h_corrupt  # propagate for next block
+
+                    # Compute energies -- correct path needs grad for the loss
+                    e_correct = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin)
+                    with torch.no_grad():
+                        e_corrupt = block.energy_per_token(h_corrupt, rope_cos_sin=rope_cos_sin)
+
+                    # Contrastive: E(correct) should be lower than E(corrupt) by margin
+                    nce = torch.clamp(e_correct - e_corrupt + self.energy_nce_margin, min=0.0).mean()
+                    energy_nce_loss = energy_nce_loss + nce
+                elif corrupted_hidden is not None:
+                    # Non-energy block: propagate corrupted hidden states through
+                    with torch.no_grad():
+                        corrupt_layer_id = layer_id - effective_iter
+                        for j in range(effective_iter):
+                            corrupted_hidden = block(
+                                corrupted_hidden, past_key_values=None, attention_mask=None,
+                                rope_cos_sin=rope_cos_sin, cu_seqlens=None, max_seqlen=None,
+                                layer_id=corrupt_layer_id + j)
+
                 # Account for skipped iterations in layer_id (for cache alignment)
                 if effective_iter < num_iter:
                     layer_id += (num_iter - effective_iter)
@@ -326,10 +371,18 @@ class BaseModelMixin(PreTrainedModelMixin):
             # Scale energy descent loss by coefficient
             edl = energy_descent_loss * self.energy_descent_loss_coef if self.energy_descent_loss_coef > 0 else None
 
+            # Scale NCE loss by coefficient
+            nce = energy_nce_loss * self.energy_nce_loss_coef if self.energy_nce_loss_coef > 0 else None
+
+            # Combine auxiliary losses
+            aux_energy_loss = None
+            if edl is not None or nce is not None:
+                aux_energy_loss = (edl if edl is not None else 0.0) + (nce if nce is not None else 0.0)
+
             return BaseModelOutputWithPast(
                 last_hidden_state=hidden_states,
                 past_key_values=past_key_values,
-                energy_descent_loss=edl,
+                energy_descent_loss=aux_energy_loss,
             )
 
 

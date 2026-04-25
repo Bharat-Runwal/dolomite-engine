@@ -80,6 +80,18 @@ def load_texts(dataset_name, num_samples):
     elif dataset_name == "arc":
         dataset = load_dataset("allenai/ai2_arc", "ARC-Easy", split="validation")
         return [row["question"] + " " + row["choices"]["text"][0] for row in dataset][:num_samples]
+    elif dataset_name == "gsm8k":
+        dataset = load_dataset("openai/gsm8k", "main", split="test")
+        # Format as 5-shot CoT prompts (similar to eval)
+        exemplars = list(dataset)[:5]
+        test_examples = list(dataset)[5:5+num_samples]
+        prompt_prefix = ""
+        for ex in exemplars:
+            prompt_prefix += f"Question: {ex['question']}\nAnswer: {ex['answer']}\n\n"
+        texts = []
+        for ex in test_examples:
+            texts.append(prompt_prefix + f"Question: {ex['question']}\nAnswer: {ex['answer']}")
+        return texts
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -91,14 +103,14 @@ def main():
         default="/proj/checkpoints/bharat/personal/energy_gpt/model_unshard_FINAL_30k/compositional_12EGPT_6iter_gelu_30k_AGAIN")
     parser.add_argument("--output_dir", default="workshop_results/energy_landscape")
     parser.add_argument("--num_samples", type=int, default=50)
-    parser.add_argument("--dataset", default="wikitext", choices=["wikitext", "hellaswag", "lambada", "arc"])
+    parser.add_argument("--dataset", default="wikitext", choices=["wikitext", "hellaswag", "lambada", "arc", "gsm8k"])
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     model_name = args.model_path.rstrip("/").split("/")[-1]
 
     print(f"Loading model from {args.model_path}")
-    tokenizer = AutoTokenizer.from_pretrained('/proj/checkpoints/dmf-lh-checkpoints/granite-4.0-tiktoken')
+    tokenizer = AutoTokenizer.from_pretrained('/proj/checkpoints/dmf-lh-checkpoints/tokenizers/granite-4.0-tiktoken')
     model = AutoModelForCausalLM.from_pretrained(args.model_path, dtype=torch.bfloat16)
     model.config.use_cache = False
     model.eval()
@@ -349,19 +361,24 @@ def main():
 
     # Panel D: Hidden state norm trajectory
     ax = axes[1, 1]
-    norm_matrix = np.full((num_blocks, max_iter + 1), np.nan)
+    max_block_norm = max((k[0] for k in all_hidden_norms.keys()), default=0) + 1
+    max_iter_norm = max((k[1] for k in all_hidden_norms.keys()), default=0)
+    norm_num_blocks = max(num_blocks, max_block_norm)
+    norm_max_iter = max(max_iter, max_iter_norm)
+    norm_matrix = np.full((norm_num_blocks, norm_max_iter + 1), np.nan)
     for (b, i), vals in all_hidden_norms.items():
         norm_matrix[b, i] = np.mean(vals)
 
-    for block_idx in range(num_blocks):
+    cmap_norm = plt.cm.tab20(np.linspace(0, 1, norm_num_blocks))
+    for block_idx in range(norm_num_blocks):
         iters_x = []
         norms_y = []
-        for iter_idx in range(max_iter + 1):
+        for iter_idx in range(norm_max_iter + 1):
             if not np.isnan(norm_matrix[block_idx, iter_idx]):
                 iters_x.append(iter_idx)
                 norms_y.append(norm_matrix[block_idx, iter_idx])
         if iters_x:
-            ax.plot(iters_x, norms_y, 'o-', label=f'B{block_idx}', color=cmap[block_idx],
+            ax.plot(iters_x, norms_y, 'o-', label=f'B{block_idx}', color=cmap_norm[block_idx],
                     linewidth=1.5, markersize=4)
     ax.set_xlabel('Iteration')
     ax.set_ylabel('Mean Hidden State Norm')
