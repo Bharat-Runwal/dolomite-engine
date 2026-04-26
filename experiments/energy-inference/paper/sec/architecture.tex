@@ -130,11 +130,15 @@ the whole block output as a descent direction.
   \centering
   \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_cosreg_benchmarks.pdf}
   \caption{Cosine-similarity regulariser performance (176M, 30k steps).
-  Light cosreg ($\lambda{=}0.01$, V39 act / V48 wt) is essentially free; the
+  Light cosreg ($\lambda{=}0.01$, V39 act / V48 wt) is roughly free; the
   stronger variants V52 ($\lambda{=}0.1$) and V53 (cosine ramp $0{\to}1.0$)
-  cost $\approx$0.7--1.0 accuracy points on average — V53 wins ARC-C and
-  ARC-E, V52 wins PIQA. Full layer-alignment heatmaps and consecutive-pair
-  cosim plots for this sweep (cluster job 20260426) are pending.}
+  cost $\approx$0.8--1.1 accuracy points on average vs V1 EGPT.
+  V52 takes the best ARC-C (25.3) and PIQA (63.7), V53 leads on ARC-E among
+  EGPT variants. V48 (weight-cosreg) loses the most ($-$1.6 vs V1).
+  Avg uses the canonical 10-task set (\texttt{acc\_norm} where applicable);
+  per-task numbers also use \texttt{acc\_norm} so they match the headline tables.
+  Full layer-alignment heatmaps and consecutive-pair cosim plots for this sweep
+  (cluster job 20260426) are pending.}
   \label{fig:bar_cosreg_benchmarks}
 \end{figure}
 

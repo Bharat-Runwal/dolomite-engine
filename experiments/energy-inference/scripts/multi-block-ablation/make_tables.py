@@ -511,16 +511,17 @@ TABLES = [
         ],
         "sort_by_avg": True,
     },
-    # ---- cosreg benchmarks (small subset, no loss column — generator can't get loss) ----
+    # ---- cosreg benchmarks: use the canonical 10-task avg + TASK_DISPLAY default
+    # metrics (acc_norm where applicable) so V0/V1 numbers match the headline tables.
     {
         "name": "cosreg_benchmarks",
-        "columns": [COL_LABEL, COL_AVG7,
-                    col_task("arc_challenge", header="ARC-c", metric="acc,none"),
-                    col_task("arc_easy",      header="ARC-e", metric="acc,none"),
+        "columns": [COL_LABEL, COL_AVG10,
+                    col_task("arc_challenge"),
+                    col_task("arc_easy"),
                     col_task("boolq"),
-                    col_task("hellaswag",     metric="acc,none"),
+                    col_task("hellaswag"),
                     col_task("mmlu"),
-                    col_task("piqa",          metric="acc,none"),
+                    col_task("piqa"),
                     col_task("winogrande")],
         "rows": [
             "V0", "V1", "V39", "V48", "V52", "V53",

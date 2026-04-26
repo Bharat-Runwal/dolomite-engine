@@ -107,15 +107,19 @@ The regulariser \emph{did} increase attn sub-output similarity slightly (AttnAvg
 0.339 vs V1 0.296), but the effect on overall block-output similarity was negligible.
 
 \textbf{Summary.}
-At 176M scale, $\lambda{=}0.01$ act- and weight-cosreg impose $<$0.02 loss
-degradation and $<$0.01 accuracy degradation; stronger regularisation
-(V52 $\lambda{=}0.1$ and V53 cosine ramp $0{\to}1.0$) costs $\approx$0.7--1.0
-accuracy points (Table~\ref{tab:cosreg_benchmarks},
-Fig.~\ref{fig:bar_cosreg_benchmarks}). V53 is best on ARC-C and ARC-E; V52 is
-best on PIQA. Alignment-vs-accuracy: light cosreg is free, and stronger cosreg
-trades a small accuracy hit for what we expect to be measurably higher
-inter-layer alignment (full heatmaps pending cluster run 20260426).
-V40/V50 400M results are pending completion.
+At 176M scale, V39 act-cosreg ($\lambda{=}0.01$) imposes essentially no
+penalty (10-task avg 46.3\% vs V1 46.5\% and V0 46.7\%); the weight-cosreg
+V48 loses 1.6 points (44.9\%). Stronger activation cosreg costs more:
+V52 ($\lambda{=}0.1$) drops to 45.7\% ($-$0.8 vs V1) and V53 (cosine ramp
+$0{\to}1.0$) to 45.4\% ($-$1.1) — see Table~\ref{tab:cosreg_benchmarks} and
+Fig.~\ref{fig:bar_cosreg_benchmarks}. Per-task: V52 wins ARC-C (25.3) and
+PIQA (63.7); among EGPT variants V53 is best on ARC-E (45.4). All numbers
+use \texttt{acc\_norm} where defined by harness convention, matching the
+headline tables.
+Alignment-vs-accuracy: light cosreg is free; stronger cosreg trades a small
+accuracy hit for what we expect to be measurably higher inter-layer alignment
+(full heatmaps pending cluster run 20260426). V40/V50 400M results are
+pending completion.
 
 \begin{table}[h]
 \centering
