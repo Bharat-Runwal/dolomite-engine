@@ -2,10 +2,16 @@
 Plot cosreg performance comparison: loss + benchmarks for V0/V1/V39/V48 (176M) and V9/V1-400M/V40/V50 (400M).
 """
 import json
+import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
+
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY  # canonical metrics
 
 PLOTS_DIR = Path(__file__).parent.parent.parent / "results/multi-block-ablation/plots"
 PLOTS_DIR.mkdir(exist_ok=True)
@@ -13,16 +19,17 @@ PLOTS_DIR.mkdir(exist_ok=True)
 BASE = Path(__file__).parent.parent.parent / "results/multi-block-ablation"
 
 def load_metrics(json_path):
+    """Load harness results and extract per-task accuracy using canonical metrics."""
     if not json_path.exists():
         return {}
     with open(json_path) as f:
         d = json.load(f)
     results = d.get("results", {})
     out = {}
-    for k in ["arc_challenge", "arc_easy", "boolq", "copa", "hellaswag", "mmlu", "winogrande", "piqa"]:
-        if k in results:
-            v = results[k]
-            out[k] = v.get("acc,none") or v.get("acc_norm,none") or v.get("exact_match,none") or 0.0
+    for task, metric in AVG_TASKS_10:
+        v = results.get(task)
+        if v is not None and metric in v:
+            out[task] = v[metric]
     return out
 
 # ---------- data ----------
@@ -90,11 +97,14 @@ models_400m = [
     },
 ]
 
-BENCH_TASKS = ["arc_challenge", "arc_easy", "boolq", "copa", "hellaswag", "piqa", "winogrande"]
+BENCH_TASKS = [t for t, _ in AVG_TASKS_10]
 
 def avg_bench(m):
+    """Mean over the canonical 10-task set; require all tasks present."""
     vals = [m[k] for k in BENCH_TASKS if k in m]
-    return sum(vals) / len(vals) if vals else None
+    if len(vals) != len(BENCH_TASKS):
+        return None
+    return sum(vals) / len(vals)
 
 # ---------- figure ----------
 fig, axes = plt.subplots(1, 3, figsize=(13, 4.5))

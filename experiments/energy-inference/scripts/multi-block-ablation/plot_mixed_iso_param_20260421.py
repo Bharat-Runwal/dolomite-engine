@@ -9,10 +9,16 @@ FLOPs/token (forward pass, s=4096, s-dependent attention included):
 """
 
 import json
+import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
+
+_sys_dir = str(Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY
 
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
@@ -32,16 +38,8 @@ PARAMS = {"V0 GPT\n162M": 162, "V1 EGPT\n12×1 143M": 143, "V10 Mixed\n12×1 144
 FLOPS  = {"V0 GPT\n162M": 321, "V1 EGPT\n12×1 143M": 359, "V10 Mixed\n12×1 144M": 285,
           "V2 EGPT\n6×2 110M": 359, "V11 Mixed\n6×2 118M": 314, "V12 GPT\n6×2 120M": 321}
 
-TASK_KEYS = {
-    "arc_challenge": "acc_norm,none", "arc_easy": "acc,none", "boolq": "acc,none",
-    "copa": "acc,none", "hellaswag": "acc_norm,none", "openbookqa": "acc_norm,none",
-    "piqa": "acc_norm,none", "sciq": "acc,none", "winogrande": "acc,none", "mmlu": "acc,none",
-}
-TASK_LABELS = {
-    "arc_challenge": "ARC-C", "arc_easy": "ARC-E", "boolq": "BoolQ", "copa": "COPA",
-    "hellaswag": "HellaSwag", "openbookqa": "ObQA", "piqa": "PIQA", "sciq": "SciQ",
-    "winogrande": "Wino.", "mmlu": "MMLU",
-}
+TASK_KEYS = {t: TASK_DISPLAY[t][1] for t, _ in AVG_TASKS_10}
+TASK_LABELS = {t: TASK_DISPLAY[t][0] for t, _ in AVG_TASKS_10}
 
 COLORS = {
     "V0 GPT\n162M":        "#1f77b4",
@@ -157,8 +155,7 @@ plt.close(fig)
 print("Saved mixed_flops_vs_acc")
 
 # ── Fig 4: Per-task detail for group 1 (12x1 family) ─────────────────────────
-tasks_ordered = ["arc_challenge","arc_easy","boolq","copa","hellaswag",
-                 "openbookqa","piqa","sciq","winogrande","mmlu"]
+tasks_ordered = [t for t, _ in AVG_TASKS_10]
 task_labels = [TASK_LABELS[t] for t in tasks_ordered]
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))

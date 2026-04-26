@@ -13,6 +13,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+import sys
+from pathlib import Path as _Path
+_sys_dir = str(_Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY  # canonical avg + per-task metrics
+
 RESULTS_DIR = Path(__file__).parents[2] / "results" / "multi-block-ablation"
 PLOTS_DIR = RESULTS_DIR / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
@@ -32,26 +39,14 @@ MODELS = {
     "V8 HelmDR\n(~140M)": "v8_12x1_d768_helmholtz_dual_reversed_lr2e3",
 }
 
-ZERO_SHOT_TASKS = [
-    "arc_challenge", "arc_easy", "hellaswag", "winogrande",
-    "boolq", "piqa", "copa", "openbookqa", "sciq",
-]
+# Canonical 10-task list and per-task metrics — source of truth: make_tables.py
+ZERO_SHOT_TASKS = [t for t, _ in AVG_TASKS_10]
 
-METRIC_MAP = {
-    "arc_challenge":  ("acc_norm,none", "acc_norm"),
-    "arc_easy":       ("acc_norm,none", "acc_norm"),
-    "hellaswag":      ("acc_norm,none", "acc_norm"),
-    "winogrande":     ("acc,none",      "acc"),
-    "boolq":          ("acc,none",      "acc"),
-    "piqa":           ("acc_norm,none", "acc_norm"),
-    "copa":           ("acc,none",      "acc"),
-    "openbookqa":     ("acc_norm,none", "acc_norm"),
-    "sciq":           ("acc,none",      "acc"),
-    "mmlu":           ("acc,none",      "acc"),
-    "gsm8k":          ("exact_match,strict-match", "exact_match"),
-    "gsm8k_cot":      ("exact_match,strict-match", "exact_match"),
-    "wikitext":       ("word_perplexity,none", "word_perplexity"),
-}
+# Build METRIC_MAP from TASK_DISPLAY; keep gsm8k / wikitext entries for the
+# extra columns this script plots beyond the 10-task avg.
+METRIC_MAP = {t: (TASK_DISPLAY[t][1], TASK_DISPLAY[t][1].split(",")[0]) for t in TASK_DISPLAY}
+METRIC_MAP["gsm8k_cot"] = ("exact_match,strict-match", "exact_match")
+METRIC_MAP["wikitext"]  = ("word_perplexity,none", "word_perplexity")
 
 
 def load_results(model_dir: str) -> dict | None:
@@ -125,7 +120,7 @@ def main():
         scores = [get_metric(r, t) for t in ZERO_SHOT_TASKS]
         scores = [s for s in scores if s is not None]
         avg_acc.append(np.mean(scores) if scores else None)
-    bar_chart(labels, avg_acc, "Average Zero-Shot Accuracy (9 tasks)", "Accuracy",
+    bar_chart(labels, avg_acc, f"Average Zero-Shot Accuracy ({len(ZERO_SHOT_TASKS)} tasks)", "Accuracy",
               "avg_zeroshot_acc.png", color="steelblue")
 
     # 3. MMLU
@@ -141,7 +136,7 @@ def main():
     bar_chart(labels, gsm_cot, "GSM8K CoT Exact Match", "Exact Match", "gsm8k_cot_acc.png", color="darkorchid")
 
     # 6. Per-task breakdown (grouped bar)
-    task_labels = ["arc_c", "arc_e", "hella", "wino", "boolq", "piqa", "copa", "obqa", "sciq"]
+    task_labels = [TASK_DISPLAY[t][0] for t in ZERO_SHOT_TASKS]
     n_models = len(labels)
     n_tasks = len(ZERO_SHOT_TASKS)
     data = np.full((n_models, n_tasks), np.nan)

@@ -11,6 +11,13 @@ import matplotlib.patches as mpatches
 from adjustText import adjust_text
 from pathlib import Path
 
+import sys
+from pathlib import Path as _Path
+_sys_dir = str(_Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY  # canonical avg + per-task metrics
+
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
 
@@ -54,18 +61,8 @@ GROUP_LABELS = {
     "edesc": "EDesc", "mixed": "Mixed",
 }
 
-BENCH_TASKS = [
-    ("arc_challenge", "acc_norm,none"),
-    ("arc_easy",      "acc_norm,none"),
-    ("boolq",         "acc,none"),
-    ("copa",          "acc,none"),
-    ("hellaswag",     "acc_norm,none"),
-    ("mmlu",          "acc,none"),
-    ("openbookqa",    "acc_norm,none"),
-    ("piqa",          "acc_norm,none"),
-    ("sciq",          "acc_norm,none"),
-    ("winogrande",    "acc,none"),
-]
+# Canonical 10-task list — source: make_tables.AVG_TASKS_10.
+BENCH_TASKS = list(AVG_TASKS_10)
 
 
 def compute_mflops(ul, itr, d, int_s):

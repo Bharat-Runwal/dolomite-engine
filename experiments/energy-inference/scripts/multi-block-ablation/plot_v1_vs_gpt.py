@@ -10,12 +10,18 @@ Saved to: results/multi-block-ablation/plots/v1_vs_gpt.{png,pdf}
 """
 
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+_sys_dir = str(Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY
 
 RESULTS_DIR = Path(__file__).parents[2] / "results" / "multi-block-ablation"
 PLOTS_DIR = RESULTS_DIR / "plots"
@@ -26,17 +32,7 @@ MODELS = {
     "V1 lr=2e-3 (143M)": "v1_12x1_d768_lr2e3",
 }
 
-TASKS = [
-    ("ARC-C",     "arc_challenge", "acc_norm,none"),
-    ("ARC-E",     "arc_easy",      "acc_norm,none"),
-    ("HellaSwag", "hellaswag",     "acc_norm,none"),
-    ("WinoGrande","winogrande",    "acc,none"),
-    ("BoolQ",     "boolq",         "acc,none"),
-    ("PIQA",      "piqa",          "acc_norm,none"),
-    ("COPA",      "copa",          "acc,none"),
-    ("OBQA",      "openbookqa",    "acc_norm,none"),
-    ("SCIQ",      "sciq",          "acc,none"),
-    ("MMLU",      "mmlu",          "acc,none"),
+TASKS = [(TASK_DISPLAY[t][0], t, TASK_DISPLAY[t][1]) for t, _ in AVG_TASKS_10] + [
     ("GSM8K",     "gsm8k",         "exact_match,strict-match"),
     ("GSM8K-CoT", "gsm8k_cot",     "exact_match,strict-match"),
     ("WikiPPL↓",  "wikitext",      "word_perplexity,none"),

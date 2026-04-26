@@ -24,6 +24,13 @@ import matplotlib.ticker
 from adjustText import adjust_text
 from pathlib import Path
 
+import sys
+from pathlib import Path as _Path
+_sys_dir = str(_Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY  # canonical avg + per-task metrics
+
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
@@ -85,23 +92,9 @@ GROUP_LABELS = {
     "full_egrad": "Full EGrad",
 }
 
-BENCH_TASKS = [
-    ("arc_challenge", "acc_norm,none"),
-    ("arc_easy",      "acc_norm,none"),
-    ("boolq",         "acc,none"),
-    ("copa",          "acc,none"),
-    ("hellaswag",     "acc_norm,none"),
-    ("mmlu",          "acc,none"),
-    ("openbookqa",    "acc_norm,none"),
-    ("piqa",          "acc_norm,none"),
-    ("sciq",          "acc,none"),
-    ("winogrande",    "acc,none"),
-]
-TASK_LABELS = {
-    "arc_challenge": "ARC-C", "arc_easy": "ARC-E", "boolq": "BoolQ",
-    "copa": "COPA", "hellaswag": "HellaSwag", "mmlu": "MMLU",
-    "openbookqa": "ObQA", "piqa": "PIQA", "sciq": "SciQ", "winogrande": "Wino.",
-}
+# Canonical 10-task list + display labels — source: make_tables.py.
+BENCH_TASKS = list(AVG_TASKS_10)
+TASK_LABELS = {t: TASK_DISPLAY[t][0] for t, _ in AVG_TASKS_10}
 
 
 def compute_mflops(ul, itr, d, int_s):

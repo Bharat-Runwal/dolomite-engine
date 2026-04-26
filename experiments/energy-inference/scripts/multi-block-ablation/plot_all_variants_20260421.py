@@ -10,6 +10,13 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
+import sys
+from pathlib import Path as _Path
+_sys_dir = str(_Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY  # canonical avg + per-task metrics
+
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
@@ -59,18 +66,8 @@ GROUP_LABELS = {
     "edesc": "EDesc", "mixed": "Mixed", "helmholtz": "Helmholtz",
 }
 
-BENCH_TASKS = [
-    ("arc_challenge", "acc_norm,none", "ARC-C"),
-    ("arc_easy",      "acc_norm,none", "ARC-E"),
-    ("boolq",         "acc,none",      "BoolQ"),
-    ("copa",          "acc,none",      "COPA"),
-    ("hellaswag",     "acc_norm,none", "HellaSwag"),
-    ("mmlu",          "acc,none",      "MMLU"),
-    ("openbookqa",    "acc_norm,none", "OBQA"),
-    ("piqa",          "acc_norm,none", "PIQA"),
-    ("sciq",          "acc_norm,none", "SciQ"),
-    ("winogrande",    "acc,none",      "Winogrande"),
-]
+# Canonical 10-task list — pulls metric + short display label from TASK_DISPLAY.
+BENCH_TASKS = [(t, TASK_DISPLAY[t][1], TASK_DISPLAY[t][0]) for t, _ in AVG_TASKS_10]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

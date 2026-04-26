@@ -5,12 +5,18 @@ Saves PNG+PDF to results/multi-block-ablation/plots/.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+_sys_dir = str(Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY
 
 RESULTS_DIR = Path(__file__).parents[2] / "results" / "multi-block-ablation"
 PLOTS_DIR = RESULTS_DIR / "plots"
@@ -25,24 +31,11 @@ MODELS = {
     "V8 HelmDR\n(140M)": "v8_12x1_d768_helmholtz_dual_reversed_lr2e3",
 }
 
-ZERO_SHOT_TASKS = [
-    "arc_challenge", "arc_easy", "hellaswag", "winogrande",
-    "boolq", "piqa", "copa", "openbookqa", "sciq",
-]
-TASK_LABELS = ["ARC-c", "ARC-e", "Hella", "Wino", "BoolQ", "PIQA", "COPA", "OBQA", "SciQ"]
+ZERO_SHOT_TASKS = [t for t, _ in AVG_TASKS_10]
+TASK_LABELS = [TASK_DISPLAY[t][0] for t in ZERO_SHOT_TASKS]
 
-METRIC_MAP = {
-    "arc_challenge": "acc_norm,none",
-    "arc_easy":      "acc_norm,none",
-    "hellaswag":     "acc_norm,none",
-    "winogrande":    "acc,none",
-    "boolq":         "acc,none",
-    "piqa":          "acc_norm,none",
-    "copa":          "acc,none",
-    "openbookqa":    "acc_norm,none",
-    "sciq":          "acc,none",
-    "wikitext":      "word_perplexity,none",
-}
+METRIC_MAP = {t: TASK_DISPLAY[t][1] for t in ZERO_SHOT_TASKS}
+METRIC_MAP["wikitext"] = "word_perplexity,none"
 
 # Colors: blue for GPT, orange for standard EGPT, green for V5, red shades for V6-V8
 COLORS = {

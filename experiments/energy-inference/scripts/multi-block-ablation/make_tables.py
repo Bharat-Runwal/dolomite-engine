@@ -123,16 +123,8 @@ AVG_TASKS_10 = [
     ("sciq",          "acc,none"),
     ("winogrande",    "acc,none"),
 ]
-# Some tables (cosreg) report a 7-task average without MMLU/OpenBookQA/SciQ:
-AVG_TASKS_7 = [
-    ("arc_challenge", "acc,none"),
-    ("arc_easy",      "acc,none"),
-    ("boolq",         "acc,none"),
-    ("copa",          "acc,none"),
-    ("hellaswag",     "acc,none"),
-    ("piqa",          "acc,none"),
-    ("winogrande",    "acc,none"),
-]
+# Single canonical list. Importers rely on this name being stable.
+AVG_TASKS = AVG_TASKS_10
 
 # Per-task display defaults (for individual columns).
 TASK_DISPLAY = {
@@ -174,13 +166,13 @@ def get_ppl(model_id: str) -> float | None:
     return r.get("wikitext", {}).get("word_perplexity,none")
 
 def get_avg(model_id: str, n_tasks: int = 10) -> float | None:
-    """Return mean accuracy (0..1) over the standard task set."""
-    tasks = AVG_TASKS_10 if n_tasks == 10 else AVG_TASKS_7
+    """Return mean accuracy (0..1) over the canonical 10-task set.
+    n_tasks is kept for back-compat but always resolved against AVG_TASKS_10."""
     r = load_results(model_id)
     if not r:
         return None
     vals = []
-    for t, m in tasks:
+    for t, m in AVG_TASKS_10:
         v = r.get(t, {}).get(m)
         if v is None:
             return None
@@ -382,7 +374,6 @@ COL_PARAMS  = dict(kind="static", key="params_M", header="Params", align="r")
 COL_MFLOPS  = dict(kind="static", key="mflops", header="MFLOPs/tok", align="r")
 COL_PPL     = dict(kind="ppl", header="PPL$\\downarrow$", align="r")
 COL_AVG10   = dict(kind="avg", n=10, header="Avg$\\uparrow$", align="r")
-COL_AVG7    = dict(kind="avg", n=7,  header="Avg$\\uparrow$", align="r")
 
 def col_task(task, header=None, fmt=None, metric=None, align="r"):
     return dict(kind="task", task=task, metric=metric, fmt=fmt,

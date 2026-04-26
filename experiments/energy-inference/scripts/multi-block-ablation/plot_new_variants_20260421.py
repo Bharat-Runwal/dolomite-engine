@@ -16,6 +16,13 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 
+import sys
+from pathlib import Path as _Path
+_sys_dir = str(_Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY  # canonical avg + per-task metrics
+
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
@@ -33,17 +40,10 @@ PARAMS = {"V0 GPT": 162, "V1 EGPT": 143, "V10 Mix\n6E+6G": 144,
 FLOPS  = {"V0 GPT": 321, "V1 EGPT": 359, "V10 Mix\n6E+6G": 285,
           "V15 EGrad\n6E+6G": 285, "V16 EDesc\n6E+6G": 285}
 
-TASKS = ["arc_challenge","arc_easy","boolq","copa","hellaswag","openbookqa","piqa","sciq","winogrande","mmlu"]
-TASK_KEYS = {
-    "arc_challenge":"acc_norm,none","arc_easy":"acc,none","boolq":"acc,none",
-    "copa":"acc,none","hellaswag":"acc_norm,none","openbookqa":"acc_norm,none",
-    "piqa":"acc_norm,none","sciq":"acc,none","winogrande":"acc,none","mmlu":"acc,none",
-}
-TASK_LABELS = {
-    "arc_challenge":"ARC-C","arc_easy":"ARC-E","boolq":"BoolQ","copa":"COPA",
-    "hellaswag":"HellaSwag","openbookqa":"ObQA","piqa":"PIQA","sciq":"SciQ",
-    "winogrande":"Wino.","mmlu":"MMLU",
-}
+# Canonical 10-task list + per-task metrics — source: make_tables.py.
+TASKS = [t for t, _ in AVG_TASKS_10]
+TASK_KEYS = {t: TASK_DISPLAY[t][1] for t in TASKS}
+TASK_LABELS = {t: TASK_DISPLAY[t][0] for t in TASKS}
 
 COLORS = {
     "V0 GPT":          "#1f77b4",

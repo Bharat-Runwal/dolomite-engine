@@ -5,10 +5,16 @@ Colour encodes accuracy relative to V0 GPT baseline.
 """
 
 import json
+import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
+
+_sys_dir = str(Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY
 
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
@@ -23,17 +29,9 @@ RESULT_FILES = {
     "V12 GPT 6×2\n120M/321MF":  BASE / "v12_gpt_6x2_d768_lr2e3/unsharded/harness_results_2026-04-21T11-24-43.182905.json",
 }
 
-TASKS = ["arc_challenge","arc_easy","boolq","copa","hellaswag","openbookqa","piqa","sciq","winogrande","mmlu"]
-TASK_KEYS = {
-    "arc_challenge":"acc_norm,none","arc_easy":"acc,none","boolq":"acc,none",
-    "copa":"acc,none","hellaswag":"acc_norm,none","openbookqa":"acc_norm,none",
-    "piqa":"acc_norm,none","sciq":"acc,none","winogrande":"acc,none","mmlu":"acc,none",
-}
-TASK_LABELS = {
-    "arc_challenge":"ARC-C","arc_easy":"ARC-E","boolq":"BoolQ","copa":"COPA",
-    "hellaswag":"HellaSwag","openbookqa":"ObQA","piqa":"PIQA","sciq":"SciQ",
-    "winogrande":"Wino.","mmlu":"MMLU",
-}
+TASKS = [t for t, _ in AVG_TASKS_10]
+TASK_KEYS = {t: TASK_DISPLAY[t][1] for t in TASKS}
+TASK_LABELS = {t: TASK_DISPLAY[t][0] for t in TASKS}
 
 def load(path):
     with open(path) as f:
@@ -160,9 +158,8 @@ plt.close(fig)
 print("Saved mixed_ppl_vs_acc")
 
 # ── Fig 4: Merged all-5 per-task grouped bar chart ────────────────────────────
-TASKS_ORDERED = ["arc_challenge","arc_easy","boolq","copa","hellaswag",
-                 "openbookqa","piqa","sciq","winogrande","mmlu"]
-TASK_LABELS_SHORT = ["ARC-C","ARC-E","BoolQ","COPA","HellaSwag","ObQA","PIQA","SciQ","Wino.","MMLU"]
+TASKS_ORDERED = [t for t, _ in AVG_TASKS_10]
+TASK_LABELS_SHORT = [TASK_DISPLAY[t][0] for t in TASKS_ORDERED]
 COLORS_6 = ["#1f77b4","#ff7f0e","#9467bd","#2ca02c","#8c564b","#d62728"]
 
 fig, ax = plt.subplots(figsize=(16, 5))

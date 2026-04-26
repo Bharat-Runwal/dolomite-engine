@@ -4,7 +4,7 @@ Generates:
   - new_variants_bar.{pdf,png}  — V0/V1/V10/V15/V16 per-task + summary
   - mixed_iso_bar.{pdf,png}     — V0/V1/V10/V2/V11/V12 per-task + summary
 """
-import json, glob
+import json, glob, sys
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -12,21 +12,15 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
+_sys_dir = str(Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY
+
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
 
-BENCH = [
-    ("arc_challenge", "acc_norm,none", "ARC-C"),
-    ("arc_easy",      "acc_norm,none", "ARC-E"),
-    ("boolq",         "acc,none",      "BoolQ"),
-    ("copa",          "acc,none",      "COPA"),
-    ("hellaswag",     "acc_norm,none", "HellaS"),
-    ("mmlu",          "acc,none",      "MMLU"),
-    ("openbookqa",    "acc_norm,none", "OBQA"),
-    ("piqa",          "acc_norm,none", "PIQA"),
-    ("sciq",          "acc_norm,none", "SciQ"),
-    ("winogrande",    "acc,none",      "Wino"),
-]
+BENCH = [(t, TASK_DISPLAY[t][1], TASK_DISPLAY[t][0]) for t, _ in AVG_TASKS_10]
 TASK_NAMES = [b[2] for b in BENCH]
 
 

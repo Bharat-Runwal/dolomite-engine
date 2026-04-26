@@ -1,9 +1,15 @@
 """Plot V9 (GPT 354M), V10 (Mixed 12x1 144M), V11 (Mixed 6x2 118M) results vs V0/V1 baselines."""
 
 import json
+import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
+
+_sys_dir = str(Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY
 
 BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
@@ -19,23 +25,8 @@ RESULT_FILES = {
     "V11 Mixed 6×2":    BASE / "v11_mixed_6x2_d768_lr2e3/unsharded/harness_results_2026-04-21T03-36-11.074064.json",
 }
 
-TASK_KEYS = {
-    "arc_challenge": "acc_norm,none",
-    "arc_easy":      "acc,none",
-    "boolq":         "acc,none",
-    "copa":          "acc,none",
-    "hellaswag":     "acc_norm,none",
-    "openbookqa":    "acc_norm,none",
-    "piqa":          "acc_norm,none",
-    "sciq":          "acc,none",
-    "winogrande":    "acc,none",
-    "mmlu":          "acc,none",
-}
-TASK_LABELS = {
-    "arc_challenge": "ARC-C", "arc_easy": "ARC-E", "boolq": "BoolQ",
-    "copa": "COPA", "hellaswag": "HellaSwag", "openbookqa": "ObQA",
-    "piqa": "PIQA", "sciq": "SciQ", "winogrande": "Wino.", "mmlu": "MMLU",
-}
+TASK_KEYS = {t: TASK_DISPLAY[t][1] for t, _ in AVG_TASKS_10}
+TASK_LABELS = {t: TASK_DISPLAY[t][0] for t, _ in AVG_TASKS_10}
 
 COLORS = {
     "V0 GPT 143M":    "#1f77b4",

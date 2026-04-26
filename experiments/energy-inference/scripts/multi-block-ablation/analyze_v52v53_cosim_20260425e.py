@@ -27,6 +27,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
+from pathlib import Path as _Path
+_sys_dir = str(_Path(__file__).resolve().parent)
+if _sys_dir not in sys.path:
+    sys.path.insert(0, _sys_dir)
+from make_tables import AVG_TASKS_10, TASK_DISPLAY  # canonical avg + per-task metrics
+
 REPO = str(Path(__file__).resolve().parents[4])
 sys.path.insert(0, REPO)
 import lm_engine.hf_models  # noqa: F401
@@ -246,14 +252,19 @@ def load_harness(path_glob_pattern):
         d = json.load(f)
     res = d.get("results", {})
     out = {}
-    for k in ["arc_challenge", "arc_easy", "boolq", "copa", "hellaswag", "mmlu", "winogrande", "piqa"]:
+    for k in [t for t, _ in AVG_TASKS_10]:
         if k in res:
             v = res[k]
-            out[k] = v.get("acc,none") or v.get("acc_norm,none") or v.get("exact_match,none") or 0.0
+            metric_key = TASK_DISPLAY[k][1] if k in TASK_DISPLAY else "acc,none"
+            mv = v.get(metric_key)
+            if mv is None:
+                mv = v.get("acc,none")
+            out[k] = mv if mv is not None else 0.0
     return out
 
 
-BENCH_TASKS = ["arc_challenge", "arc_easy", "boolq", "hellaswag", "mmlu", "piqa", "winogrande"]
+# Canonical 10-task list — source: make_tables.AVG_TASKS_10.
+BENCH_TASKS = [t for t, _ in AVG_TASKS_10]
 
 def avg_bench(m):
     vals = [m[k] for k in BENCH_TASKS if k in m]
