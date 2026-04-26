@@ -218,6 +218,34 @@ the whole block output as a descent direction.
 
 \subsection{Comparison Table}
 
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_egpt_gap.pdf}
+  \caption{Diagnosing the EGPT compute gap. Bars compare V0 GPT 12$\times$1 (162M, 321 MFLOPs/tok), V1 EGPT 12$\times$1 (143M, 359 MFLOPs/tok), V1 EGPT 24$\times$1 (400M, 755 MFLOPs/tok), and V9 GPT 24$\times$1 (354M, 503 MFLOPs/tok). EGPT trails GPT on PPL despite higher FLOPs.}
+  \label{fig:bar_egpt_gap}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_scaling.pdf}
+  \caption{400M-scale headline. V19 MixH$^\dagger$, V31 EGrad, and V32 EDesc dominate the V9 GPT baseline on Avg accuracy and PPL at matched compute (503 MFLOPs/tok); V1 EGPT 24$\times$1 trails despite using more FLOPs.}
+  \label{fig:bar_scaling}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_scaling_v25v26.pdf}
+  \caption{Recurrence-schedule ablation (Mixed, 162M unique params, 503 MFLOPs/tok, 30k steps). V25 (uniform 6$\times$4) and V26 (back-loaded 6$\times$ramp) test whether more or non-uniform recurrence beats V23/V24 12$\times$2.}
+  \label{fig:bar_scaling_v25v26}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_cosreg_benchmarks.pdf}
+  \caption{Cosine-similarity regulariser performance (176M, 30k steps). V39 act-cosreg and V48 wt-cosreg ($\lambda{=}0.01$) impose minimal accuracy overhead vs V0 GPT and V1 EGPT.}
+  \label{fig:bar_cosreg_benchmarks}
+\end{figure}
+
 \begin{table}[h]
 \centering
 \caption{Architecture comparison. All use shared $W_O$ across heads within a block.

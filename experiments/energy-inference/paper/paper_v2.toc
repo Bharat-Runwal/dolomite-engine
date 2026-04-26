@@ -8,56 +8,56 @@
 \contentsline {subsection}{\numberline {2.5}Energy Descent Output (EDesc, V28, V32)}{6}{subsection.2.5}%
 \contentsline {subsection}{\numberline {2.6}Comparison Table}{6}{subsection.2.6}%
 \contentsline {section}{\numberline {3}Diagnosing the EGPT Compute Gap}{6}{section.3}%
-\contentsline {paragraph}{Three faces of the gap.}{6}{section*.8}%
-\contentsline {paragraph}{Structural ablations (V5--V8).}{7}{section*.9}%
-\contentsline {section}{\numberline {4}Mechanistic Probes: What Does EGPT Learn?}{7}{section.4}%
-\contentsline {subsection}{\numberline {4.1}Helmholtz Decomposition of Projection Matrices}{7}{subsection.4.1}%
-\contentsline {paragraph}{Finding.}{8}{section*.11}%
-\contentsline {subsection}{\numberline {4.2}Layer Similarity: Is There a Shared Energy Function?}{8}{subsection.4.2}%
-\contentsline {paragraph}{Key findings.}{9}{section*.14}%
-\contentsline {subsection}{\numberline {4.3}Layer Merging: Why High Similarity Does Not Imply Mergeability}{9}{subsection.4.3}%
-\contentsline {paragraph}{Result.}{9}{section*.16}%
-\contentsline {paragraph}{Interpretation.}{10}{section*.17}%
-\contentsline {subsection}{\numberline {4.4}EGrad and EDesc: Layer Similarity at Both Scales}{10}{subsection.4.4}%
-\contentsline {paragraph}{Three findings.}{10}{section*.22}%
-\contentsline {section}{\numberline {5}Mixed Heads Close the Accuracy Gap}{11}{section.5}%
-\contentsline {paragraph}{Findings.}{11}{section*.24}%
-\contentsline {paragraph}{A ceiling exists.}{12}{section*.25}%
-\contentsline {section}{\numberline {6}The Output Rule Is the Key}{12}{section.6}%
-\contentsline {subsection}{\numberline {6.1}What the Energy Head Is Actually Computing}{12}{subsection.6.1}%
-\contentsline {subsection}{\numberline {6.2}EGrad(attn)/EDesc(attn) vs.\ MixedHead: V27/V28/V29/V30/V33/V34}{12}{subsection.6.2}%
-\contentsline {paragraph}{Key results.}{12}{section*.28}%
-\contentsline {section}{\numberline {7}Scaling to 400M: Headline Results}{13}{section.7}%
-\contentsline {paragraph}{Key observations.}{13}{section*.35}%
-\contentsline {paragraph}{Recurrence schedule: V25 and V26.}{14}{section*.36}%
-\contentsline {section}{\numberline {8}Discussion and Conclusions}{14}{section.8}%
-\contentsline {subsection}{\numberline {8.1}The Story in Brief}{14}{subsection.8.1}%
-\contentsline {subsection}{\numberline {8.2}What Makes EGrad Work?}{15}{subsection.8.2}%
-\contentsline {subsection}{\numberline {8.3}Open Questions}{15}{subsection.8.3}%
-\contentsline {subsection}{\numberline {8.4}Summary of Findings}{15}{subsection.8.4}%
-\contentsline {section}{\numberline {A}Layer Merger Experiments}{16}{appendix.A}%
-\contentsline {subsection}{\numberline {A.1}Motivation}{16}{subsection.A.1}%
-\contentsline {subsection}{\numberline {A.2}Strategy A: Cosine-Similarity Regularisation During Training}{16}{subsection.A.2}%
-\contentsline {paragraph}{Method.}{16}{section*.38}%
-\contentsline {paragraph}{Runs.}{17}{section*.39}%
-\contentsline {paragraph}{Expected outcomes.}{17}{section*.40}%
-\contentsline {paragraph}{Results.}{17}{section*.41}%
-\contentsline {subsection}{\numberline {A.3}Strategy B: Post-Training Layer Merger with Fine-Tuning}{18}{subsection.A.3}%
-\contentsline {paragraph}{Method.}{18}{section*.44}%
-\contentsline {paragraph}{Runs.}{18}{section*.45}%
-\contentsline {paragraph}{Baseline.}{18}{section*.46}%
-\contentsline {paragraph}{Results.}{19}{section*.47}%
-\contentsline {paragraph}{Activation-space layer similarity.}{19}{section*.51}%
-\contentsline {paragraph}{Projection decomposition: \texttt {proj\_mlp} is the source of all inter-block alignment.}{21}{section*.60}%
-\contentsline {subsection}{\numberline {A.4}Strategy C: Sandwich Architecture (GPT Encoder + EGPT Core + GPT Decoder)}{22}{subsection.A.4}%
-\contentsline {paragraph}{Motivation.}{22}{section*.64}%
-\contentsline {paragraph}{Architecture.}{22}{section*.65}%
-\contentsline {paragraph}{Expected outcomes.}{22}{section*.66}%
-\contentsline {paragraph}{Results.}{22}{section*.67}%
-\contentsline {subsection}{\numberline {A.5}Summary}{22}{subsection.A.5}%
-\contentsline {section}{\numberline {B}Structural Ablations (V5--V8)}{22}{appendix.B}%
-\contentsline {section}{\numberline {C}Full 400M-Scale Results}{22}{appendix.C}%
-\contentsline {section}{\numberline {D}Full Benchmark Tables}{22}{appendix.D}%
-\contentsline {section}{\numberline {E}All Scatter Plots}{22}{appendix.E}%
-\contentsline {section}{\numberline {F}Consecutive-Layer and Full CKA Matrices}{22}{appendix.F}%
-\contentsline {section}{\numberline {G}GSM8K Scatter}{22}{appendix.G}%
+\contentsline {paragraph}{Three faces of the gap.}{6}{section*.12}%
+\contentsline {paragraph}{Structural ablations (V5--V8).}{7}{section*.13}%
+\contentsline {section}{\numberline {4}Mechanistic Probes: What Does EGPT Learn?}{8}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Helmholtz Decomposition of Projection Matrices}{8}{subsection.4.1}%
+\contentsline {paragraph}{Finding.}{8}{section*.15}%
+\contentsline {subsection}{\numberline {4.2}Layer Similarity: Is There a Shared Energy Function?}{9}{subsection.4.2}%
+\contentsline {paragraph}{Key findings.}{9}{section*.18}%
+\contentsline {subsection}{\numberline {4.3}Layer Merging: Why High Similarity Does Not Imply Mergeability}{10}{subsection.4.3}%
+\contentsline {paragraph}{Result.}{10}{section*.20}%
+\contentsline {paragraph}{Interpretation.}{10}{section*.21}%
+\contentsline {subsection}{\numberline {4.4}EGrad and EDesc: Layer Similarity at Both Scales}{11}{subsection.4.4}%
+\contentsline {paragraph}{Three findings.}{11}{section*.26}%
+\contentsline {section}{\numberline {5}Mixed Heads Close the Accuracy Gap}{12}{section.5}%
+\contentsline {paragraph}{Findings.}{13}{section*.28}%
+\contentsline {paragraph}{A ceiling exists.}{13}{section*.29}%
+\contentsline {section}{\numberline {6}The Output Rule Is the Key}{13}{section.6}%
+\contentsline {subsection}{\numberline {6.1}What the Energy Head Is Actually Computing}{13}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}EGrad(attn)/EDesc(attn) vs.\ MixedHead: V27/V28/V29/V30/V33/V34}{13}{subsection.6.2}%
+\contentsline {paragraph}{Key results.}{14}{section*.32}%
+\contentsline {section}{\numberline {7}Scaling to 400M: Headline Results}{14}{section.7}%
+\contentsline {paragraph}{Key observations.}{15}{section*.39}%
+\contentsline {paragraph}{Recurrence schedule: V25 and V26.}{15}{section*.40}%
+\contentsline {section}{\numberline {8}Discussion and Conclusions}{16}{section.8}%
+\contentsline {subsection}{\numberline {8.1}The Story in Brief}{16}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}What Makes EGrad Work?}{16}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}Open Questions}{16}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}Summary of Findings}{17}{subsection.8.4}%
+\contentsline {section}{\numberline {A}Layer Merger Experiments}{17}{appendix.A}%
+\contentsline {subsection}{\numberline {A.1}Motivation}{17}{subsection.A.1}%
+\contentsline {subsection}{\numberline {A.2}Strategy A: Cosine-Similarity Regularisation During Training}{18}{subsection.A.2}%
+\contentsline {paragraph}{Method.}{18}{section*.42}%
+\contentsline {paragraph}{Runs.}{18}{section*.43}%
+\contentsline {paragraph}{Expected outcomes.}{19}{section*.44}%
+\contentsline {paragraph}{Results.}{19}{section*.45}%
+\contentsline {subsection}{\numberline {A.3}Strategy B: Post-Training Layer Merger with Fine-Tuning}{19}{subsection.A.3}%
+\contentsline {paragraph}{Method.}{19}{section*.48}%
+\contentsline {paragraph}{Runs.}{20}{section*.49}%
+\contentsline {paragraph}{Baseline.}{20}{section*.50}%
+\contentsline {paragraph}{Results.}{20}{section*.51}%
+\contentsline {paragraph}{Activation-space layer similarity.}{20}{section*.55}%
+\contentsline {paragraph}{Projection decomposition: \texttt {proj\_mlp} is the source of all inter-block alignment.}{22}{section*.64}%
+\contentsline {subsection}{\numberline {A.4}Strategy C: Sandwich Architecture (GPT Encoder + EGPT Core + GPT Decoder)}{23}{subsection.A.4}%
+\contentsline {paragraph}{Motivation.}{23}{section*.68}%
+\contentsline {paragraph}{Architecture.}{23}{section*.69}%
+\contentsline {paragraph}{Expected outcomes.}{23}{section*.70}%
+\contentsline {paragraph}{Results.}{23}{section*.71}%
+\contentsline {subsection}{\numberline {A.5}Summary}{24}{subsection.A.5}%
+\contentsline {section}{\numberline {B}Structural Ablations (V5--V8)}{24}{appendix.B}%
+\contentsline {section}{\numberline {C}Full 400M-Scale Results}{24}{appendix.C}%
+\contentsline {section}{\numberline {D}Full Benchmark Tables}{24}{appendix.D}%
+\contentsline {section}{\numberline {E}All Scatter Plots}{24}{appendix.E}%
+\contentsline {section}{\numberline {F}Consecutive-Layer and Full CKA Matrices}{24}{appendix.F}%
+\contentsline {section}{\numberline {G}GSM8K Scatter}{24}{appendix.G}%
