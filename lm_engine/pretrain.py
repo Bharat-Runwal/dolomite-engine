@@ -397,6 +397,11 @@ def train(
         global_step += 1
         steps_since_start_time += 1
 
+        # Propagate global step to model wrapper (used for cosreg ramp schedule).
+        for _m in model_container:
+            if hasattr(_m, "set_training_step"):
+                _m.set_training_step(global_step)
+
         if is_pipeline_parallel_enabled:
             loss_step_dict = train_step_with_pipeline_parallel(
                 model_container=model_container,

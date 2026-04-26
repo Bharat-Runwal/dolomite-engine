@@ -2,6 +2,231 @@
 
 <!-- New results go at the top (reverse chronological). -->
 
+## V54/V55: Parallel GPT baselines — 2026-04-25
+
+**Architecture**: New `parallel_gpt` block type added to `EnergyBlock`.
+- Single pre-norm `ln(h)`, both attn and ffn see same `ln(h)` (parallel, not nested)
+- Additive residual: `h = h + proj_attn(attn(ln(h))) + proj_mlp(ffn(ln(h)))`
+- Standard `softmax_attention` + standard `MLP` (3-matrix SwiGLU)
+- Separate `proj_attn` and `proj_mlp` linear d×d matrices (identical to EGPT V1 dual_unconstrained count)
+
+**Motivation**: V0/V9 sequential GPT cannot directly compare `cos(proj(attn))` vs `cos(proj(ffn))` because
+attn and ffn operate on different intermediate states. Parallel GPT enables apples-to-apples comparison
+in figs 24/25 and table 11. Also enables direct block merging with EGPT.
+
+| Variant | Scale | Arch | LR | Job | Status |
+|---------|-------|------|----|-----|--------|
+| V54 | 176M, d=768, 12L | ParallelGPT | 2e-3 | 47774 | RUN |
+| V55 | 405M, d=1024, 24L | ParallelGPT | 1.5e-3 | 47775 | RUN |
+
+**Code change**: `lm_engine/hf_models/models/energy/layer.py` — added `parallel_gpt` branch in
+`EnergyBlock.__init__` and new `forward_parallel_gpt` method.
+
+### Configs/Scripts
+```
+configs/multi_block_ablation/v54_parallel_gpt_12x1_d768_lr2e3.yml
+configs/multi_block_ablation/v55_parallel_gpt_24x1_d1024_lr1p5e3.yml
+experiments/energy-inference/scripts/multi-block-ablation/run_v54_parallel_gpt_d768.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v55_parallel_gpt_d1024.sh
+```
+
+---
+
+## V52/V53: Stronger and ramped cosreg — 2026-04-25
+
+**Motivation**: V39 (λ=0.01) left alignment unchanged (cos-sim 0.529 vs V1 0.536) — either
+too weak, or aligned layers perform equally well. Testing both hypotheses.
+
+| Variant | λ schedule | Peak λ | Job | Status |
+|---------|-----------|--------|-----|--------|
+| V39 | constant | 0.01 | 37576 | ✓ 3.273 loss |
+| V52 | constant | **0.1** (10×) | 46690 | RUN |
+| V53 | cosine ramp 0→max over 30k | **1.0** | 46691 | RUN |
+
+**V53 ramp**: λ(t) = 1.0 × (1 - cos(π×t/30000)) / 2 — near zero early, reaches 0.5 at step 15k,
+full 1.0 at step 30k. Idea: explore freely during early training, then enforce alignment
+once in a loss basin.
+
+**Code change**: `lm_engine/model_wrapper/pretraining.py` — added `_cosreg_effective_coef()` ramp
+helper, `set_training_step()` method, `cos_reg_ramp_steps` config field.
+`lm_engine/pretrain.py` — calls `model.set_training_step(global_step)` each step.
+
+### Configs/Scripts
+```
+configs/multi_block_ablation/v52_egpt_cosreg_lam1e1_12x1_d768_lr2e3.yml
+configs/multi_block_ablation/v53_egpt_cosreg_ramp1p0_12x1_d768_lr2e3.yml
+experiments/energy-inference/scripts/multi-block-ablation/run_v52_cosreg_lam1e1.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v53_cosreg_ramp.sh
+```
+
+---
+
+## Cosreg performance summary — 2026-04-25
+
+**Summary of all alignment regulariser runs (λ=0.01, 30k steps):**
+
+| Model | Scale | Cosreg | Loss | Δ vs EGPT | ARC-c | ARC-e | BoolQ | HellaSwag | MMLU | PIQA | WinoGrd | Avg-7 |
+|-------|-------|--------|------|-----------|-------|-------|-------|----------|------|------|---------|-------|
+| V0 GPT | 176M | — | 3.121 | baseline | 0.201 | 0.516 | 0.566 | 0.296 | 0.252 | 0.640 | 0.517 | **0.476** |
+| V1 EGPT | 176M | — | 3.271 | 0 | 0.184 | 0.479 | 0.611 | 0.285 | 0.235 | 0.626 | 0.507 | **0.458** |
+| V39 act-cosreg | 176M | act | 3.273 | +0.002 | 0.201 | 0.491 | 0.582 | 0.285 | 0.239 | 0.632 | 0.508 | **0.463** |
+| V48 wt-cosreg | 176M | wt | 3.287 | +0.016 | — | — | — | — | — | — | — | *eval pending* |
+| V9 GPT | 400M | — | 2.931 | baseline | 0.234 | 0.554 | 0.577 | 0.328 | 0.248 | 0.669 | 0.504 | **0.502** |
+| V1 EGPT-400M | 400M | — | 3.117 | 0 | 0.220 | 0.524 | 0.601 | 0.304 | 0.257 | 0.637 | 0.517 | **0.509** |
+| V40 act-cosreg | 400M | act | ~3.22* | +0.10 | — | — | — | — | — | — | — | *incomplete* |
+| V50 wt-cosreg | 400M | wt | 3.259* | +0.14 | — | — | — | — | — | — | — | *in progress* |
+
+*step 15000–15900, training still running
+
+**Key finding**: λ=0.01 regulariser is safe — barely hurts loss (+0.002 to +0.016 at 176M) and
+negligible downstream accuracy impact (<0.01). Does NOT meaningfully help alignment (V39 successive
+cos-sim = 0.922, V1 = 0.939). The proj_mlp mechanism dominates alignment; regularising activations
+or weights at this strength is insufficient.
+
+V48 eval: job 46619 submitted 2026-04-25.
+V40 training: resubmitted job 46620 2026-04-25 (was at step 15000).
+Plot: `results/multi-block-ablation/plots/cosreg_performance_comparison.{png,pdf}`
+
+---
+
+## V51: Procrustes 6×2 merge FT, 10k steps — 2026-04-25
+
+**Goal**: V47 (5k steps, cosine 2e-3→2e-4) got 3.464, still dropping at end. Run 10k steps.
+
+| Variant | Steps | LR schedule | Job | Status |
+|---------|-------|-------------|-----|--------|
+| V47 | 5k | cosine 2e-3→2e-4 | 44905 | ✓ 3.464 |
+| V49 | 5k | constant 2e-3 | 44934 | ✓ 3.650 |
+| V51 | 10k | cosine 2e-3→2e-4 | 46487 | RUN |
+
+Key finding from V47 vs V49: cosine LR decay is essential. Constant lr=2e-3 stays noisy (3.650 vs 3.464).
+V51 extends to 10k steps; expected final loss < 3.464.
+
+### Config/Script
+```
+configs/multi_block_ablation/v51_egpt_6x2_procrustes_merge_finetune_lr2e3_10k_d768.yml
+experiments/energy-inference/scripts/multi-block-ablation/run_v51_procrustes_merge_ft_10k.sh
+```
+
+---
+
+## V50: Weight cosreg 24×1 d1024 (400M) — 2026-04-25
+
+Scale-up of V48 (weight cosreg) to 400M, counterpart to V40 (activation cosreg 400M).
+Job 46352, step ~15100, loss ~3.49 (training step, not smoothed; prior checkpoint=15000).
+
+### Config/Script
+```
+configs/multi_block_ablation/v50_egpt_weight_cosreg_24x1_d1024_lr7e4.yml
+experiments/energy-inference/scripts/multi-block-ablation/run_v50_weight_cosreg_24x1.sh
+```
+
+---
+
+## V48: EGPT weight-space cosreg — 2026-04-25
+
+**Goal**: Compare weight-space cosreg (V48, λ=0.01) vs activation cosreg (V39, λ=0.01) vs no cosreg (V1).
+Weight cosreg directly penalizes `1 - cos_sim(flatten(params_i), flatten(params_{i+1}))` for
+adjacent EGPT block pairs. Implementation: `_weight_flat` stored during `EnergyBlock.forward()`
+while FSDP has gathered parameters; aggregated in `_compute_weight_cos_reg()` in pretraining.py.
+
+| Variant | Cosreg type | λ | Job | Status |
+|---------|------------|---|-----|--------|
+| V1 | None | — | — | ✓ 3.271 loss |
+| V39 | Activation cosreg | 0.01 | 37576 | ✓ 3.273 loss |
+| V48 | Weight cosreg | 0.01 | 44924 | ✓ 3.287 loss |
+
+**Expected signal**: V48 same-input delta cos-sim > V39 (0.529) > V1 (0.536). If weight cosreg
+actually pushes functional alignment above V1 levels, post-training merge should recover better.
+
+### Code changes
+- `lm_engine/hf_models/models/energy/layer.py`: store `self._weight_flat` during `EnergyBlock.forward()`
+- `lm_engine/model_wrapper/pretraining.py`: `_compute_weight_cos_reg()` + `weight_cos_reg_loss_coef` config field
+
+### Config/Script
+```
+configs/multi_block_ablation/v48_egpt_weight_cosreg_12x1_d768_lr2e3.yml
+experiments/energy-inference/scripts/multi-block-ablation/run_v48_weight_cosreg.sh
+```
+
+### Results
+V48 completed at step 30000, final loss = **3.287** (+0.016 vs V1=3.271).
+Eval job submitted 2026-04-25 (job 46619): unshard + full harness eval.
+
+---
+
+## V46/V47: Procrustes 6×2 merge fine-tune LR ablation — 2026-04-25
+
+**Goal**: V44/V45 final loss (3.606/3.584) far from V1 (3.271) — hypothesis: cosine LR decay
+to 2e-5 (10× lower) by step 5k is too aggressive for disrupted merged init.
+
+| Variant | Init | LR schedule | Peak LR | Job | Final loss |
+|---------|------|-------------|---------|-----|-----------|
+| V46 | v45 Procrustes init | constant | 2e-4 | 44904 | **3.560** |
+| V47 | v45 Procrustes init | cosine decay | 2e-3 | 44905 | **3.464** |
+| V49 | v45 Procrustes init | constant | 2e-3 | 44934 | RUN |
+
+Key finding: lr=2e-3 (original training LR) dramatically improves recovery (+0.12 nats over V45).
+V47 still at lr=2e-4 at end of 5k steps — model not converged. V49 tests constant lr=2e-3.
+
+### Configs/Scripts
+```
+configs/multi_block_ablation/v46_egpt_6x2_procrustes_merge_finetune_constlr_d768.yml
+configs/multi_block_ablation/v47_egpt_6x2_procrustes_merge_finetune_lr2e3_d768.yml
+configs/multi_block_ablation/v49_egpt_6x2_procrustes_merge_finetune_constlr2e3_d768.yml
+experiments/energy-inference/scripts/multi-block-ablation/run_v46_constlr_finetune.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v47_lr2e3_finetune.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v49_constlr2e3_finetune.sh
+```
+
+### Activation analysis results (job 44882, Apr 25)
+
+| Model | Resid. succ | SeqΔ succ | SameΔ succ | ‖Δ‖/‖h‖ |
+|-------|------------|-----------|-----------|---------|
+| V0 GPT 12×1 | 0.904 | 0.322 | **0.100** | 1.18 |
+| V1 EGPT 12×1 | 0.939 | 0.074 | **0.536** | 7.94 |
+| V39 EGPT+cosreg | 0.922 | 0.100 | 0.529 | 7.07 |
+| V41 Sandwich 2G+8E+2G | 0.889 | 0.116 | 0.370 | 2.72 |
+| V42 Naive merge (init) | 0.644 | −0.262 | 0.398 | 5.15 |
+| V42 Naive +5k FT | 0.855 | 0.027 | 0.261 | 5.04 |
+| V43 Procrustes (init) | 0.756 | −0.120 | 0.430 | 6.88 |
+| V43 Procrustes +5k FT | 0.853 | 0.022 | 0.395 | 8.51 |
+| Random baseline | 0.870 | — | −0.005 | — |
+
+**Key findings:**
+1. **EGPT is naturally functionally redundant (0.536 same-input Δ vs GPT 0.100)** — blocks compute similar updates given identical input, validating weight-sharing hypothesis
+2. **Residual-stream metric (0.939) is mostly just random baseline (0.870)** — not a good mergeability signal
+3. **Fine-tuning after merge reduces same-input similarity** (0.398→0.261 for V42) — blocks differentiate during recovery
+4. **EGPT large updates (‖Δ‖/‖h‖=7.9) explain sequential-delta≈0** — each block sees very different input due to large residual perturbations
+5. **V41 EGPT core pairs reach 0.78–0.87** — highest observed; last EGPT block (before output GPT) drops to −0.052 (projection-back role)
+
+Plots: `results/multi-block-ablation/plots/`
+
+---
+
+## V44/V45: Corrected 6×2 merge experiments — 2026-04-25
+
+**Goal**: Fix V42/V43 which created 6×1 models (halved compute). Correct approach: 6×2
+(weight sharing, `layer_iterations=[2]*6`), same total compute as original 12×1.
+
+| Variant | Strategy | Final loss | vs V1 (3.271) |
+|---------|----------|-----------|---------------|
+| V44 | Naive 6×2 merge + FT 5k | 3.606 | +0.335 |
+| V45 | Procrustes 6×2 merge + FT 5k | 3.584 | +0.313 |
+
+Key finding: Procrustes marginally better but both still far from V1. LR likely too low by end.
+
+### Configs/Scripts
+```
+configs/multi_block_ablation/v44_egpt_6x2_naive_merge_finetune_d768_lr2e3.yml
+configs/multi_block_ablation/v45_egpt_6x2_procrustes_merge_finetune_d768_lr2e3.yml
+experiments/energy-inference/scripts/multi-block-ablation/run_v44_naive_merge_6x2_finetune.sh
+experiments/energy-inference/scripts/multi-block-ablation/run_v45_procrustes_merge_6x2_finetune.sh
+experiments/energy-inference/scripts/multi-block-ablation/merge_layers_v44.py
+```
+
+---
+
 ## Layer Merger Experiments (V39–V43) — 2026-04-24
 
 **Goal**: Investigate whether EGPT layers can be merged (collapsed) to produce a shallower

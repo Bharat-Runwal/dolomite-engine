@@ -389,7 +389,22 @@ class EnergyBlock(nn.Module):
         hidden_size = config.hidden_size
 
         self.sequence_mixer_type = config.sequence_mixer_blocks[layer_idx].sequence_mixer_type
-        if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent"):
+        _proj_type_early = getattr(config, 'energy_proj_type', 'unconstrained')
+
+        if _proj_type_early == "parallel_gpt":
+            # Parallel GPT: single pre-norm, standard attn+ffn both see ln(h), additive residual
+            # h = h + proj_attn(attn(ln(h))) + proj_mlp(ffn(ln(h)))
+            norm_type = config.normalization_function
+            self.ln = get_normalization_function(norm_type, hidden_size, eps=config.layer_norm_epsilon)
+            self.attn = get_sequence_mixer(config, True, use_padding_free_transformer, layer_idx)
+            self.ffwd = get_mlp_block(
+                config, use_padding_free_transformer=use_padding_free_transformer, layer_idx=layer_idx
+            )
+            self.proj_attn = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.proj_mlp = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.proj = None
+            self.proj_type = "parallel_gpt"
+        elif self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent"):
             # Use energy-specific norm if configured, otherwise fall back to global
             norm_type = getattr(config, 'energy_norm_type', None) or config.normalization_function
             self.ln = get_normalization_function(
@@ -513,6 +528,12 @@ class EnergyBlock(nn.Module):
         iter_idx: int = 0,
     ) -> torch.Tensor:
 
+        if hasattr(self, 'proj_type') and self.proj_type == "parallel_gpt":
+            return self.forward_parallel_gpt(
+                hidden_states, past_key_values, attention_mask,
+                rope_cos_sin, cu_seqlens, max_seqlen, layer_id
+            )
+
         if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent"):
 
             ln_x = self.ln(hidden_states)
@@ -525,8 +546,18 @@ class EnergyBlock(nn.Module):
                 max_seqlen=max_seqlen,
                 layer_id=layer_id,
             )
-            # Store for cosine-similarity regularizer (activation-based, avoids FSDP weight gather)
+            # Store for activation cosreg (avoids FSDP weight gather)
             self._attn_out = attn_out
+            # Store per-named-parameter flat vecs for weight-space cosreg — computed HERE while
+            # FSDP has gathered all parameters for this block's forward pass.
+            # Stored as a dict {name: flat_tensor} so cosreg is computed per weight matrix
+            # (not concatenated), preventing large matrices from dominating small ones.
+            if self.training:
+                self._weight_named_flat = {
+                    name: p.flatten()
+                    for name, p in self.named_parameters()
+                    if p.requires_grad and p.ndim >= 2  # only matrices, not biases/scalars
+                }
             ffwd_out = self.ffwd(ln_x)
 
             # Dual projection: separate matrices for attn and MLP (scale_ff frozen at 1.0)
@@ -615,6 +646,29 @@ class EnergyBlock(nn.Module):
             }
 
 
+
+    def forward_parallel_gpt(
+        self,
+        hidden_states: torch.Tensor,
+        past_key_values: GenerationCache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        rope_cos_sin: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: int | None = None,
+        layer_id: int | None = None,
+    ) -> torch.Tensor:
+        ln_x = self.ln(hidden_states)
+        attn_out = self.attn(
+            ln_x,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            rope_cos_sin=rope_cos_sin,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            layer_id=layer_id,
+        )
+        ffwd_out = self.ffwd(ln_x)
+        return hidden_states + self.proj_attn(attn_out) + self.proj_mlp(ffwd_out)
 
     def forward_gpt(
         self,

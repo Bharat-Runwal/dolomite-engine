@@ -71,6 +71,34 @@ Python helper: `bsub_scripts/mybsub.py` (uses `tyro`).
 - Never modify existing scripts — create new dated copies.
 - Use unsharded checkpoints when loading for inference/grafting.
 
+## Paper (Overleaf)
+
+The NeurIPS 2026 paper lives in one repo cloned from IBM Overleaf, with public overleaf.com
+as a second push remote (mirror only — never push to public independently).
+
+- **Local clone**: `~/Code/energy/overleaf_neurips26/`
+- **`origin`** (IBM, primary): `https://overleaf.sl.cloud9.ibm.com/git/69c269c76db1d96d6c3c639a`
+- **`public`** (overleaf.com, mirror): `https://git.overleaf.com/69ebe3ed5c91a9639cc3576b`
+- Both tokens in `~/.netrc` — no password prompts. Token files: `~/OVERLEAF_TOKEN`, `~/OVERLEAF_PERSONAL_TOKEN`.
+- **IBM Overleaf is only reachable from compute nodes**, not login nodes.
+
+```bash
+# Clone (first time — compute node only):
+git clone https://overleaf.sl.cloud9.ibm.com/git/69c269c76db1d96d6c3c639a ~/Code/energy/overleaf_neurips26
+cd ~/Code/energy/overleaf_neurips26
+git remote add public https://git.overleaf.com/69ebe3ed5c91a9639cc3576b
+
+# Push to both remotes:
+git add -A && git commit -m "update figures/results"
+git push origin master
+git push public master
+```
+
+The `experiments/energy-inference/paper/` subdirectory in dolomite-engine is a staging area;
+content there should eventually be copied into `~/Code/energy/overleaf_neurips26/` and pushed
+to both remotes. `~/Code/energy/overleaf_neurips26_public/` is a leftover scratch clone and
+can be deleted once the IBM clone is set up.
+
 ## Figure and paper rules
 
 1. **Always save figures as both PDF and PNG** — every `fig.savefig()` call must save both extensions

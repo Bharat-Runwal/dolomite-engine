@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 import torch
 from torch.distributed._tensor.placement_types import Replicate
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM
@@ -21,6 +22,77 @@ from ..kernels import is_kernel_allowed
 from ..utils import Accelerator, MetricsTrackingDict, ProcessGroupManager
 from .base import ModelWrapper
 from .utils import broadcast_tensor_parallel_input
+
+
+_EGPT_MIXER_TYPES = frozenset({
+    "energy_attention",
+    "mixed_head_energy_descent",
+    "energy_grad_mixed_head_attention",
+})
+
+
+def _get_transformer_blocks(model):
+    """Unwrap FSDP/DDP and return transformer block list, or None."""
+    inner = model
+    for attr in ("module", "model"):
+        if hasattr(inner, attr):
+            inner = getattr(inner, attr)
+    try:
+        return list(inner.model.transformer.h)
+    except AttributeError:
+        try:
+            return list(inner.transformer.h)
+        except AttributeError:
+            return None
+
+
+def _compute_weight_cos_reg(model, coef: float):
+    """Per-matrix weight-space cosine-similarity regularizer between consecutive EGPT blocks.
+
+    For each adjacent EGPT block pair, penalizes:
+        mean over shared weight names of (1 - cos_sim(vec(W_i^(name)), vec(W_j^(name))))
+
+    Critically, cosine similarity is computed per named weight matrix (not over a concatenation).
+    Concatenating all weights would let large matrices (e.g. W_O: 768×768) dominate the loss,
+    leaving small matrices (e.g. W_proj: 768×768 but in a different role) misaligned.
+    Per-matrix averaging ensures every weight matrix is pulled toward alignment equally.
+
+    Only 2D+ (matrix) parameters participate — biases and scalars are excluded as they're
+    hard to meaningfully cosine-compare and have negligible effect on mergeability.
+
+    Requires each EGPT block's forward to populate self._weight_named_flat (dict of name→flat).
+    """
+    import torch.nn.functional as F
+    blocks = _get_transformer_blocks(model)
+    if blocks is None:
+        return None
+
+    # Collect (idx, named_flat_dict) for adjacent EGPT blocks
+    egpt_blocks = []
+    for idx, blk in enumerate(blocks):
+        mixer_type = getattr(blk, "sequence_mixer_type", None)
+        if mixer_type not in _EGPT_MIXER_TYPES:
+            continue
+        named_flat = getattr(blk, "_weight_named_flat", None)
+        if named_flat is not None:
+            egpt_blocks.append((idx, named_flat))
+
+    if len(egpt_blocks) < 2:
+        return None
+
+    reg_terms = []
+    for (idx_i, nf_i), (idx_j, nf_j) in zip(egpt_blocks, egpt_blocks[1:]):
+        if idx_j != idx_i + 1:
+            continue  # non-adjacent EGPT blocks (e.g. sandwich gap) — skip
+        shared_names = set(nf_i.keys()) & set(nf_j.keys())
+        for name in shared_names:
+            vi, vj = nf_i[name], nf_j[name]
+            cs = F.cosine_similarity(vi.unsqueeze(0), vj.unsqueeze(0))
+            reg_terms.append((1.0 - cs).mean())
+
+    if not reg_terms:
+        return None
+    return coef * torch.stack(reg_terms).mean()
 
 
 def _compute_attn_cos_reg(model, coef: float):
@@ -74,6 +146,15 @@ def _compute_attn_cos_reg(model, coef: float):
     if not reg_terms:
         return None
     return coef * torch.stack(reg_terms).mean()
+
+
+def _cosreg_effective_coef(base_coef: float, ramp_steps: int, global_step: int) -> float:
+    """Cosine ramp: 0 → base_coef over ramp_steps, constant thereafter.
+    ramp_steps=0 means no ramp (constant base_coef from step 1).
+    """
+    if ramp_steps <= 0 or global_step >= ramp_steps:
+        return base_coef
+    return base_coef * (1.0 - math.cos(math.pi * global_step / ramp_steps)) / 2.0
 
 
 class ModelWrapperForPretraining(ModelWrapper):
@@ -145,6 +226,11 @@ class ModelWrapperForPretraining(ModelWrapper):
             assert not self.reset_position_ids, "reset_position_ids is not supported with pipeline parallelism"
 
             self._extra_metrics = MetricsTrackingDict({})
+
+        self._global_training_step: int = 0
+
+    def set_training_step(self, step: int) -> None:
+        self._global_training_step = step
 
     def forward(
         self,
@@ -223,16 +309,28 @@ class ModelWrapperForPretraining(ModelWrapper):
 
         lm_loss = lm_loss * lm_loss_multiplier
 
-        cos_reg_coef = getattr(getattr(self.model, "config", None), "cos_reg_loss_coef", 0.0) or 0.0
-        cos_reg_interval = getattr(getattr(self.model, "config", None), "cos_reg_interval", 1) or 1
-        if cos_reg_coef > 0 and (self.model.training):
-            # Only apply every cos_reg_interval steps to save compute
-            step = getattr(self, "_cos_reg_step", 0)
-            self._cos_reg_step = step + 1
-            if step % cos_reg_interval == 0:
-                cos_reg = _compute_attn_cos_reg(self.model, cos_reg_coef)
-                if cos_reg is not None:
-                    lm_loss = lm_loss + cos_reg
+        cfg = getattr(self.model, "config", None)
+        cos_reg_base = getattr(cfg, "cos_reg_loss_coef", 0.0) or 0.0
+        cos_reg_ramp = getattr(cfg, "cos_reg_ramp_steps", 0) or 0
+        cos_reg_interval = getattr(cfg, "cos_reg_interval", 1) or 1
+        if cos_reg_base > 0 and self.model.training:
+            cos_reg_coef = _cosreg_effective_coef(cos_reg_base, cos_reg_ramp, self._global_training_step)
+            if cos_reg_coef > 0:
+                step = getattr(self, "_cos_reg_step", 0)
+                self._cos_reg_step = step + 1
+                if step % cos_reg_interval == 0:
+                    cos_reg = _compute_attn_cos_reg(self.model, cos_reg_coef)
+                    if cos_reg is not None:
+                        lm_loss = lm_loss + cos_reg
+
+        weight_cos_reg_base = getattr(cfg, "weight_cos_reg_loss_coef", 0.0) or 0.0
+        weight_cos_reg_ramp = getattr(cfg, "weight_cos_reg_ramp_steps", 0) or 0
+        if weight_cos_reg_base > 0 and self.model.training:
+            weight_cos_reg_coef = _cosreg_effective_coef(weight_cos_reg_base, weight_cos_reg_ramp, self._global_training_step)
+            if weight_cos_reg_coef > 0:
+                w_reg = _compute_weight_cos_reg(self.model, weight_cos_reg_coef)
+                if w_reg is not None:
+                    lm_loss = lm_loss + w_reg
 
         aux_loss = getattr(model_outputs, "aux_loss", 0)
 
