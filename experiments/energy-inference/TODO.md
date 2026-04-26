@@ -52,6 +52,66 @@ this order, with each stage directly motivating the next:
    the union. V15/V16/V19/V27/V31/V32 anchor this. Frame as the practical
    payoff of deep-EGPT understanding.
 
+### File layout (hierarchical paper)
+
+The single-file `paper_v2.tex` becomes a thin top-level driver that
+`\input{}`s sections and the appendix hub. Target structure:
+
+```
+paper/
+├── paper_v2.tex                  # preamble + \title + abstract + \input{sec/<each>}
+├── tables/                       # auto-generated, \input{} from sections
+├── sec/
+│   ├── intro.tex
+│   ├── architectures.tex
+│   ├── deep_egpt.tex             # the why-deep-EGPT story (story §1)
+│   ├── alignment.tex             # layer alignment + cosreg (story §2,3)
+│   ├── merger.tex                # post-training merger + sandwich (story §4)
+│   ├── mixed_head_merger.tex     # GPT+EGPT attn-head merger (story §6)
+│   ├── output_rule.tex           # EGrad/EDesc (kept; secondary)
+│   ├── scaling.tex               # 400M headline
+│   ├── discussion.tex
+│   └── appendix.tex              # \input{appendices/*.tex} hub
+└── sec/appendices/
+    ├── helmholtz.tex             # curl-grad analysis (story §5 → appendix)
+    ├── ablations_v5_v8.tex       # structural ablations
+    ├── full_400m.tex             # tab:scaling_full + extras
+    ├── all_small.tex             # tab:all_small + extras
+    ├── layer_sim_full.tex        # full layer-similarity matrices
+    ├── merger_full.tex           # detailed merger experiments
+    ├── cosreg_full.tex           # full cosreg analysis
+    └── scatter_plots.tex         # all scatter plots
+```
+
+Rules:
+- Main text stays clean and short — this paper will eventually merge with
+  a bigger paper, so brevity matters.
+- **No important figure or table is discarded.** Anything currently in
+  paper_v2.tex that doesn't earn a main-text slot moves to an appendix
+  file, never deleted.
+- Appendix hub `sec/appendix.tex` only contains `\appendix` + a series of
+  `\input{appendices/<name>.tex}` lines. Adding a new appendix = create a
+  file under `appendices/` and add one `\input{}` line to the hub.
+- Each section file owns its own `\section{...}\label{sec:...}` so it can
+  be reordered or moved to appendix by changing only `paper_v2.tex`.
+
+### Always recompile after edits
+
+After any change to `paper_v2.tex`, any `sec/*.tex`, or any `tables/*.tex`,
+run pdflatex to produce a fresh `paper_v2.pdf` so the user can review the
+output. Two passes (or `paper/build.sh` once it exists):
+
+```
+python experiments/energy-inference/scripts/multi-block-ablation/make_tables.py
+cd experiments/energy-inference/paper
+pdflatex -interaction=nonstopmode paper_v2.tex
+pdflatex -interaction=nonstopmode paper_v2.tex
+```
+
+(once `make_barcharts.py` lands, run it before pdflatex too.) Commit the
+regenerated `paper_v2.pdf` alongside the source changes — the user reviews
+the rendered PDF directly.
+
 ### Tables / figures policy
 
 - **Auto-generate every benchmark table.** `make_tables.py` is the single
