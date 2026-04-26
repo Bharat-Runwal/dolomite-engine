@@ -24,7 +24,7 @@ import matplotlib.ticker
 from adjustText import adjust_text
 from pathlib import Path
 
-BASE = Path("/proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation")
+BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
 

@@ -27,7 +27,7 @@ import matplotlib.colors as mcolors
 from pathlib import Path
 from safetensors import safe_open
 
-REPO = "/proj/dmfexp/nima/Code/dolomite-engine"
+REPO = str(Path(__file__).resolve().parents[4])
 sys.path.insert(0, REPO)
 import lm_engine.hf_models  # register energy model type
 

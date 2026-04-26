@@ -6,10 +6,11 @@ This script unshards via FSDP consolidation, remaps keys, then saves as HF safet
 """
 
 import argparse
+from pathlib import Path
 import os
 import sys
 
-REPO = "/proj/dmfexp/nima/Code/dolomite-engine"
+REPO = str(Path(__file__).resolve().parents[4])
 sys.path.insert(0, REPO)
 
 import torch

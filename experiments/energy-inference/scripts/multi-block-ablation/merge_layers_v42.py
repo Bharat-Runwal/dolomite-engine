@@ -11,6 +11,7 @@ Usage:
         [--strategy naive|procrustes]
 """
 import argparse
+from pathlib import Path
 import copy
 import json
 import os
@@ -18,7 +19,7 @@ import sys
 
 import torch
 
-REPO = "/proj/dmfexp/nima/Code/dolomite-engine"
+REPO = str(Path(__file__).resolve().parents[4])
 sys.path.insert(0, REPO)
 
 # Must import before any AutoModelForCausalLM usage to register custom model types

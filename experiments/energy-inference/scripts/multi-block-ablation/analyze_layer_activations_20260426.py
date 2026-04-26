@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from contextlib import contextmanager
 
-REPO = "/proj/dmfexp/nima/Code/dolomite-engine"
+REPO = str(Path(__file__).resolve().parents[4])
 sys.path.insert(0, REPO)
 import lm_engine.hf_models  # noqa: F401
 

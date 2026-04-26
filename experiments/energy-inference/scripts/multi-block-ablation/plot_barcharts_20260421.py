@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
-BASE = Path("/proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation")
+BASE = Path(__file__).resolve().parents[2] / "results/multi-block-ablation"
 PLOTS_DIR = BASE / "plots"
 
 BENCH = [
