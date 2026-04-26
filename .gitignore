@@ -17,6 +17,7 @@ wandb/
 experiments/energy-inference/results/**
 !experiments/energy-inference/results/**/
 !experiments/energy-inference/results/**/*.pdf
+!experiments/energy-inference/results/**/harness_*.json
 
 # LaTeX build artifacts
 *.aux
