@@ -80,7 +80,7 @@ CHARTS = [
     {
         "name": "cosreg_benchmarks",
         "title": "Cosine-similarity regulariser — 176M scale (30k steps)",
-        "models": ["V0", "V1", "V39", "V48"],
+        "models": ["V0", "V1", "V39", "V48", "V52", "V53"],
         "metrics": [
             ("Avg ↑",   "avg",  "higher"),
             ("ARC-C",   ("task", "arc_challenge"), "higher"),

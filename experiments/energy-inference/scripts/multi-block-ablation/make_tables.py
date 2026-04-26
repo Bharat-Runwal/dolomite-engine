@@ -99,6 +99,8 @@ MODELS = {
     "V40":      dict(label="V40 act-cosreg 400M",          subdir="v40_egpt_cosreg_24x1_d1024_lr7e4",           params_M=354, mflops=654, family="energy",      type="EGPT+cosreg"),
     "V41":      dict(label="V41 Sandwich",                 subdir="v41_sandwich_2gpt8e2gpt_d768_lr2e3",         params_M=143, mflops=359, family="mixed",       type="Sandwich"),
     "V48":      dict(label="V48 wt-cosreg",                subdir="v48_egpt_weight_cosreg_12x1_d768_lr2e3",     params_M=143, mflops=359, family="energy",      type="EGPT+wt-cosreg"),
+    "V52":      dict(label="V52 act-cosreg $\\lambda{=}0.1$", subdir="v52_egpt_cosreg_lam1e1_12x1_d768_lr2e3",  params_M=143, mflops=359, family="energy",      type="EGPT+act-cosreg"),
+    "V53":      dict(label="V53 act-cosreg ramp$\\to$1.0",  subdir="v53_egpt_cosreg_ramp1p0_12x1_d768_lr2e3",   params_M=143, mflops=359, family="energy",      type="EGPT+act-cosreg"),
 
     # Misc shared
     "V3":       dict(label="V3 Shared d=1152",             subdir="v3_shared_d1152",                            params_M=163, mflops=359, family="energy",      type="Shared"),
@@ -521,7 +523,7 @@ TABLES = [
                     col_task("piqa",          metric="acc,none"),
                     col_task("winogrande")],
         "rows": [
-            "V0", "V1", "V39", "V48",
+            "V0", "V1", "V39", "V48", "V52", "V53",
         ],
     },
 ]
