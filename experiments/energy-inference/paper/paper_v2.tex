@@ -264,17 +264,7 @@ EDesc (V28) & $A K$ + $A V$     & Descent     & none                 & none \\
   unless noted.  FLOPs = forward pass, $s{=}4096$.}
 \label{tab:egpt_gap}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrr}
-\toprule
-\textbf{Model} & \textbf{Params} & \textbf{MFLOPs/tok} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} \\
-\midrule
-V0  GPT 12$\times$1    & 162M & 321 & \textbf{38.3} & 49.1\% & 24.5 & 33.0 \\
-V1  EGPT 12$\times$1   & 143M & 359 & 47.7 & 49.0\% & 23.6 & 30.8 \\
-\midrule
-V1  EGPT 400M          & 400M & 755 & 38.6 & 50.6\% & 25.2 & 34.5 \\
-V9  GPT 24$\times$1    & 354M & 503 & 29.8 & 49.6\% & 27.1 & 38.5 \\
-\bottomrule
-\end{tabular}}
+\input{tables/egpt_gap}}
 \end{table}
 
 \paragraph{Three faces of the gap.}
@@ -549,18 +539,7 @@ GPT heads ($V = W_V x$), sharing a single output projection $W_O$.
   V10/V11 use the mixed-head (additive) block.  V12 is a recurrent GPT baseline.}
 \label{tab:mixed_results}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrr}
-\toprule
-\textbf{Model} & \textbf{E:G} & \textbf{Params} & \textbf{MFLOPs/tok} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{GSM8K} \\
-\midrule
-V0  GPT 12$\times$1    & 0:12 & 162M & 321 & 38.31 & 47.2\% & 2.20\% \\
-V1  EGPT 12$\times$1   & 12:0 & 143M & 359 & 47.66 & 46.8\% & 1.74\% \\
-V10 Mixed 12$\times$1  & 6:6  & 144M & 285 & \textbf{36.99} & 47.2\% & 1.52\% \\
-\midrule
-V11 Mixed 6$\times$2   & 6:6  & 118M & 314 & 40.67 & \textbf{47.3\%} & 1.36\% \\
-V12 GPT  6$\times$2    & 0:12 & 120M & 321 & 39.98 & 47.0\% & 2.05\% \\
-\bottomrule
-\end{tabular}}
+\input{tables/mixed_results}}
 \end{table}
 
 \paragraph{Findings.}
@@ -622,21 +601,7 @@ params (141M) due to the different projection structure.
   \textbf{Bold} = best per metric.}
 \label{tab:output_rule}
 \resizebox{0.55\textwidth}{!}{%
-\begin{tabular}{lrrrrrr}
-\toprule
-\textbf{Model} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{SciQ} & \textbf{GSM8K} \\
-\midrule
-V0  GPT      & 38.31 & 47.2\% & 24.5 & 33.0 & 78.1 & 2.20\% \\
-V1  EGPT     & 47.66 & 46.8\% & 23.6 & 30.8 & 75.2 & 1.74\% \\
-V10 Mixed    & 36.99 & 47.2\% & \textbf{25.5} & 33.4 & 76.9 & 1.52\% \\
-\midrule
-V15 Mixed & \textbf{36.96} & \textbf{47.9\%} & 24.8 & 33.5 & \textbf{78.6} & \textbf{2.58\%} \\
-V16 Mixed & 36.98 & 47.4\% & 24.8 & \textbf{33.9} & 77.2 & 2.20\% \\
-\midrule
-V27 EGrad (attn) & 37.14 & 46.6\% & 24.1 & 33.2 & 77.8 & 1.52\% \\
-V28 EDesc (attn) & 38.59 & 47.0\% & 24.7 & 33.0 & 77.4 & 1.59\% \\
-\bottomrule
-\end{tabular}}
+\input{tables/output_rule}}
 \end{table}
 
 \begin{figure}[h]
@@ -723,19 +688,7 @@ we scale them to $d=1024$, testing three recurrence schedules:
   \textbf{Bold} = best per metric.}
 \label{tab:scaling}
 \resizebox{0.75\textwidth}{!}{%
-\begin{tabular}{lrrrrrrrr}
-\toprule
-\textbf{Model} & \textbf{Type} & \textbf{Params} & \textbf{MFLOPs} & \textbf{PPL$\downarrow$}
-  & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
-\midrule
-V9  GPT 24$\times$1    & GPT     & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & \textbf{2.9\%} \\
-V1  EGPT 24$\times$1   & EGPT    & 354M & 654 & 38.6 & 47.0\% & 25.2 & 34.5 & 1.7\% \\
-\midrule
-V19 Mixed 24$\times$1  & Mixed   & 342M & 503 & \textbf{27.8} & 49.9\% & \textbf{27.7} & \textbf{40.5} & 2.1\% \\
-V31 EGrad 24$\times$1  & EGrad   & 342M & 503 & 27.9 & \textbf{50.7\%} & 27.4 & 40.3 & 1.4\% \\
-V32 EDesc 24$\times$1  & EDesc   & 342M & 503 & 28.2 & 50.4\% & 27.4 & 40.1 & 2.5\% \\
-\bottomrule
-\end{tabular}}
+\input{tables/scaling}}
 \end{table}
 
 \begin{figure}[h]
@@ -827,19 +780,7 @@ Both completed 30k steps; benchmark results are shown in Table~\ref{tab:scaling_
   V23/V24 (12$\times$2) and V9 GPT shown for reference.}
 \label{tab:scaling_v25v26}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrrrr}
-\toprule
-\textbf{Model} & \textbf{Type} & \textbf{Params} & \textbf{MFLOPs} & \textbf{PPL$\downarrow$}
-  & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
-\midrule
-V9  GPT 24$\times$1            & GPT     & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & 2.9\% \\
-V23 Mixed 12$\times$2 & MixHead & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
-V24 Mixed 12$\times$2 & MixHead & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
-\midrule
-V25 Mixed 6$\times$4   & MixHead & 162M & 503 & 35.9 & 49.7\% & 23.4 & 34.1 & 1.6\% \\
-V26 Mixed 6$\times$ramp & MixHead & 162M & 503 & 36.6 & 49.4\% & 25.1 & 33.6 & 1.7\% \\
-\bottomrule
-\end{tabular}}
+\input{tables/scaling_v25v26}}
 \end{table}
 
 %% ============================================================
@@ -1497,19 +1438,7 @@ V51 Procrustes, cosine $2\mathrm{e}{-}3{\to}2\mathrm{e}{-}4$ & 6$\times$2 & 176M
   at initialisation.  $d=768$, 12$\times$1, 30k steps.}
 \label{tab:v5_v8}
 \resizebox{0.7\textwidth}{!}{%
-\begin{tabular}{lrrrrrr}
-\toprule
-\textbf{Model} & \textbf{Params} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{BoolQ} & \textbf{COPA} \\
-\midrule
-V0  GPT          & 162M & \textbf{38.3} & \textbf{49.1\%} & 56.6 & 59.0 \\
-V1  EGPT         & 143M & 47.7 & 49.0\% & \textbf{61.1} & \textbf{64.0} \\
-\midrule
-V5  AttnOnly     & 143M & 48.6 & 48.3\% & 57.2 & 62.0 \\
-V6  HelmF        & 140M & 82.1 & 43.5\% & 50.0 & 55.0 \\
-V7  HelmD        & 140M & 63.4 & 45.1\% & 47.2 & 61.0 \\
-V8  HelmDR       & 140M & 65.2 & 45.7\% & 53.9 & 57.0 \\
-\bottomrule
-\end{tabular}}
+\input{tables/v5_v8}}
 \end{table}
 
 %% ============================================================
@@ -1524,30 +1453,7 @@ V8  HelmDR       & 140M & 65.2 & 45.7\% & 53.9 & 57.0 \\
   \textbf{Bold} = best per metric.}
 \label{tab:scaling_full}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrrrr}
-\toprule
-\textbf{Model} & \textbf{Type} & \textbf{Params} & \textbf{MFLOPs} & \textbf{PPL$\downarrow$}
-  & \textbf{Avg$\uparrow$} & \textbf{ARC-C} & \textbf{HellaS} & \textbf{GSM8K} \\
-\midrule
-V9  GPT 24$\times$1    & GPT     & 354M & 503 & 29.8 & 48.6\% & 27.1 & 38.5 & \textbf{2.9\%} \\
-V1  EGPT 24$\times$1   & EGPT    & 354M & 654 & 38.6 & 47.0\% & 25.2 & 34.5 & 1.7\% \\
-\midrule
-V19 Mixed 24$\times$1  & Mixed   & 342M & 503 & \textbf{27.8} & 49.9\% & \textbf{27.7} & \textbf{40.5} & 2.1\% \\
-V20 Mixed 24$\times$1  & Mixed   & 342M & 503 & 27.9 & 49.5\% & 27.1 & 40.2 & 1.4\% \\
-V31 EGrad 24$\times$1  & EGrad   & 342M & 503 & 27.9 & \textbf{50.7\%} & 27.4 & 40.3 & 1.4\% \\
-V32 EDesc 24$\times$1  & EDesc   & 342M & 503 & 28.2 & 50.4\% & 27.4 & 40.1 & 2.5\% \\
-\midrule
-V21 Mixed 6$\times$2   & Mixed   & 162M & 252 & 37.3 & 47.1\% & 25.6 & 33.9 & 2.0\% \\
-V22 Mixed 6$\times$2   & Mixed   & 162M & 252 & 37.1 & 46.6\% & 24.9 & 33.5 & 2.0\% \\
-V33 EGrad 6$\times$2 1024 & EGrad & 162M & 252 & 37.6 & 46.3\% & 25.2 & 33.7 & 0.8\% \\
-V34 EDesc 6$\times$2 1024 & EDesc & 162M & 252 & 38.9 & 46.4\% & 24.6 & 33.4 & 1.5\% \\
-\midrule
-V23 Mixed 12$\times$2  & Mixed   & 228M & 503 & 31.6 & 47.8\% & 26.5 & 36.9 & 2.0\% \\
-V24 Mixed 12$\times$2  & Mixed   & 228M & 503 & 31.7 & 48.5\% & 25.0 & 37.3 & 1.8\% \\
-V35 EGrad 12$\times$2 1024 & EGrad & 228M & 503 & 32.0 & 51.4\% & 26.1 & 36.5 & 1.6\% \\
-V36 EDesc 12$\times$2 1024 & EDesc & 228M & 503 & 32.3 & 51.6\% & 25.2 & 36.2 & 1.7\% \\
-\bottomrule
-\end{tabular}}
+\input{tables/scaling_full}}
 \end{table}
 
 %% ============================================================
@@ -1560,28 +1466,7 @@ V36 EDesc 12$\times$2 1024 & EDesc & 228M & 503 & 32.3 & 51.6\% & 25.2 & 36.2 & 
   Sorted by average accuracy.  \textbf{Bold} = best per metric.}
 \label{tab:all_small}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrrrrrrrr}
-\toprule
-\textbf{Model} & \textbf{PPL$\downarrow$} & \textbf{Avg$\uparrow$}
-  & \textbf{ARC-c} & \textbf{ARC-e} & \textbf{Hella} & \textbf{Wino}
-  & \textbf{BoolQ} & \textbf{PIQA} & \textbf{COPA} & \textbf{OBQA} & \textbf{SciQ} & \textbf{GSM8K} \\
-\midrule
-V15 EGrad      & \textbf{36.96} & \textbf{47.9\%} & 24.8 & 51.5 & 33.5 & 50.6 & 59.5 & 64.9 & 60.0 & 30.4 & \textbf{78.6} & \textbf{2.6\%} \\
-V0  GPT        & 38.31 & 47.2\% & 24.5 & 51.6 & 33.0 & \textbf{51.7} & 56.6 & \textbf{65.4} & 59.0 & \textbf{30.4} & 78.1 & 2.2\% \\
-V16 EDesc      & 36.98 & 47.4\% & 24.8 & \textbf{52.7} & \textbf{33.9} & 52.1 & 58.4 & 63.7 & 57.0 & 30.0 & 77.2 & 2.2\% \\
-V10 Mixed 6:6  & 36.99 & 47.2\% & \textbf{25.5} & 51.4 & 33.4 & 52.7 & 56.5 & \textbf{65.4} & 57.0 & 27.4 & 76.9 & 1.5\% \\
-V12 GPT 6$\times$2 & 39.98 & 47.0\% & 24.0 & \textbf{52.0} & 32.3 & 50.6 & 56.7 & 63.1 & 58.0 & \textbf{30.8} & 77.7 & 2.1\% \\
-V11 Mixed 6$\times$2 & 40.67 & 47.3\% & 24.5 & 51.0 & 32.3 & 51.8 & 58.6 & 63.4 & 61.0 & 29.4 & 75.7 & 1.4\% \\
-V1  EGPT       & 47.66 & 46.8\% & 23.6 & 47.9 & 30.8 & 50.7 & \textbf{61.1} & 62.2 & \textbf{64.0} & 29.2 & 75.2 & 1.7\% \\
-V14 Mix 10:2   & 39.5  & 46.1\% & 25.7 & -- & 32.6 & -- & -- & -- & -- & -- & -- & 1.6\% \\
-V13 Mix 8:4    & 37.9  & 45.6\% & 24.4 & -- & 33.3 & -- & -- & -- & -- & -- & -- & 1.7\% \\
-V5  AttnOnly   & 48.6  & 48.3\% & 23.9 & 44.8 & 30.6 & 51.4 & 57.2 & 62.8 & 62.0 & 28.6 & 73.7 & -- \\
-V2  EGPT 6$\times$2 & 63.32 & 44.7\% & 22.5 & 44.9 & 28.3 & 50.7 & 61.0 & 61.4 & 56.0 & 28.2 & 69.3 & 2.0\% \\
-V8  HelmDR     & 65.2  & 45.7\% & 23.2 & 42.3 & 28.6 & 50.3 & 53.9 & 60.2 & 57.0 & 27.2 & 68.9 & -- \\
-V7  HelmD      & 63.4  & 45.1\% & 22.1 & 41.3 & 28.7 & 50.7 & 47.2 & 60.8 & 61.0 & 27.0 & 66.7 & -- \\
-V6  HelmF      & 82.1  & 43.5\% & 23.4 & 38.4 & 27.7 & 50.7 & 50.0 & 58.9 & 55.0 & 25.8 & 61.5 & -- \\
-\bottomrule
-\end{tabular}}
+\input{tables/all_small}}
 \end{table}
 
 %% ============================================================
