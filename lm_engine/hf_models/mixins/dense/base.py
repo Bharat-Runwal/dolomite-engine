@@ -132,6 +132,13 @@ class BaseModelMixin(PreTrainedModelMixin):
         self.loop_layer_idxs = layer_idxs[self.num_pre_layers : -self.num_post_layers]
         self.post_layer_idxs = layer_idxs[-self.num_post_layers :]
 
+        self.use_iteration_embedding = getattr(config, "iteration_embedding", False)
+        if self.use_iteration_embedding and self.num_iterations > 1:
+            self.iter_emb = nn.Embedding(self.num_iterations, config.hidden_size)
+            nn.init.zeros_(self.iter_emb.weight)
+        else:
+            self.iter_emb = None
+
 
     def _init_model(self, config: CommonConfig, **kwargs) -> None:
         self.embed_dim = config.hidden_size
@@ -246,6 +253,8 @@ class BaseModelMixin(PreTrainedModelMixin):
             for j in range(num_iterations):
 
                 prev_loop_hidden_states = hidden_states
+                if self.iter_emb is not None:
+                    hidden_states = hidden_states + self.iter_emb.weight[j]
                 # Perform looped layers
                 for i in self.loop_layer_idxs:
                     hidden_states = self._run_block(

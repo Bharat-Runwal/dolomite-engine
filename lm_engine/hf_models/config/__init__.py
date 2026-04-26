@@ -110,6 +110,7 @@ class CommonConfig(PretrainedConfig):
         num_iterations: int = 1,
         per_block_iterations: bool = False,
         iteration_dropout: int = 0,
+        iteration_embedding: bool = False,
         halting : bool = False,
         halting_mlp_intermediate_size: int | None = None,
         **kwargs,
@@ -136,6 +137,7 @@ class CommonConfig(PretrainedConfig):
         self.num_iterations = num_iterations
         self.per_block_iterations = per_block_iterations
         self.iteration_dropout = iteration_dropout
+        self.iteration_embedding = iteration_embedding
 
         self.halting = halting
         self.halting_mlp_intermediate_size = halting_mlp_intermediate_size
