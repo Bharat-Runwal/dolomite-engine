@@ -14,14 +14,14 @@
 \contentsline {subsection}{\numberline {4.1}Helmholtz Decomposition of Projection Matrices}{8}{subsection.4.1}%
 \contentsline {paragraph}{Finding.}{8}{section*.15}%
 \contentsline {subsection}{\numberline {4.2}Layer Similarity: Is There a Shared Energy Function?}{9}{subsection.4.2}%
-\contentsline {paragraph}{Key findings.}{9}{section*.18}%
+\contentsline {paragraph}{Key findings.}{10}{section*.18}%
 \contentsline {subsection}{\numberline {4.3}Layer Merging: Why High Similarity Does Not Imply Mergeability}{10}{subsection.4.3}%
 \contentsline {paragraph}{Result.}{10}{section*.20}%
-\contentsline {paragraph}{Interpretation.}{10}{section*.21}%
+\contentsline {paragraph}{Interpretation.}{11}{section*.21}%
 \contentsline {subsection}{\numberline {4.4}EGrad and EDesc: Layer Similarity at Both Scales}{11}{subsection.4.4}%
 \contentsline {paragraph}{Three findings.}{11}{section*.26}%
 \contentsline {section}{\numberline {5}Mixed Heads Close the Accuracy Gap}{12}{section.5}%
-\contentsline {paragraph}{Findings.}{13}{section*.28}%
+\contentsline {paragraph}{Findings.}{12}{section*.28}%
 \contentsline {paragraph}{A ceiling exists.}{13}{section*.29}%
 \contentsline {section}{\numberline {6}The Output Rule Is the Key}{13}{section.6}%
 \contentsline {subsection}{\numberline {6.1}What the Energy Head Is Actually Computing}{13}{subsection.6.1}%
@@ -47,7 +47,7 @@
 \contentsline {paragraph}{Runs.}{20}{section*.49}%
 \contentsline {paragraph}{Baseline.}{20}{section*.50}%
 \contentsline {paragraph}{Results.}{20}{section*.51}%
-\contentsline {paragraph}{Activation-space layer similarity.}{20}{section*.55}%
+\contentsline {paragraph}{Activation-space layer similarity.}{21}{section*.55}%
 \contentsline {paragraph}{Projection decomposition: \texttt {proj\_mlp} is the source of all inter-block alignment.}{22}{section*.64}%
 \contentsline {subsection}{\numberline {A.4}Strategy C: Sandwich Architecture (GPT Encoder + EGPT Core + GPT Decoder)}{23}{subsection.A.4}%
 \contentsline {paragraph}{Motivation.}{23}{section*.68}%
@@ -56,8 +56,8 @@
 \contentsline {paragraph}{Results.}{23}{section*.71}%
 \contentsline {subsection}{\numberline {A.5}Summary}{24}{subsection.A.5}%
 \contentsline {section}{\numberline {B}Structural Ablations (V5--V8)}{24}{appendix.B}%
-\contentsline {section}{\numberline {C}Full 400M-Scale Results}{24}{appendix.C}%
-\contentsline {section}{\numberline {D}Full Benchmark Tables}{24}{appendix.D}%
-\contentsline {section}{\numberline {E}All Scatter Plots}{24}{appendix.E}%
-\contentsline {section}{\numberline {F}Consecutive-Layer and Full CKA Matrices}{24}{appendix.F}%
-\contentsline {section}{\numberline {G}GSM8K Scatter}{24}{appendix.G}%
+\contentsline {section}{\numberline {C}Full 400M-Scale Results}{25}{appendix.C}%
+\contentsline {section}{\numberline {D}Full Benchmark Tables}{25}{appendix.D}%
+\contentsline {section}{\numberline {E}All Scatter Plots}{25}{appendix.E}%
+\contentsline {section}{\numberline {F}Consecutive-Layer and Full CKA Matrices}{25}{appendix.F}%
+\contentsline {section}{\numberline {G}GSM8K Scatter}{25}{appendix.G}%
