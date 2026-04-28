@@ -168,19 +168,33 @@ metrics: PPL 47.7 vs 54.9, avg 45.4\% vs 44.2\%.
 This is the key efficiency finding: \textbf{cosreg achieves better results
 than exact backbone sharing at 2.25${\times}$ lower inference-time compute.}
 
-\paragraph{Training-time overhead.}
+\paragraph{Training-time overhead and the cost of activation cosreg.}
 Table~\ref{tab:alignment_flops} also reports per-step training times measured on
 4$\times$A100 (preemptable queue).
 V53 takes \textbf{0.64~s/step} --- $2{\times}$ V1 (0.31~s/step) ---
-because the cosine-ramp regulariser requires capturing and comparing
-layer-wise activations during the backward pass.
-30k training steps thus take ${\approx}$5.3~h wall-time for V53 vs 2.6~h for V1;
-at the 4-hour preemptable wall limit this means two job chunks for V53 vs one for V1.
+because the regulariser stores all 12 attn-output tensors in the autograd graph
+and computes cosine similarity for pairs at offsets $\{1,2,4\}$, producing 29
+backward paths through the attention computation.
 V3 (0.45~s/step, 3.8~h for 30k) fits in a single 4-h chunk.
-V4 (${\approx}$0.74~s/step estimated from FLOPs ratio, ${\approx}$6.2~h for 30k)
-required multiple 4-h job restarts; its wandb training-length logs
-should not be trusted for total step counts due to these preemption interruptions.
-At inference time there is no overhead: V53 runs at exactly V1's FLOPs.
+V4 (${\approx}$0.74~s/step estimated from FLOPs ratio, ${\approx}$6.2~h)
+required multiple 4-h job restarts; its wandb logs undercount total steps.
+At \emph{inference} time there is no overhead: V53 runs at exactly V1's FLOPs.
+
+\textbf{Fix: stochastic pair sampling.}
+The 29-pair scheme is replaced in the current codebase with \emph{stochastic
+sampling of $k$=3 random consecutive pairs per step}, reducing the extra backward
+paths from 29 to 3 and the expected overhead from $2{\times}$ to ${\approx}25\%$.
+Coverage is unchanged in expectation across steps.
+
+\textbf{Alternative: backbone-only weight cosreg (V64).}
+Weight cosreg (V48: $\lambda{=}0.01$, all matrices) is fast (0.31~s/step, trivial
+$O(d^2)$ dot products, no attention backward) but hurts PPL (62.6) because it
+pulls \texttt{proj\_attn}/\texttt{proj\_mlp} toward alignment — precisely the matrices
+that should remain diverse.
+V64 applies weight cosreg only to the backbone (W\_Q, W\_K, W1, W2), excluding
+projection weights, with a cosine ramp $0{\to}0.1$ over 30k steps.
+This is the weight-space analogue of V53's goal at V1's training speed.
+Results pending (job 60058).
 
 \begin{table}[h]
 \centering
@@ -206,6 +220,7 @@ V39 act-cosreg $\lambda{=}0.01$           & 176M & 170  & 0.31           & 2.6 &
 V52 act-cosreg $\lambda{=}0.1$            & 176M & 170  & 0.32$^\dagger$ & 2.6 & 47.4          & 45.7\% \\
 \textbf{V53 cosreg ramp $0{\to}1.0$}      & \textbf{176M} & \textbf{170} & \textbf{0.64} & \textbf{5.3} & 47.7 & 45.4\% \\
 V48 wt-cosreg $\lambda{=}0.01$            & 176M & 170  & 0.31$^\dagger$ & 2.6 & 62.6          & 44.9\% \\
+\textit{V64 backbone wt-cosreg ramp${\to}$0.1} & \textit{176M} & \textit{170} & \textit{$\approx$0.31} & \textit{2.6} & \textit{---} & \textit{---} \\
 \midrule
 V3  shared-bb, $d{=}1152$                 & 163M & 382  & 0.45           & 3.8 & 54.9          & 44.2\% \\
 V4  shared-bb wide, $d{=}1152$, lr=7e-4  & 174M & 637  & 0.74$^\dagger$ & 6.2$^\dagger$ & 44.2 & 45.8\% \\

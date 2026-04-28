@@ -46,28 +46,31 @@ def _get_transformer_blocks(model):
             return None
 
 
-def _compute_weight_cos_reg(model, coef: float):
+def _compute_weight_cos_reg(model, coef: float, backbone_only: bool = False):
     """Per-matrix weight-space cosine-similarity regularizer between consecutive EGPT blocks.
 
-    For each adjacent EGPT block pair, penalizes:
-        mean over shared weight names of (1 - cos_sim(vec(W_i^(name)), vec(W_j^(name))))
+    Cheap: each term is just a dot-product of flattened weight vectors — no attention
+    forward/backward, O(d²) per matrix per pair.  The backward of cosim(W_i, W_j)
+    w.r.t. W_i is simply (W_j/|W_j| - cosim·W_i/|W_i|)/|W_i|: a vector rescaling.
 
-    Critically, cosine similarity is computed per named weight matrix (not over a concatenation).
-    Concatenating all weights would let large matrices (e.g. W_O: 768×768) dominate the loss,
-    leaving small matrices (e.g. W_proj: 768×768 but in a different role) misaligned.
-    Per-matrix averaging ensures every weight matrix is pulled toward alignment equally.
-
-    Only 2D+ (matrix) parameters participate — biases and scalars are excluded as they're
-    hard to meaningfully cosine-compare and have negligible effect on mergeability.
-
-    Requires each EGPT block's forward to populate self._weight_named_flat (dict of name→flat).
+    Args:
+        backbone_only: if True, only regularise attn and FFN backbone weights
+            (attn.c_attn, ffwd.W1, ffwd.W2) and skip proj_attn / proj_mlp.
+            This is the recommended mode: it pushes the attention+FFN function toward
+            sharing (as in V3/V4 shared-backbone) while leaving the projection matrices
+            free to specialise per layer — the key source of EGPT's per-layer diversity.
+            V48 used backbone_only=False (all weights), which hurt PPL by pulling
+            proj_attn/proj_mlp toward alignment.
     """
     import torch.nn.functional as F
+
+    # Names to SKIP when backbone_only=True
+    _PROJ_NAMES = {"proj_attn.weight", "proj_mlp.weight"}
+
     blocks = _get_transformer_blocks(model)
     if blocks is None:
         return None
 
-    # Collect (idx, named_flat_dict) for adjacent EGPT blocks
     egpt_blocks = []
     for idx, blk in enumerate(blocks):
         mixer_type = getattr(blk, "sequence_mixer_type", None)
@@ -83,8 +86,10 @@ def _compute_weight_cos_reg(model, coef: float):
     reg_terms = []
     for (idx_i, nf_i), (idx_j, nf_j) in zip(egpt_blocks, egpt_blocks[1:]):
         if idx_j != idx_i + 1:
-            continue  # non-adjacent EGPT blocks (e.g. sandwich gap) — skip
+            continue
         shared_names = set(nf_i.keys()) & set(nf_j.keys())
+        if backbone_only:
+            shared_names = {n for n in shared_names if n not in _PROJ_NAMES}
         for name in shared_names:
             vi, vj = nf_i[name], nf_j[name]
             cs = F.cosine_similarity(vi.unsqueeze(0), vj.unsqueeze(0))
@@ -95,21 +100,38 @@ def _compute_weight_cos_reg(model, coef: float):
     return coef * torch.stack(reg_terms).mean()
 
 
-def _compute_attn_cos_reg(model, coef: float):
-    """Compute cosine-similarity regularizer between adjacent energy block attn outputs.
+def _compute_attn_cos_reg(model, coef: float, k_pairs: int = 3):
+    """Compute cosine-similarity regularizer between energy block attn outputs.
 
-    Encourages cos_sim(attn_out[i], attn_out[i+1]) → 1 for pairs (i, i+1), (i, i+2), (i, i+4).
-    Uses activations stored as block._attn_out during the forward pass to avoid FSDP weight gather.
-    Returns coef * mean_reg, or None if no energy blocks have stored activations.
+    Stochastic version: samples `k_pairs` random consecutive pairs per step
+    instead of computing all pairs with fixed offsets [1,2,4].  This keeps the
+    per-step cost proportional to k_pairs (not O(N_layers)) while providing the
+    same gradient signal in expectation over many steps.
+
+    Why the original [1,2,4]-offset scheme was expensive:
+      - 12 blocks × 3 offsets → up to 29 pairs per step.
+      - Each pair adds a backward path through two attention computations,
+        so the effective backward cost grows to ~5× the LM-loss backward.
+      - At B=4, T=4096 this dominated the step time, explaining the observed
+        2× slowdown for V53 vs V1 despite identical inference FLOPs.
+
+    With k_pairs=3 and consecutive-only sampling:
+      - 3 backward paths per step → ~25% overhead over V1.
+      - Each block pair is visited on average every N/k steps → same coverage.
+
+    Args:
+        model:   The (possibly FSDP-wrapped) model.
+        coef:    Regularisation coefficient (already ramp-adjusted).
+        k_pairs: Number of random pairs to sample per step.  k_pairs <= 0
+                 means use all consecutive pairs (old behaviour, expensive).
     """
     import torch.nn.functional as F
-    blocks = None
-    # Unwrap FSDP / DDP
+    import random
+
     inner = model
     for attr in ("module", "model"):
         if hasattr(inner, attr):
             inner = getattr(inner, attr)
-    # Navigate to transformer blocks
     try:
         blocks = inner.model.transformer.h
     except AttributeError:
@@ -118,33 +140,40 @@ def _compute_attn_cos_reg(model, coef: float):
         except AttributeError:
             return None
 
-    # Collect (layer_idx, attn_out) for energy blocks that stored activations
-    pairs = []
+    # Collect consecutive EGPT block pairs that have stored attn activations
+    energy_outs = []
     for idx, blk in enumerate(blocks):
         out = getattr(blk, "_attn_out", None)
         if out is not None:
-            pairs.append((idx, out))
+            energy_outs.append((idx, out))
 
-    if len(pairs) < 2:
+    if len(energy_outs) < 2:
         return None
 
-    idx_map = {idx: out for idx, out in pairs}
+    # Build all valid consecutive pairs (offset=1 between energy block indices)
+    consec_pairs = []
+    idx_map = {idx: out for idx, out in energy_outs}
+    for idx, out_i in energy_outs:
+        out_j = idx_map.get(idx + 1)
+        if out_j is not None:
+            consec_pairs.append((out_i, out_j))
+
+    if not consec_pairs:
+        return None
+
+    # Stochastic sub-sample: pick k_pairs random pairs without replacement
+    if k_pairs > 0 and k_pairs < len(consec_pairs):
+        sampled = random.sample(consec_pairs, k_pairs)
+    else:
+        sampled = consec_pairs  # k_pairs <= 0 → all pairs (original behaviour)
+
     reg_terms = []
-    offsets = [1, 2, 4]
-    for idx, out_i in pairs:
-        for off in offsets:
-            out_j = idx_map.get(idx + off)
-            if out_j is None:
-                continue
-            # Mean over batch and sequence, then cos-sim per hidden dim
-            flat_i = out_i.reshape(-1, out_i.shape[-1])
-            flat_j = out_j.reshape(-1, out_j.shape[-1])
-            # cos_sim per token, then mean
-            cs = F.cosine_similarity(flat_i, flat_j, dim=-1)  # (B*T,)
-            reg_terms.append((cs - 1.0).pow(2).mean())
+    for out_i, out_j in sampled:
+        flat_i = out_i.reshape(-1, out_i.shape[-1])
+        flat_j = out_j.reshape(-1, out_j.shape[-1])
+        cs = F.cosine_similarity(flat_i, flat_j, dim=-1)  # (B*T,)
+        reg_terms.append((cs - 1.0).pow(2).mean())
 
-    if not reg_terms:
-        return None
     return coef * torch.stack(reg_terms).mean()
 
 
@@ -313,22 +342,27 @@ class ModelWrapperForPretraining(ModelWrapper):
         cos_reg_base = getattr(cfg, "cos_reg_loss_coef", 0.0) or 0.0
         cos_reg_ramp = getattr(cfg, "cos_reg_ramp_steps", 0) or 0
         cos_reg_interval = getattr(cfg, "cos_reg_interval", 1) or 1
+        # k_pairs: how many random consecutive pairs to sample per step.
+        # Default 3 keeps overhead ~25% vs V1; set 0 for all pairs (old behaviour).
+        cos_reg_k_pairs = getattr(cfg, "cos_reg_k_pairs", 3) or 3
         if cos_reg_base > 0 and self.model.training:
             cos_reg_coef = _cosreg_effective_coef(cos_reg_base, cos_reg_ramp, self._global_training_step)
             if cos_reg_coef > 0:
                 step = getattr(self, "_cos_reg_step", 0)
                 self._cos_reg_step = step + 1
                 if step % cos_reg_interval == 0:
-                    cos_reg = _compute_attn_cos_reg(self.model, cos_reg_coef)
+                    cos_reg = _compute_attn_cos_reg(self.model, cos_reg_coef, k_pairs=cos_reg_k_pairs)
                     if cos_reg is not None:
                         lm_loss = lm_loss + cos_reg
 
         weight_cos_reg_base = getattr(cfg, "weight_cos_reg_loss_coef", 0.0) or 0.0
         weight_cos_reg_ramp = getattr(cfg, "weight_cos_reg_ramp_steps", 0) or 0
+        weight_cos_reg_backbone_only = bool(getattr(cfg, "weight_cos_reg_backbone_only", False))
         if weight_cos_reg_base > 0 and self.model.training:
             weight_cos_reg_coef = _cosreg_effective_coef(weight_cos_reg_base, weight_cos_reg_ramp, self._global_training_step)
             if weight_cos_reg_coef > 0:
-                w_reg = _compute_weight_cos_reg(self.model, weight_cos_reg_coef)
+                w_reg = _compute_weight_cos_reg(self.model, weight_cos_reg_coef,
+                                                backbone_only=weight_cos_reg_backbone_only)
                 if w_reg is not None:
                     lm_loss = lm_loss + w_reg
 
