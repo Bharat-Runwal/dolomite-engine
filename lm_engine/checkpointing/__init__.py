@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import shutil
 
 import numpy as np
 import torch
@@ -189,6 +190,20 @@ def save_checkpoint(
         )
 
         log_rank_0(logging.INFO, f"checkpoint saved at {iteration}")
+
+        # Prune old checkpoints if max_to_keep is set
+        max_to_keep = args.save_args.max_to_keep
+        if max_to_keep is not None and max_to_keep > 0:
+            base = args.save_args.save_path
+            existing = sorted(
+                [d for d in os.listdir(base) if d.startswith("global_step")],
+                key=lambda d: int(d.split("global_step")[1]),
+            )
+            to_delete = existing[:-max_to_keep]
+            for old_dir in to_delete:
+                old_path = os.path.join(base, old_dir)
+                run_rank_n(shutil.rmtree)(old_path)
+                log_rank_0(logging.INFO, f"pruned old checkpoint: {old_dir}")
 
         if os.path.exists(os.path.join(args.save_args.save_path, _KILLSWITCH)):
             ProcessGroupManager.destroy_process_groups()

@@ -1,0 +1,432 @@
+%% ============================================================
+\section{Layer Alignment Under Cosine-Similarity Regularisation}
+\label{app:cosreg_align}
+%% ============================================================
+
+This appendix presents the full layer-cosine-similarity analysis for the
+cosreg sweep (176M, 12$\times$1, $d{=}768$) and the broader 400M family,
+complementing the benchmark bar chart in Fig.~\ref{fig:bar_cosreg_benchmarks}.
+The analysis uses the same activation-capture protocol as \S\ref{sec:layer_sim_egrad}:
+for each block we record the attention sub-output (\texttt{attn\_out},
+pre-residual), the FFN sub-output (\texttt{ffwd\_out}, pre-residual),
+and the block update $\Delta h = h_\text{out} - h_\text{in}$.
+All cosine similarities are computed over the \emph{token-averaged} activation
+tensors from a fixed 512-token prefill.
+
+\subsection*{Cosreg sweep (176M)}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{layer_sim_cosine_cosreg_full.pdf}
+  \caption{%
+    Full $12{\times}12$ inter-layer cosine-similarity matrices for the
+    cosreg sweep.  Each cell $(i,j)$ is the cosine similarity between the
+    corresponding activation component of block $i$ and block $j$.
+    \textbf{Rows left to right:} attn\_out, ffwd\_out, block update $\Delta h$.
+    \textbf{Columns:} V0 GPT (baseline), V1 EGPT (no reg), V39 (act-cosreg
+    $\lambda{=}0.01$), V52 (act-cosreg $\lambda{=}0.1$), V53 (cosine ramp
+    $0{\to}1.0$), V48 (weight-cosreg $\lambda{=}0.01$).
+    Colormap: green = high similarity, red = low/negative.
+    \textbf{Key observation:} V53 (ramp) shows dramatically elevated
+    off-diagonal similarity in the attn\_out panel — most pairs are
+    deep green — while the $\Delta h$ panel remains only moderately
+    elevated, showing that the projection layers still differentiate
+    adjacent blocks despite the strong attn regularisation.
+    V48 (weight-cosreg) similarly boosts \emph{weight}-space alignment
+    but does not force attn\_out uniformity as aggressively.
+  }
+  \label{fig:cosreg_heatmap_full}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{consecutive_sim_cosreg_full.pdf}
+  \caption{%
+    Consecutive-pair cosine similarity (layer $i$ vs.\ layer $i{+}1$)
+    for all cosreg variants.  Each panel shows one activation component.
+    \textbf{attn\_out (left):} V53 (ramp $\lambda{\to}1.0$) achieves
+    mean consecutive cosim ${\approx}0.45$ across all pairs — more than
+    double V1 EGPT's ${\approx}0.20$ — confirming that the cosine ramp
+    strongly homogenises attention outputs.  V52 ($\lambda{=}0.1$) is
+    intermediate at ${\approx}0.25$.
+    \textbf{ffwd\_out (centre):} All cosreg variants remain near zero,
+    matching V1 EGPT; FFN outputs are not directly regularised and stay
+    decorrelated.
+    \textbf{Block update $\Delta h$ (right):} Despite the large attn
+    alignment in V53, the full-block update similarity is only modestly
+    elevated (V53 mean ${\approx}0.51$, V1 ${\approx}0.54$).  The projection
+    matrices \texttt{proj\_attn} and \texttt{proj\_mlp} absorb the
+    attn homogeneity and continue to produce diverse updates, preventing
+    full functional collapse to a single-block recurrence.
+  }
+  \label{fig:cosreg_consec_full}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.75\textwidth]{layer_sim_summary_cosreg_full.pdf}
+  \caption{%
+    Summary bars: mean off-diagonal (left) and mean consecutive (right)
+    cosine similarity of the \emph{attn\_out} component for each model.
+    V53 (ramp) is the clear winner on both metrics (${\approx}0.40$ off-diag,
+    ${\approx}0.45$ consecutive), followed by V52 (${\approx}0.25$/$0.25$).
+    V39 ($\lambda{=}0.01$) is barely above V1 EGPT, confirming that
+    the light regulariser at this strength has negligible alignment effect.
+    V48 (weight-cosreg) is comparable to V39 here because it regularises
+    weight matrices, not activations; its effect shows up in weight-space
+    metrics but not in activation similarity.
+  }
+  \label{fig:cosreg_summary_full}
+\end{figure}
+
+\paragraph{Interpretation: do cosreg models converge to recurrent EGPT?}
+
+The V53 ramp model achieves mean consecutive attn\_out cosim ${\approx}0.45$,
+compared to ${\approx}0.20$ for V1 EGPT and (by definition) $1.0$ for a
+true single-block recurrent EGPT ($1{\times}12$).
+V53 is therefore roughly \emph{halfway} between the fully diverse (V1) and
+the fully shared (1${\times}$12) extremes on this metric.
+The full-block update cosim (${\approx}0.51$) tells a similar story: the projection
+layers continue to produce differentiated updates, so V53 is \emph{not} equivalent
+to a weight-shared recurrent model.
+
+This motivates a direct comparison against single-block recurrent EGPT baselines
+(V56: $1{\times}12$, $d{=}768$; V57: $1{\times}6$, $d{=}768$;
+V58: $1{\times}24$, $d{=}1024$; V59: $1{\times}12$, $d{=}1024$),
+currently training.
+These will establish whether V52/V53 have
+\emph{(a)} regressed all the way to 1-block recurrent performance,
+\emph{(b)} landed at an intermediate point benefiting from both diversity
+and alignment, or \emph{(c)} surprisingly \emph{outperformed} the
+1-block recurrent model despite comparable functional similarity.
+Table~\ref{tab:recurrent_baselines} summarises the results so far.
+
+\begin{table}[ht]
+\centering
+\caption{%
+  Alignment strategies vs.\ recurrent baselines — all 176M scale unless noted
+  (30k steps, 7.86B tokens).
+  WikiPPL = WikiText word-level perplexity; Avg = 10-task canonical mean
+  (\texttt{acc\_norm} where applicable, from \texttt{make\_tables.py}).
+  \textbf{Italics = pending (training in progress).}
+  V3/V4 use \texttt{shared\_backbone}: one shared attn+FFN block,
+  12 independent \texttt{proj\_attn}/\texttt{proj\_mlp} matrices.
+  V53 cosreg ramp naturally approaches this architecture via activation alignment.
+}
+\label{tab:recurrent_baselines}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{WikiPPL$\downarrow$} & \textbf{Avg$\uparrow$} & \textbf{Gap vs V1} \\
+\midrule
+\multicolumn{5}{l}{\textit{Baselines}} \\
+\midrule
+V0  GPT $12{\times}1$, $d{=}768$       & 162M & \textbf{38.3} & \textbf{46.7\%} & (ref GPT) \\
+V1  EGPT $12{\times}1$, $d{=}768$      & 176M & 47.7          & 46.5\%          & ---       \\
+\midrule
+\multicolumn{5}{l}{\textit{Shared backbone: 1 attn+FFN block, 12 independent proj pairs (V3/V4)}} \\
+\midrule
+V3  shared-backbone, $d{=}1152$              & 163M & 54.9 & 44.2\% & $-$2.3 \\
+V4  shared-backbone wide, $d{=}1152$         & 174M & 44.2 & 45.8\% & $-$0.7 \\
+\textbf{V4* shared-backbone wide, $d{=}1152$, lr=2e-3} & \textbf{174M} & \textbf{41.8} & \textbf{46.6\%} & \textbf{$+$0.1} \\
+\midrule
+\multicolumn{5}{l}{\textit{Activation cosreg: all 12 blocks, shared via regularisation}} \\
+\midrule
+V39 act-cosreg $\lambda{=}0.01$         & 176M & 47.3 & 46.3\% & $-$0.2 \\
+V52 act-cosreg $\lambda{=}0.1$          & 176M & 47.4 & 45.7\% & $-$0.8 \\
+V53 act-cosreg ramp $0{\to}1.0$         & 176M & 47.7 & 45.4\% & $-$1.1 \\
+V48 wt-cosreg $\lambda{=}0.01$          & 176M & 62.6 & 44.9\% & $-$1.6 \\
+\midrule
+\multicolumn{5}{l}{\textit{Truly recurrent: 1 unique block, exact weight sharing}} \\
+\midrule
+V2  EGPT $6{\times}2$, $d{=}768$       & $\sim$85M & 63.3 & 44.3\% & $-$2.2 \\
+V57 EGPT $1{\times}6$,  $d{=}768$       & $\sim$85M & 89.1 & 43.0\% & $-$3.5 \\
+\textit{V56 EGPT $1{\times}12$, $d{=}768$} & \textit{$\sim$85M} & \textit{---} & \textit{---} & \textit{pending} \\
+\textit{V63 EGPT $1{\times}12$, $d{=}1408$} & \textit{$\sim$160M} & \textit{---} & \textit{---} & \textit{pending} \\
+\midrule
+\multicolumn{5}{l}{\textit{400M scale}} \\
+\midrule
+V9  GPT $24{\times}1$, $d{=}1024$      & 354M & \textbf{29.8} & \textbf{48.6\%} & (ref GPT) \\
+V1  EGPT $24{\times}1$, $d{=}1024$     & 354M & 38.6          & 47.0\%          & ---       \\
+V59 EGPT $1{\times}12$, $d{=}1024$     & $\sim$117M & 69.3 & 44.4\% & $-$2.6 \\
+\textit{V58 EGPT $1{\times}24$, $d{=}1024$} & \textit{$\sim$117M} & \textit{---} & \textit{---} & \textit{pending} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Key finding so far.}
+V57 ($1{\times}6$, \textasciitilde85M unique params) achieves 42.4\% avg accuracy at
+\emph{half} the FLOPs of V1 EGPT, but WikiPPL = 89.1 --- far worse than V0 GPT (38.3)
+or V1 EGPT (47.7).
+V59 ($1{\times}12$, \textasciitilde117M unique params, 400M scale) likewise:
+WikiPPL = 69.3 vs V1 EGPT 38.6, despite acceptable avg accuracy (43.5\%).
+The single-block recurrent architecture is significantly weaker on perplexity
+than multi-block models at the same FLOPs --- indicating that layer diversity
+contributes substantially to next-token prediction quality, not just benchmark accuracy.
+
+Both cosreg models with strong attn alignment (V52: 45.7\%, V53: 45.4\%) sit
+well \emph{above} the recurrent floor on avg accuracy, and V53's WikiPPL = 47.7
+is identical to V1 EGPT (47.7) --- strong cosreg does \emph{not} hurt perplexity.
+the gap from V1 to V53 ($-$1.1~pp) is only $\sim$34\% of the gap to the
+recurrent baseline ($-$3.2~pp for V57).
+This confirms that \textbf{V52/V53 have not collapsed to recurrent EGPT}:
+projection matrices maintain functional diversity even as cosreg homogenises
+the pre-proj attention outputs (V53 pre-proj attn cosim = 0.92 vs 0.42 for V1;
+post-proj drops back to ${\approx}0.07$ in both cases --- \S\ref{app:wt_cosim}).
+V56 ($1{\times}12$, matched FLOPs with V1) is still training and will complete
+the comparison at equal compute.
+
+\subsection*{400M family}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{layer_sim_cosine_400m_full.pdf}
+  \caption{%
+    Full $24{\times}24$ inter-layer cosine-similarity matrices for the
+    400M deep-EGPT family.  Rows: attn\_out, ffwd\_out, block update $\Delta h$.
+    Columns: V9 GPT, V1 EGPT $24{\times}1$, V19 MixH$^\dagger$ EGrad,
+    V20 MixH$^\dagger$ EDesc, V31 EGrad ($W_Q^\top$), V32 EDesc ($W_Q^\top$),
+    V40 EGPT act-cosreg $\lambda{=}0.01$.
+    At 400M scale the qualitative pattern replicates the 176M findings:
+    V1 EGPT shows elevated $\Delta h$ similarity (block updates are similar
+    across layers), while MixH / EGrad / EDesc models look closer to GPT.
+    V40 (act-cosreg 400M) shows similar attn\_out alignment to its 176M
+    counterpart V39 — again, $\lambda{=}0.01$ has minimal effect at this scale.
+  }
+  \label{fig:cosim_400m_heatmap_full}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{consecutive_sim_400m_full.pdf}
+  \caption{%
+    Consecutive-pair cosine similarity at 400M scale.
+    V1 EGPT $24{\times}1$ (red) again leads on attn\_out consecutive
+    similarity (${\approx}0.26$ mean), but is notably \emph{lower}
+    than the 176M V1 (${\approx}0.20$; scales differ because d=1024 has
+    more heads and longer residual paths).
+    EGrad (V31, green) and EDesc (V32, orange) sit close to GPT (V9, blue)
+    on attn\_out, confirming the mixed-head output rule does not induce
+    the same functional block-similarity as pure EGPT.
+    V40 (act-cosreg 400M) tracks V1 EGPT closely with $\lambda{=}0.01$,
+    consistent with 176M findings.
+  }
+  \label{fig:cosim_400m_consec_full}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.75\textwidth]{layer_sim_summary_400m_full.pdf}
+  \caption{%
+    Summary bars for the 400M family (mean attn\_out off-diagonal and
+    consecutive cosim).  V1 EGPT $24{\times}1$ has the highest alignment;
+    EGrad (V31) and EDesc (V32) reduce it toward the GPT baseline,
+    which aligns with their superior benchmark performance
+    (Tab.~\ref{tab:scaling_full}).  The alignment penalty for moving from
+    EGPT to EGrad/EDesc is a feature, not a bug: diverse layers process
+    information more efficiently than functionally-similar ones.
+  }
+  \label{fig:cosim_400m_summary_full}
+\end{figure}
+
+%% ============================================================
+\section{Weight-Space and Post-Projection Cosine Similarity}
+\label{app:wt_cosim}
+%% ============================================================
+
+\paragraph{Setup.}
+For each pair of consecutive blocks $(i, i{+}1)$ we compute the cosine similarity
+of individual weight matrices — $W_Q$, $W_K$, $W_1$, $W_2$, \texttt{proj\_attn},
+\texttt{proj\_mlp} — and record the mean over all 11 consecutive pairs.
+We also capture activations \emph{after} the projection step (\texttt{proj\_attn}$(a)$
+and \texttt{proj\_mlp}$(f)$) to compare with the pre-proj values measured in
+\S\ref{app:cosreg_align}.
+
+\paragraph{Weight similarity (Table~\ref{tab:weight_cosim_176m}).}
+
+\begin{table}[ht]
+\centering
+\caption{%
+  Mean consecutive weight cosine similarity for each matrix type (176M, 30k steps).
+  All values are near zero for activation-cosreg variants (V1/V39/V52/V53);
+  only V48 (\emph{weight}-cosreg) shows appreciable weight similarity.
+  Within V48, \texttt{proj\_mlp} is the \textbf{least similar} matrix type
+  (0.015), confirming it is the most diverse component.
+}
+\label{tab:weight_cosim_176m}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Model} & $W_Q$ & $W_K$ & $W_1$ & $W_2$ & \texttt{proj\_a} & \texttt{proj\_m} \\
+\midrule
+V0  GPT         & 0.001 & $-$0.001 & 0.001 & 0.006 & ---   & ---   \\
+V1  EGPT        & 0.000 &  0.001   & 0.017 & 0.000 & 0.002 & 0.000 \\
+V39 act-cosreg  & 0.002 &  0.001   & 0.016 & 0.000 & 0.004 & 0.000 \\
+V52 act-cosreg  & 0.002 &  0.001   & 0.017 & 0.000 & 0.002 & 0.000 \\
+V53 cosreg ramp & 0.001 &  0.001   & 0.018 & 0.000 & 0.010 & 0.000 \\
+\textbf{V48 wt-cosreg}  & \textbf{0.084} & \textbf{0.074} & \textbf{0.034} & \textbf{0.022} & \textbf{0.045} & \textbf{0.015} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Activation cosreg (V39/V52/V53) leaves weight similarity essentially unchanged
+from V1 EGPT (${\approx}0$).  Only V48 (weight cosreg) elevates all types, with
+the hierarchy $W_Q > W_K > \texttt{proj\_attn} > W_1 > W_2 > \texttt{proj\_mlp}$
+(0.084 $\to$ 0.015).  The lowest entry is \texttt{proj\_mlp} — confirming the
+hypothesis that the FFN projection matrix encodes the most
+\emph{layer-specific} transformation strategy.
+
+\paragraph{Post-projection activation similarity (Table~\ref{tab:postproj_cosim_176m}).}
+
+\begin{table}[ht]
+\centering
+\caption{%
+  Mean consecutive cosine similarity before and after the projection step
+  (176M, 30k steps, same 512-token prefill as other cosim analyses).
+  \emph{Pre}: raw attention or FFN sub-output (what enters \texttt{proj\_attn}/\texttt{proj\_mlp}).
+  \emph{Post}: output of \texttt{proj\_attn}$(a_i)$ or \texttt{proj\_mlp}$(f_i)$
+  (what enters the residual stream).
+  $\Delta h$: full block update.
+}
+\label{tab:postproj_cosim_176m}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Model} & pre\_attn & post\_attn & pre\_ffn & post\_ffn & $\Delta h$ \\
+\midrule
+V0  GPT        & 0.221 & 0.221 & 0.336 & ---   & 0.337 \\
+V1  EGPT       & 0.419 & 0.070 & 0.000 & 0.111 & 0.095 \\
+V39 act-cosreg & 0.490 & 0.074 & 0.002 & 0.083 & 0.099 \\
+V52 act-cosreg & 0.822 & 0.173 & 0.002 & 0.083 & 0.122 \\
+\textbf{V53 ramp} & \textbf{0.923} & \textbf{0.071} & 0.002 & 0.111 & 0.116 \\
+V48 wt-cosreg  & 0.314 & 0.046 & 0.000 & 0.172 & 0.149 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three findings stand out:
+
+\begin{enumerate}
+\item \textbf{proj\_attn is a strong decorrelator.}
+For V1 EGPT, pre-proj attn cosim = 0.419, but post-proj drops to 0.070 ---
+a 6$\times$ reduction.  For V53 (ramp cosreg), pre-proj reaches 0.923
+(\emph{nearly identical} raw attention outputs across layers), yet post-proj
+collapses back to 0.071.  The projection matrices remap similar attention
+gradients into orthogonal residual directions regardless of regularisation
+strength.  This explains why cosreg cannot force the full-block update
+$\Delta h$ to grow beyond ${\approx}0.12$ even when pre-proj attn cosim
+approaches 1.
+
+\item \textbf{proj\_mlp creates rather than destroys correlation.}
+Pre-proj FFN outputs are near-zero cosim for all EGPT models (0.000--0.002);
+the \texttt{proj\_mlp} step lifts this to 0.083--0.172.  The FFN itself
+produces uncorrelated outputs across layers, but the projection onto the
+residual introduces a small shared direction.  This is the opposite role from
+\texttt{proj\_attn}.
+
+\item \textbf{GPT has no decorrelation step.}
+V0 GPT shows pre\_attn = post\_attn = 0.221 because $W_O$ is a single shared
+matrix that does not decorrelate heads the way EGPT's per-block \texttt{proj\_attn}
+does.  This structural difference may partly explain why EGPT layers are more
+``functionally diverse'' in $\Delta h$ (0.095) relative to input cosim than
+GPT layers (0.337/$\Delta h$ $=$ 0.337, no amplification of diversity).
+\end{enumerate}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{weight_cosim_summary_176m.pdf}
+  \caption{Mean consecutive weight cosine similarity by type, 176M models.
+  Each group of bars is one model; bar colour encodes weight type.
+  V48 (weight cosreg) is the only model with non-negligible weight similarity.
+  \texttt{proj\_mlp} (salmon) is the shortest bar in every model, confirming
+  it as the most layer-diverse component.  400M weight cosim pending.}
+  \label{fig:weight_cosim_summary_176m}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{postproj_cosim_summary_176m.pdf}
+  \caption{Pre- vs.\ post-projection mean consecutive cosim for attention
+  (left panel) and FFN (right panel) sub-outputs, 176M models.
+  Paired bars show the before/after effect of \texttt{proj\_attn} and
+  \texttt{proj\_mlp}.  The dramatic pre${\to}$post drop in the attention
+  panel (blue${\to}$dark blue) quantifies how strongly EGPT's projection
+  matrices decorrelate layer outputs.
+  V53 (ramp cosreg) has the most striking contrast: pre-proj = 0.923,
+  post-proj = 0.071.}
+  \label{fig:postproj_cosim_summary_176m}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{weight_cosim_consec_176m.pdf}
+  \caption{Per-weight-type consecutive cosine similarity vs.\ layer pair index.
+  Each subplot is one weight type; each line is one model.
+  All activation-cosreg variants (V1/V39/V52/V53) lie near zero on every panel.
+  V48 (weight cosreg, green) shows the strongest signal, especially in
+  $W_Q$ and $W_K$, with the effect diminishing through $W_1$, $W_2$,
+  \texttt{proj\_attn}, and finally \texttt{proj\_mlp}.
+  400M panels pending.}
+  \label{fig:weight_cosim_consec_176m}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{postproj_cosim_consec_176m.pdf}
+  \caption{Pre- and post-projection consecutive cosim per layer pair (176M).
+  Top row: attention sub-output before (faint) and after (bold) \texttt{proj\_attn}.
+  Bottom row: FFN sub-output before and after \texttt{proj\_mlp}.
+  V53's pre-proj attention line (bold purple, top) stays near 0.9 across all pairs
+  while the post-proj line collapses to ${\approx}0.07$, visually demonstrating
+  the projection's decorrelation effect.}
+  \label{fig:postproj_cosim_consec_176m}
+\end{figure}
+
+%% ============================================================
+\section{Scatter Plots: Alignment Strategies on the Efficiency Frontier}
+\label{app:scatter_alignment}
+%% ============================================================
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{scatter_ppl_acc_alignment.pdf}
+  \caption{WikiText PPL (left) and 10-task average accuracy (right) vs.\ total
+    parameter count for all alignment strategy variants.
+    \textbf{Colour/shape by group:}
+    blue squares = GPT baselines;
+    orange circles = EGPT baselines (V1, V1$_{400\text{M}}$);
+    purple diamonds = shared-backbone (V3/V4);
+    green triangles = single-block recurrent (V2/V57/V59);
+    red stars = cosreg variants (V39/V52/V53/V48).
+    \textbf{Key observations:}
+    (1) V4 (shared-backbone wide, lr=2e-3) achieves the best PPL among EGPT-family
+    models (41.8), well below V1 (47.7), placing it near the GPT-only frontier.
+    (2) All cosreg variants cluster with V1 on PPL (47.3--47.7), confirming that
+    cosreg does not hurt perplexity.
+    (3) Recurrent models (V57/V59) show severe PPL regression (69--89) relative to
+    their parameter count, while maintaining moderate accuracy (43--44\%).
+    V63 (1$\times$12 $d{=}1408$, iso-param to V0 GPT) pending.
+  }
+  \label{fig:scatter_ppl_acc_alignment}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{scatter_ppl_flops_alignment.pdf}
+  \caption{Same models as Fig.~\ref{fig:scatter_ppl_acc_alignment} plotted against
+    FLOPs/token (forward pass, approximated as $2 N_{\text{layers}} \times
+    (4d^2 + 3d \cdot d_{\text{int}})$).
+    \textbf{Critical comparison:}
+    V3 (shared backbone, $d{=}1152$, 382 MFLOPs/token) vs.\ V53
+    (cosreg ramp, $d{=}768$, 170 MFLOPs/token).
+    V53 achieves \emph{better} PPL (47.7 vs.\ 54.9) and accuracy (45.4\% vs.\ 44.2\%)
+    at $2.25\times$ lower compute — the same architectural insight (shared computation
+    + diverse projections), achieved cheaply via regularisation rather than exact
+    weight-sharing with a wider block.
+    V4 (637 MFLOPs/token, wide FFN + wider heads) benefits substantially from its
+    $3.75\times$ compute advantage over V53 and achieves PPL 41.8 / acc 46.6\%.
+    At matched FLOPs to V53 (${\approx}170$ MFLOPs), the GPT baseline (V0, 38.3 PPL)
+    remains the PPL leader.
+  }
+  \label{fig:scatter_flops_alignment}
+\end{figure}
