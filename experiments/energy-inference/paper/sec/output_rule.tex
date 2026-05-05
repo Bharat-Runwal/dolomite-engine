@@ -1,0 +1,102 @@
+\section{The Output Rule Is the Key}
+\label{sec:output_rule}
+%% ============================================================
+
+\subsection{What the Energy Head Is Actually Computing}
+
+In EGPT and mixed-head models, the energy head output is:
+\begin{equation}
+  \mathrm{attn\_out}_{E,h}(t) = \bigl[ A_h K_h \bigr]_t = \sum_s A_{h,ts} K_{h,s}. \label{eq:energy_head_output}
+\end{equation}
+This is a weighted sum of \emph{keys} --- it lies on the convex hull of the key manifold.
+The true gradient of the energy $E_h(h_t) = -\log \sum_s A_{h,ts}$ with respect
+to $h_t$ (treating $Q_h = W_{Q,h} h_t$) is:
+\begin{equation}
+  \nabla_{h_t} E_h = W_{Q,h}^\top \bigl[ A_h K_h \bigr]_t. \label{eq:true_egrad}
+\end{equation}
+This differs from Eq.~\ref{eq:energy_head_output} by a factor of $W_{Q,h}^\top$,
+which maps from head space ($d_h$) back to hidden space ($D$).
+The $V{=}K$ output \emph{approximates} the true gradient in the sense that it
+points in a related direction, but it is not the true gradient unless $W_{Q,h} = I$
+(a severe restriction).
+
+\subsection{EGrad(attn)/EDesc(attn) vs.\ MixedHead: V27/V28/V29/V30/V33/V34}
+
+\textbf{MixedHead baselines (V15/V16)} were trained with the standard V10 architecture
+(shared $W_O$, additive update) at 144M / 285 MFLOPs/tok --- iso-param and iso-FLOP to V10.
+\textbf{EGrad(attn)} (V27 12$\times$1, V29 6$\times$2, V33 6$\times$2 d=1024) and
+\textbf{EDesc(attn)} (V28 12$\times$1, V30 6$\times$2, V34 6$\times$2 d=1024) use the
+$W_{Q,h}^\top$ output rule described in \S\ref{sec:output_rule} and have slightly fewer
+params (141M) due to the different projection structure.
+
+\begin{table}[h]
+\centering
+\caption{Output-rule ablation (all 12$\times$1, $d{=}768$, 30k steps).
+  V15/V16 are MixedHead baselines (shared $W_O$); V27/V28 use $W_{Q,h}^\top$ for energy heads.
+  \textbf{Bold} = best per metric.}
+\label{tab:output_rule}
+\resizebox{0.55\textwidth}{!}{%
+\input{tables/output_rule}}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/new_variants_ppl_vs_acc.pdf}
+    \caption{PPL vs.\ accuracy scatter.  V15 Mixed shows marginal improvements over V0 GPT
+      and V10 Mixed (likely seed variance; architecture identical to V10).}
+    \label{fig:ppl_vs_acc}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/new_variants_delta_heatmap.pdf}
+    \caption{Per-task accuracy delta vs.\ V0 GPT.  V15/V16 MixH show broad but small gains.}
+    \label{fig:delta_heatmap}
+  \end{subfigure}
+  \caption{Mixed-head output-rule variants: V15/V16 MixH vs.\ baselines.  EGrad(attn)/EDesc(attn) results in Table~\ref{tab:output_rule}.}
+  \label{fig:output_rule}
+\end{figure}
+
+\paragraph{Key results.}
+\begin{enumerate}
+  \item \textbf{EGrad/EDesc closely match MixedHead.}
+    V27 EGrad achieves 46.6\% avg / 37.14 PPL and V28 EDesc achieves 47.0\% / 38.59 PPL,
+    both within noise of V10 Mixed (47.2\% / 36.99 PPL) and the MixedHead V15
+    variant (47.9\% / 36.96 PPL).
+    This confirms that the \emph{mixed-head architecture} drives the improvement over plain
+    EGPT, but the specific output rule (true energy gradient vs.\ $V{=}K$ with $W_O$)
+    provides no measurable additional gain at 144M / 30k steps.
+
+  \item \textbf{V15/V16 marginal lead reflects seed/LR sensitivity.}
+    V15 and V16 are iso-param and iso-FLOP to V10 Mixed; their small advantage over
+    V27/V28 (which differ in projection structure) is within the noise of hyperparameter
+    variation.  All variants sit within $\sim$1 pp accuracy and $\sim$1.5 PPL.
+
+  \item \textbf{GSM8K regression is a mixed-head property.}
+    V27 scores 1.52\% GSM8K --- matching V10 Mixed but below V0 GPT (2.20\%).
+    V15 (2.58\%) is an outlier within the MixedHead family; V28 EDesc (1.59\%) matches V10.
+
+  \item \textbf{6$\times$2 recurrent EGrad (V29) and EDesc (V30) are consistent.}
+    V29 EGrad: 40.89 PPL / 46.9\% avg; V30 EDesc: 42.45 PPL / 46.1\% avg ---
+    slightly worse than 12$\times$1 (expected for weight-shared models at this scale).
+\end{enumerate}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.7\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params_v3_egrad_only.pdf}
+  \caption{EGrad(attn)/EDesc(attn) (V27--V36) vs.\ baselines: accuracy vs.\ parameters.
+    EGrad (red) and EDesc (green) cluster tightly with MixedHead (purple), confirming
+    the output rule provides no additional gain over the mixed-head baseline at 144M scale.
+    See Appendix~\ref{sec:appendix_scatter} for full scatter plots.}
+  \label{fig:egrad_scatter}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.8\textwidth]{../results/multi-block-ablation/plots/heatmap_egrad_edesc_v27_v36.pdf}
+  \caption{Per-task accuracy heatmap for true EGrad/EDesc vs.\ baselines.
+    V27--V34 (red/green rows) show no systematic per-task advantage over Mixed or GPT.}
+  \label{fig:egrad_heatmap}
+\end{figure}
+
+%% ============================================================

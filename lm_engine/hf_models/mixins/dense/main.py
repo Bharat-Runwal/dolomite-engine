@@ -96,6 +96,7 @@ class CausalLMModelMixin(PreTrainedModelMixin):
 
         hidden_states = transformer_outputs.last_hidden_state
         past_key_values = transformer_outputs.past_key_values
+        energy_descent_loss = transformer_outputs.energy_descent_loss
         del transformer_outputs
 
         lm_logits = None
@@ -134,6 +135,10 @@ class CausalLMModelMixin(PreTrainedModelMixin):
 
         if loss is not None and not is_aux_loss_zero(aux_loss):
             loss = loss + self.router_aux_loss_coef * aux_loss
+
+        # Energy descent auxiliary loss (compile-safe, passed via model output)
+        if loss is not None and energy_descent_loss is not None:
+            loss = loss + energy_descent_loss
 
         return CausalLMOutputWithPast(
             loss=loss,

@@ -1,0 +1,62 @@
+\section{Diagnosing the EGPT Compute Gap}
+\label{sec:egpt_gap}
+%% ============================================================
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/wikitext_ppl.pdf}
+    \caption{WikiText word perplexity (lower is better).}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/avg_zeroshot_acc.pdf}
+    \caption{Average zero-shot accuracy (9 tasks).}
+  \end{subfigure}
+  \caption{Summary metrics for early variants.  V0 GPT (162M, 321 MFLOPs/tok) leads on perplexity;
+    V1 EGPT lr=2e-3 (143M, 359 MFLOPs) nearly ties on accuracy despite the FLOPs gap.}
+  \label{fig:summary_early}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{EGPT vs GPT at matched scale.  All trained for 30k steps (7.86B tokens)
+  unless noted.  FLOPs = forward pass, $s{=}4096$.}
+\label{tab:egpt_gap}
+\resizebox{\textwidth}{!}{%
+\input{tables/egpt_gap}}
+\end{table}
+
+\paragraph{Three faces of the gap.}
+\begin{enumerate}
+  \item \textbf{Perplexity gap at iso-param scale.}
+    V1 EGPT (143M) ties V0 GPT (162M) on average accuracy (49.0\% vs.\ 49.1\%)
+    but trails by $-24\%$ on perplexity (47.7 vs.\ 38.3) at slightly lower FLOPs.
+    Higher LR (3e-4 $\to$ 2e-3) closes the accuracy gap but not perplexity.
+
+  \item \textbf{FLOPs overhead at 400M scale.}
+    V1 400M EGPT uses 755 MFLOPs/token (the additional proj\_attn and proj\_mlp layers
+    plus wider $d=1024$), vs.\ 503 for a comparably sized GPT.
+    Despite $4.4\times$ the FLOPs of V0 GPT, V1 400M achieves only marginally better
+    benchmarks.  The loss curve of V1 400M on WandB closely \emph{tracks} V0 GPT's
+    curve despite the 4.4$\times$ FLOPs difference --- confirming that EGPT utilises
+    roughly 1/4 of the available compute.
+
+  \item \textbf{Weight-sharing is efficient but suboptimal.}
+    V3 (one shared block iterated $12\times$) matches V1 (12 distinct blocks $\times$ 1)
+    on perplexity at a fraction of the unique parameters, confirming the recurrence
+    adds useful computation.
+    V2 (6 blocks $\times$ 2 iters) is the weakest variant: fewer distinct blocks with
+    modest recurrence yields the worst result.
+\end{enumerate}
+
+\paragraph{Structural ablations (V5--V8).}
+Removing proj\_mlp (V5) saves 7M parameters at the cost of only $-0.7$ pp accuracy,
+with V1 EGPT's BoolQ/COPA advantages partially preserved.
+Explicitly enforcing a Helmholtz curl--gradient decomposition at architecture level (V6--V8)
+is substantially worse (PPL 63--82 vs.\ 48, accuracy 43--46\% vs.\ 49\%):
+the emergent Helmholtz balance learned by unconstrained V1 is beneficial, but imposing it
+architecturally hurts training dynamics.
+Full results for V5--V8 are in Appendix~\ref{sec:appendix_ablations}.
+
+%% ============================================================

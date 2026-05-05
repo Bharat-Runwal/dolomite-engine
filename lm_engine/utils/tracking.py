@@ -123,6 +123,18 @@ class ExperimentsTracker:
             else:
                 raise ValueError(f"unexpected experiments_tracker ({self.experiments_tracker_name})")
 
+    def log_config(self, values: dict) -> None:
+        """Log scalar metadata (e.g. param count) to the run config panel."""
+        if not self.is_tracking_rank or not self.tracking_enabled:
+            return
+        if self.experiments_tracker_name == ExperimentsTrackerName.aim:
+            for k, v in values.items():
+                self.run[k] = v
+        elif self.experiments_tracker_name == ExperimentsTrackerName.wandb:
+            wandb.config.update(values, allow_val_change=True)
+        else:
+            raise ValueError(f"unexpected experiments_tracker ({self.experiments_tracker_name})")
+
     def track(self, values: dict, step: int | None = None, context: str | None = None) -> None:
         """main tracking method
 

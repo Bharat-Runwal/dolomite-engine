@@ -1,0 +1,285 @@
+\section{Architecture Variants}
+\label{sec:architectures}
+%% ============================================================
+
+\subsection{Standard Transformer (GPT)}
+
+Each block applies:
+\begin{align}
+  \tilde{h} &= \mathrm{LN}(h), \label{eq:ln} \\
+  \mathrm{attn} &= W_O \left[ \|_h\, \mathrm{softmax}\!\left(\tfrac{Q_h K_h^\top}{\sqrt{d_h}}\right) V_h \right], \\
+  h &\leftarrow h + \mathrm{attn} + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}). \label{eq:gpt_update}
+\end{align}
+where $Q_h = W_{Q,h}\tilde{h}$, $K_h = W_{K,h}\tilde{h}$, $V_h = W_{V,h}\tilde{h}$,
+and $s_{\mathrm{ff}}$ is a learned scalar.
+
+\subsection{Original Energy GPT (EGPT)}
+
+EGPT uses $V_h{=}K_h$ as an \emph{efficiency decomposition}: flash attention is run on the
+smaller head-space tensor $[A_h K_h]_t \in \mathbb{R}^{d_h}$, then the result is projected
+back to hidden space by reusing $W_{Q,h}^\top$ (no extra parameters):
+\begin{align}
+  \mathrm{attn}_E &= \sum_h W_{Q,h}^\top A_h K_h, \quad A_h = \mathrm{softmax}\!\left(\tfrac{Q_h K_h^\top}{\sqrt{d_h}}\right), \\
+  g &= \mathrm{attn}_E + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}), \\
+  h &\leftarrow h - W \cdot g. \label{eq:egpt_update}
+\end{align}
+The projection matrix $W$ (shape $d \times d$) acts as a preconditioner / policy.
+Since $q_{h,t} = W_{Q,h} h_t$, the true gradient of the per-head energy
+$E_h(h_t) = -\log\!\sum_s A_{h,ts}$ with respect to $h_t$ is exactly:
+\begin{equation}
+  \nabla_{h_t} E_h \;=\; W_{Q,h}^\top \,[A_h K_h]_t .
+\end{equation}
+\textbf{EGPT therefore computes the true energy gradient.}
+The $V{=}K$ step is a factored representation that saves FLOPs during flash attention
+(operating in $\mathbb{R}^{d_h}$ rather than $\mathbb{R}^{D}$) and is \emph{not} an
+approximation.  The remaining component, $W \cdot g$, is an unconstrained $d{\times}d$
+preconditioner applied after the (correct) gradient computation.
+
+\textbf{Cost:} EGPT requires two additional $d{\times}d$ matrix multiplications
+(proj\_attn, proj\_mlp) compared to GPT, and the $V{=}K$ attention kernel is slightly
+more expensive than softmax attention with a separate $V$ projection.
+At $d=768$, 12 layers: 359 vs.\ 321 MFLOPs/token.
+At $d=1024$, 24 layers: 654 vs.\ 503 MFLOPs/token.
+
+\subsection{Mixed-Head EGPT (V10, V11)}
+
+A natural compromise: keep a fraction of heads as energy heads ($V{=}K$) and
+the remaining heads as standard GPT heads ($V{=}W_V x$), sharing a single output projection:
+\begin{align}
+  \mathrm{attn}_{\mathrm{mix}} &= W_O \Bigl[
+    \underbrace{\|_{h \in \mathcal{E}}\, A_h K_h}_{\text{energy heads}}
+    \;\Big\|\;
+    \underbrace{\|_{h \in \mathcal{G}}\, A_h V_h}_{\text{GPT heads}}
+  \Bigr], \\
+  h &\leftarrow h + \mathrm{attn}_{\mathrm{mix}} + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}). \label{eq:mixed_update}
+\end{align}
+The block remains \emph{additive} (GPT-style update), not subtractive.
+Mixed-head models can be implemented as a single attention kernel over all heads;
+no separate forward pass is needed.
+\textbf{Key limitation:} the shared $W_O$ applies an arbitrary learned projection to
+energy-head outputs $A_h K_h$ --- it does \emph{not} use $W_{Q,h}^\top$ as EGPT does.
+Therefore, unlike EGPT, V10 energy heads do \emph{not} compute the true energy gradient.
+
+\subsection{Energy Gradient Output (EGrad, V27, V31)}
+
+EGrad brings EGPT's $W_{Q,h}^\top$ output rule into the mixed-head context.
+Recall that EGPT already computes the true gradient by reusing $W_Q^\top$;
+the problem with V10 MixedHead is that its energy heads go through a shared $W_O$
+that ignores the $W_{Q,h}^\top$ structure.
+EGrad fixes this by giving energy heads their own $W_{Q,h}^\top$ output (no new params)
+and GPT heads their own smaller $W_{O,\mathcal{G}}$.
+
+The true gradient of the energy $E_h(h) = -\log \sum_i \exp(Q_h K_{h,i}^\top / \sqrt{d_h})$
+with respect to $h$ at position $t$ is:
+\begin{equation}
+  \nabla_{h_t} E_h = W_{Q,h}^\top \bigl[ A_h K_h \bigr]_t, \label{eq:egrad}
+\end{equation}
+where $W_{Q,h}^\top \in \mathbb{R}^{D \times d_h}$ maps from head space back to
+hidden dimension.
+EGrad uses this true gradient as the energy-head output, while keeping the GPT-head
+output and additive residual:
+\begin{align}
+  \mathrm{egrad}_h(t) &= W_{Q,h}^\top \bigl[ A_h K_h \bigr]_t, \\
+  \mathrm{egrad\_out} &= \sum_h \mathrm{egrad}_h \quad \text{(summed across energy heads)}, \\
+  h &\leftarrow h + \mathrm{egrad\_out} + W_{O,\mathcal{G}} \bigl[ \|_{h \in \mathcal{G}}\, A_h V_h \bigr]
+       + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h}). \label{eq:egrad_update}
+\end{align}
+No extra projection matrix is required: the output-projection for energy heads is
+$W_{Q,h}^\top$ (the transpose of the query projection), reused at no parameter cost.
+
+\textbf{Recurrent extension.}
+With layer reuse: $h^{(k+1)} = h^{(k)} + \mathrm{egrad\_out}^{(k)} + \ldots$ iterated
+$n_k$ times per unique block $k$.  The total effective compute is
+$\propto \sum_k n_k \times (4d^2 + 3d \cdot d_{\mathrm{int}})$.
+
+\subsection{Energy Descent Output (EDesc, V28, V32)}
+
+EDesc uses the mixed-head output (Eq.~\ref{eq:mixed_update}) as a gradient direction
+and applies a \emph{subtractive} update, with no separate projection matrix
+(\texttt{energy\_proj\_type: identity}):
+\begin{equation}
+  h \leftarrow h - \bigl(\mathrm{attn\_mix} + s_{\mathrm{ff}} \cdot \mathrm{FFN}(\tilde{h})\bigr). \label{eq:edesc_update}
+\end{equation}
+EDesc is simpler than EGrad: it keeps the $V{=}K$ energy heads but interprets
+the whole block output as a descent direction.
+
+\subsection{Comparison Table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{bar_egpt_gap.pdf}
+  \caption{Diagnosing the EGPT compute gap. Bars compare V0 GPT 12$\times$1 (162M, 321 MFLOPs/tok), V1 EGPT 12$\times$1 (143M, 359 MFLOPs/tok), V1 EGPT 24$\times$1 (400M, 755 MFLOPs/tok), and V9 GPT 24$\times$1 (354M, 503 MFLOPs/tok). EGPT trails GPT on PPL despite higher FLOPs.}
+  \label{fig:bar_egpt_gap}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{bar_scaling.pdf}
+  \caption{400M-scale headline. V19 MixH$^\dagger$, V31 EGrad, and V32 EDesc dominate the V9 GPT baseline on Avg accuracy and PPL at matched compute (503 MFLOPs/tok); V1 EGPT 24$\times$1 trails despite using more FLOPs.}
+  \label{fig:bar_scaling}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{bar_scaling_v25v26.pdf}
+  \caption{Recurrence-schedule ablation (Mixed, 162M unique params, 503 MFLOPs/tok, 30k steps). V25 (uniform 6$\times$4) and V26 (back-loaded 6$\times$ramp) test whether more or non-uniform recurrence beats V23/V24 12$\times$2.}
+  \label{fig:bar_scaling_v25v26}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{bar_cosreg_benchmarks.pdf}
+  \caption{Cosine-similarity regulariser benchmark performance (176M, 30k steps,
+  30k$\times$4~GPU$\times$7.86B tokens).
+  Light cosreg ($\lambda{=}0.01$, V39 act / V48 wt) is roughly free; the
+  stronger variants V52 ($\lambda{=}0.1$) and V53 (cosine ramp $0{\to}1.0$)
+  cost $\approx$0.8--1.1 accuracy points on average vs V1 EGPT, while
+  V53's WikiPPL (47.7) is identical to V1's --- strong cosreg does not hurt perplexity.
+  V48 (weight-cosreg) loses the most ($-$1.6 acc, $+$14.9 PPL vs V1).
+  See \S\ref{sec:alignment_efficiency} for FLOPs and training-time analysis.}
+  \label{fig:bar_cosreg_benchmarks}
+\end{figure}
+
+%% ============================================================
+\subsection{Alignment Strategies: FLOPs and Training Efficiency}
+\label{sec:alignment_efficiency}
+%% ============================================================
+
+\paragraph{The shared-backbone baseline (V3/V4).}
+Before cosreg was introduced, we explored an explicit form of the same idea:
+\emph{exact} weight sharing for the attention and FFN backbone, with
+12 independent \texttt{proj\_attn}/\texttt{proj\_mlp} pairs per block
+(\texttt{shared\_backbone: true} in config).
+V3 ($d{=}1152$, 8 heads, head-dim 144, int 3072)
+and V4 ($d{=}1152$, 4 heads, head-dim \textbf{288} = $2{\times}$V3, int \textbf{6144} = $2{\times}$V3)
+both share the attn+FFN weights exactly; V4 is the ``wide'' variant with
+doubled head dimension and FFN width.
+Results (Table~\ref{tab:alignment_flops}) show V4* (lr=2e-3) achieves
+WikiPPL\,=\,41.8 --- \emph{better} than V1 EGPT (47.7) --- and avg accuracy 46.6\%,
+matching V1 within noise.
+\emph{However, V4 uses 637~MFLOPs/token ($3.75{\times}$ V1's 170~MFLOPs/token)},
+explaining the PPL gain: V4 is a much more expensive model.
+
+\paragraph{V53 cosreg ramp: same idea, much cheaper.}
+V53 achieves partial alignment (pre-proj attn cosim 0.92 vs 0.20 for V1; Appendix~\ref{app:cosreg_align})
+without exact weight sharing, at the \emph{same} forward-pass FLOPs as V1 (170~MFLOPs/token).
+Comparing against V3 (382~MFLOPs, $2.25{\times}$ V53's budget), V53 wins on both
+metrics: PPL 47.7 vs 54.9, avg 45.4\% vs 44.2\%.
+This is the key efficiency finding: \textbf{cosreg achieves better results
+than exact backbone sharing at 2.25${\times}$ lower inference-time compute.}
+
+\paragraph{Training-time overhead and the cost of activation cosreg.}
+Table~\ref{tab:alignment_flops} also reports per-step training times measured on
+4$\times$A100 (preemptable queue).
+V53 takes \textbf{0.64~s/step} --- $2{\times}$ V1 (0.31~s/step) ---
+because the regulariser stores all 12 attn-output tensors in the autograd graph
+and computes cosine similarity for pairs at offsets $\{1,2,4\}$, producing 29
+backward paths through the attention computation.
+V3 (0.45~s/step, 3.8~h for 30k) fits in a single 4-h chunk.
+V4 (${\approx}$0.74~s/step estimated from FLOPs ratio, ${\approx}$6.2~h)
+required multiple 4-h job restarts; its wandb logs undercount total steps.
+At \emph{inference} time there is no overhead: V53 runs at exactly V1's FLOPs.
+
+\textbf{Fix: stochastic pair sampling.}
+The 29-pair scheme is replaced in the current codebase with \emph{stochastic
+sampling of $k$=3 random consecutive pairs per step}, reducing the extra backward
+paths from 29 to 3 and the expected overhead from $2{\times}$ to ${\approx}25\%$.
+Coverage is unchanged in expectation across steps.
+
+\textbf{Alternative: backbone-only weight cosreg (V64).}
+Weight cosreg (V48: $\lambda{=}0.01$, all matrices) is fast (0.31~s/step, trivial
+$O(d^2)$ dot products, no attention backward) but hurts PPL (62.6) because it
+pulls \texttt{proj\_attn}/\texttt{proj\_mlp} toward alignment — precisely the matrices
+that should remain diverse.
+V64 applies weight cosreg only to the backbone (W\_Q, W\_K, W1, W2), excluding
+projection weights, with a cosine ramp $0{\to}0.1$ over 30k steps.
+This is the weight-space analogue of V53's goal at V1's training speed.
+Results pending (job 60058).
+
+\begin{table}[h]
+\centering
+\caption{%
+  FLOPs/token (forward pass), total parameter count, training step time
+  (measured on 4$\times$A100, 30k steps), and final benchmark results for
+  alignment-strategy variants and baselines.
+  FLOPs $= 2 N_\ell \cdot (4d^2 + 3d \cdot d_{\text{int}})$.
+  Training time marked $^\dagger$ = estimated from FLOPs ratio vs V1;
+  V4 was preempted multiple times so wandb logs are incomplete.
+  WikiPPL = WikiText word-level perplexity; Avg = 10-task \texttt{acc\_norm} mean.
+}
+\label{tab:alignment_flops}
+\small
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{MFLOPs} & \textbf{s/step} & \textbf{30k$\,$h} & \textbf{WikiPPL$\downarrow$} & \textbf{Avg$\uparrow$} \\
+\midrule
+V0  GPT $12{\times}1$, $d{=}768$         & 162M & 170  & 0.28$^\dagger$ & 2.3 & \textbf{38.3} & 46.7\% \\
+V1  EGPT $12{\times}1$, $d{=}768$        & 176M & 170  & 0.31           & 2.6 & 47.7          & 46.5\% \\
+\midrule
+V39 act-cosreg $\lambda{=}0.01$           & 176M & 170  & 0.31           & 2.6 & 47.3          & 46.3\% \\
+V52 act-cosreg $\lambda{=}0.1$            & 176M & 170  & 0.32$^\dagger$ & 2.6 & 47.4          & 45.7\% \\
+\textbf{V53 cosreg ramp $0{\to}1.0$}      & \textbf{176M} & \textbf{170} & \textbf{0.64} & \textbf{5.3} & 47.7 & 45.4\% \\
+V48 wt-cosreg $\lambda{=}0.01$            & 176M & 170  & 0.31$^\dagger$ & 2.6 & 62.6          & 44.9\% \\
+\textit{V64 backbone wt-cosreg ramp${\to}$0.1} & \textit{176M} & \textit{170} & \textit{$\approx$0.31} & \textit{2.6} & \textit{---} & \textit{---} \\
+\midrule
+V3  shared-bb, $d{=}1152$                 & 163M & 382  & 0.45           & 3.8 & 54.9          & 44.2\% \\
+V4  shared-bb wide, $d{=}1152$, lr=7e-4  & 174M & 637  & 0.74$^\dagger$ & 6.2$^\dagger$ & 44.2 & 45.8\% \\
+\textbf{V4* shared-bb wide, lr=2e-3}      & \textbf{174M} & \textbf{637} & 0.74$^\dagger$ & 6.2$^\dagger$ & \textbf{41.8} & \textbf{46.6\%} \\
+\midrule
+V9  GPT $24{\times}1$, $d{=}1024$         & 354M & 604  & ---            & --- & 29.8 & 48.6\% \\
+V1  EGPT $24{\times}1$, $d{=}1024$        & 354M & 604  & ---            & --- & 38.6 & 47.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{scatter_ppl_flops_alignment.pdf}
+  \caption{WikiText PPL (left) and avg accuracy (right) vs.\ FLOPs/token for all
+    alignment strategy variants and baselines (30k steps, 7.86B tokens).
+    \textbf{Key observation:} V53 cosreg ramp (red star, 170~MFLOPs/token)
+    outperforms V3 shared-backbone (purple diamond, 382~MFLOPs) on both metrics
+    despite $2.25{\times}$ lower inference FLOPs.
+    V4* wide shared-backbone (purple diamond, 637~MFLOPs) achieves the best EGPT PPL
+    (41.8) but costs $3.75{\times}$ V53's FLOPs.
+    All cosreg variants cluster with V1 EGPT at 170~MFLOPs (WikiPPL ${\approx}$47--48),
+    confirming that cosreg does not hurt perplexity.
+    Recurrent baselines (green triangles) show severe PPL regression (69--89)
+    relative to their FLOPs.}
+  \label{fig:scatter_flops_alignment}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{scatter_ppl_acc_alignment.pdf}
+  \caption{Same as Fig.~\ref{fig:scatter_flops_alignment} but plotting against
+    total parameter count.
+    At matched parameters (${\approx}$163--176M), the V4* shared-backbone
+    (174M, PPL 41.8) outperforms V1 EGPT (176M, PPL 47.7) substantially,
+    but requires $3.75{\times}$ more FLOPs per token at inference.
+    V53 cosreg (176M, PPL 47.7) matches V1 on PPL with no extra inference cost,
+    at a $2{\times}$ training-time overhead (0.64 vs 0.31~s/step).
+    Full per-model breakdown in App.~\ref{app:scatter_alignment}.}
+  \label{fig:scatter_params_alignment}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{Architecture comparison. All use shared $W_O$ across heads within a block.
+  ``Additive'' = residual $+$; ``Descent'' = residual $-$.
+  EGrad uses $W_Q^\top$ as energy head output projection (no new params).}
+\label{tab:arch_compare}
+\begin{tabular}{lllll}
+\toprule
+\textbf{Model} & \textbf{Attn output} & \textbf{Block update} & \textbf{New params} & \textbf{Extra FLOPs} \\
+\midrule
+GPT         & $A V$ (std)       & Additive    & $W_V$ per head      & none \\
+EGPT        & $A K$ (energy)    & Descent     & proj\_attn, proj\_mlp & $2d^2$ per block \\
+Mixed (V10) & $A K$ + $A V$     & Additive    & $W_V$ for GPT heads & none vs.\ GPT \\
+EGrad (V27) & $W_Q^\top A K$ + $A V$ & Additive & none (reuse $W_Q$) & small \\
+EDesc (V28) & $A K$ + $A V$     & Descent     & none                 & none \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================

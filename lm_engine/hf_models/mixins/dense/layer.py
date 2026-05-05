@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import numbers
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ...cache import GenerationCache
 from ...config import CommonConfig
@@ -41,6 +44,8 @@ class Block(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        layer_id: int | None = None,
+        iter_idx: int = 0,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -52,6 +57,7 @@ class Block(nn.Module):
             rope_cos_sin=rope_cos_sin,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            layer_id=layer_id,
         )
 
         if self.m_residual is not None:
@@ -79,6 +85,7 @@ class Block(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        layer_id: int | None = None,
     ) -> torch.Tensor:
         if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention"]:
             hidden_states = self.sequence_mixer(
@@ -88,6 +95,7 @@ class Block(nn.Module):
                 rope_cos_sin=rope_cos_sin,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
+                layer_id=layer_id,
             )
         elif self.sequence_mixer_type in ["causal_convolution", "mamba2"]:
             hidden_states = self.sequence_mixer(

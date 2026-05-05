@@ -1,0 +1,19 @@
+\section{GSM8K Scatter}
+%% ============================================================
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_gsm8k_vs_params.pdf}
+    \caption{GSM8K vs.\ parameters.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_gsm8k_vs_flops.pdf}
+    \caption{GSM8K vs.\ FLOPs/token.}
+  \end{subfigure}
+  \caption{GSM8K exact-match accuracy across all models.  All scores $<$3\%;
+    no architecture consistently leads.  V9 GPT (2.9\%) and V15 EGrad (2.6\%) lead
+    at 354M and 144M scale respectively.}
+\end{figure}
+

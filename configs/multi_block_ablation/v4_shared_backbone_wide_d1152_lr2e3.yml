@@ -1,0 +1,130 @@
+# V4: Like V3 (shared backbone, independent proj) but with 2x wider attention per head
+# and 2x wider FFN intermediate. Uses 4 attention heads (vs 8 in V3) for larger head_dim.
+# ~174M total: 1 shared (attn 5.3M + FFN 21.2M) + 12 proj=31.9M + embed=115.6M
+#
+# Key difference from V3:
+#   - 4 attention heads × head_dim=288 (vs 8×144): same d but each head sees 2x wider subspace
+#   - intermediate_size=6144 (vs 3072): 2x wider FFN hidden layer
+#   - attention_multiplier = 1/sqrt(288) ≈ 0.05893
+# This expands the per-head capacity of the shared block without widening the residual stream.
+#
+# 30k steps × 4 GPUs × batch=4 × grad_accum=4 × seq=4096 = 7.86B tokens
+# Est. training time: ~4-5h on 4 A100s
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    initializer_range: 0.02
+    layer_norm_epsilon: 1e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 288           # 1152 / 4 = 288 per head (2x wider than V3)
+    hidden_size: 1152
+    num_layers: 12
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    shared_backbone: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      # 4 heads × 288 head_dim = 1152 total; attention_multiplier = 1/sqrt(288)
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+      - {sequence_mixer_type: energy_attention, num_attention_heads: 4, num_key_value_heads: 4, add_bias: false, attention_multiplier: 0.05893}
+    mlp_blocks:
+      # 2x wider FFN: intermediate_size=6144 vs 3072 in V3
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - {mlp_type: Energy_MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/v4_shared_wide_d1152_lr2e3
+  save_interval: 5000
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: v4_shared_backbone_wide_d1152_lr2e3
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+      - 0.9
+      - 0.95
+    eps: 1e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

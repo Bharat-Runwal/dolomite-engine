@@ -1,0 +1,38 @@
+\section{Mixed Heads Close the Accuracy Gap}
+\label{sec:mixed}
+%% ============================================================
+
+The structural ablations establish that the $V{=}K$ constraint is the main bottleneck
+for perplexity.  A natural fix: replace a fraction of energy heads with standard
+GPT heads ($V = W_V x$), sharing a single output projection $W_O$.
+
+\begin{table}[h]
+\centering
+\caption{Iso-family comparison.  All trained 30k steps.  FLOPs = forward pass, $s=4096$.
+  V10/V11 use the mixed-head (additive) block.  V12 is a recurrent GPT baseline.}
+\label{tab:mixed_results}
+\resizebox{\textwidth}{!}{%
+\input{tables/mixed_results}}
+\end{table}
+
+\paragraph{Findings.}
+\begin{itemize}
+  \item V10 Mixed ties V0 GPT on accuracy (47.2\%) with 12\% fewer FLOPs and 11\% fewer
+    parameters, and achieves better PPL (37.0 vs.\ 38.3).
+    On a per-FLOP basis, V10 is marginally more efficient than V0 at this scale.
+  \item V11 (6$\times$2) ties V12 recurrent GPT,
+    confirming that the mixed-head design generalises to recurrent settings.
+  \item \textbf{GSM8K regresses.}  Both V10 (1.52\%) and V11 (1.36\%) fall below
+    the GPT baseline (2.20\%) on mathematical reasoning.
+    The energy $V{=}K$ constraint in the energy heads appears to interfere with
+    arithmetic reasoning regardless of the fraction of energy heads.
+  \item Higher energy-head fractions (V13 8:4, V14 10:2) perform worse than 6:6 (V10),
+    confirming the GPT heads contribute disproportionately to accuracy.
+\end{itemize}
+
+\paragraph{A ceiling exists.}
+Mixed heads with the $V{=}K$ output rule cannot exceed V0 GPT on accuracy or GSM8K,
+despite matching on FLOPs.  The energy heads are contributing \emph{something}
+(better PPL, some accuracy) but their output is suboptimal.
+
+%% ============================================================

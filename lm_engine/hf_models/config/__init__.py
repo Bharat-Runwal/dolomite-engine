@@ -10,7 +10,7 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import _MLPArgs, _MoEArgs
+from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MixedEnergyMLPArgs, _BoltzmannMoEEnergyMLPArgs
 from .sequence_mixer import (
     _CausalConvolution,
     _GatedDeltaNetArgs,
@@ -19,6 +19,8 @@ from .sequence_mixer import (
     _MultiHeadLatentAttentionArgs,
     _RNNArgs,
     _SoftmaxAttentionArgs,
+    _EnergyAttentionArgs,
+    _MixedHeadAttentionArgs,
 )
 
 
@@ -73,9 +75,13 @@ _SEQUENCE_MIXER_CONFIG_CLASSES = {
     "rnn": _RNNArgs,
     "softmax_attention": _SoftmaxAttentionArgs,
     "gated_deltanet": _GatedDeltaNetArgs,
+    "energy_attention": _EnergyAttentionArgs,
+    "mixed_head_attention": _MixedHeadAttentionArgs,
+    "energy_grad_mixed_head_attention": _MixedHeadAttentionArgs,
+    "mixed_head_energy_descent": _MixedHeadAttentionArgs,
 }
 
-_MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs}
+_MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs, "Mixed_Energy_MLP": _MixedEnergyMLPArgs, "BoltzmannMoE_Energy_MLP": _BoltzmannMoEEnergyMLPArgs}
 
 
 class CommonConfig(PretrainedConfig):
@@ -107,6 +113,23 @@ class CommonConfig(PretrainedConfig):
         router_aux_loss_coef: float = 0.001,
         tie_word_embeddings: bool = True,
         rope_dim: int | None = None,
+        num_pre_layers: int = 8,
+        num_post_layers: int = 8,
+        num_iterations: int = 1,
+        layer_iterations: list[int] | None = None,
+        iter_dropout_range: int = 0,
+        iter_dropout_range_per_block: list[int] | None = None,
+        iter_noise_eta: float = 0.0,
+        energy_norm_type: str | None = None,
+        energy_proj_type: str = "unconstrained",
+        energy_proj_rank: int = 32,
+        energy_dissipation_rank: int = 16,
+        energy_stop_grad_key: bool = False,
+        energy_attn_add_wv_wo: bool = False,
+        energy_apply_rayleigh: bool = False,
+        scale_ff_init: float | list[float] | None = None,
+        energy_descent_loss_coef: float = 0.0,
+        shared_backbone: bool = False,
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -125,6 +148,36 @@ class CommonConfig(PretrainedConfig):
         self.m_width = m_width
         self.m_residual = m_residual
         self.init_method = init_method
+
+
+
+        self.num_pre_layers = num_pre_layers
+        self.num_post_layers = num_post_layers
+        self.num_iterations = num_iterations
+        self.iter_dropout_range = iter_dropout_range
+        self.iter_dropout_range_per_block = iter_dropout_range_per_block
+        self.iter_noise_eta = iter_noise_eta
+        # Energy block normalization: None = use global normalization_function,
+        # or override with "bare_layernorm", "rmsnorm", "layernorm", etc.
+        self.energy_norm_type = energy_norm_type
+        # Energy block projection type: "unconstrained" (learned linear),
+        # "pos_scalar" (positive scalar), "identity" (no projection)
+        self.energy_proj_type = energy_proj_type
+        self.energy_proj_rank = energy_proj_rank
+        self.energy_dissipation_rank = energy_dissipation_rank
+        self.energy_stop_grad_key = energy_stop_grad_key
+        self.energy_attn_add_wv_wo = energy_attn_add_wv_wo
+        self.energy_apply_rayleigh = energy_apply_rayleigh
+        self.scale_ff_init = scale_ff_init
+        self.energy_descent_loss_coef = energy_descent_loss_coef
+        self.shared_backbone = shared_backbone
+
+        if layer_iterations is not None:
+            self.layer_iterations = layer_iterations
+        else:
+            num_loop = num_layers - num_pre_layers - num_post_layers
+            self.layer_iterations = [1] * num_pre_layers + [num_iterations] * num_loop + [1] * num_post_layers
+        
 
         # check if enums are valid
         assert init_method in ["normal", "mup"]
@@ -225,7 +278,10 @@ class CommonConfig(PretrainedConfig):
                     "intermediate_size", 2 * self.hidden_size
                 )
 
-            sequence_mixer_blocks.append(_SEQUENCE_MIXER_CONFIG_CLASSES[sequence_mixer_type](**sequence_mixer_block))
+            block_config = _SEQUENCE_MIXER_CONFIG_CLASSES[sequence_mixer_type](**sequence_mixer_block)
+            if block_config.sequence_mixer_type != sequence_mixer_type:
+                setattr(block_config, "sequence_mixer_type", sequence_mixer_type)
+            sequence_mixer_blocks.append(block_config)
 
         self.sequence_mixer_blocks = sequence_mixer_blocks
 

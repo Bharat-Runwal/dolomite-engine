@@ -1,0 +1,75 @@
+# V42: Fine-tune EGPT 6-layer (naive-merged from V1 12-layer)
+# Starting from the naively averaged pairwise merge of V1 (12 layers → 6 layers),
+# fine-tune for 5k steps at lr=2e-4 (10× lower than scratch) to recover performance.
+# Goal: measure how much PPL recovers post-merge — baseline for layer-merger viability.
+# ~96M params (6 blocks + shared embeddings). 5k steps × 4 GPUs × batch=4 × accum=4 × seq=4096 = 1.3B tokens
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  # Load merged HF model saved by merge_layers_v42.py (has config.json + model.safetensors)
+  model_name: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/v42_merged_naive_init
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/v42_egpt_6layer_naive_merge_finetune_d768
+  save_interval: 1000
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: v42_egpt_6layer_naive_merge_finetune_d768
+
+training_parameters:
+  num_training_steps: 5000
+  eval_interval: 1000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-4
+    weight_decay: 0.1
+    betas:
+      - 0.9
+      - 0.95
+    eps: 1e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 200
+  num_constant_steps: 0
+  num_decay_steps: 4800
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

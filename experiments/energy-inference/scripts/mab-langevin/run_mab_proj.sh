@@ -1,0 +1,43 @@
+#!/bin/bash
+# MAB + Langevin noise structured-proj retraining.
+# Thompson sampling over alpha arms + Langevin noise annealing on recurrence.
+# Usage: bash experiments/energy-inference/scripts/mab-langevin/run_mab_proj.sh
+
+REPO=/proj/dmfexp/nima/Code/dolomite-engine
+
+bsub \
+    -q normal \
+    -G grp_ebm \
+    -J struct_mab_langevin \
+    -gpu "num=1" \
+    -n 1 \
+    -M 48G \
+    -W 02:00 \
+    -o "${HOME}/bsub_logs/struct_mab_langevin_%J.stdout" \
+    -e "${HOME}/bsub_logs/struct_mab_langevin_%J.stderr" \
+    <<EOF
+#!/bin/bash
+source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
+export PYTHONPATH=$REPO:\$PYTHONPATH
+uv pip install accelerate datasets wandb tqdm -q
+cd $REPO
+python experiments/energy-inference/scripts/mab-langevin/train_mab_proj_20260413.py \
+    --steps 5000 \
+    --batch_size 8 \
+    --grad_accum 8 \
+    --seq_len 512 \
+    --lr 3e-4 \
+    --n_arms 10 \
+    --alpha_min 0.30 \
+    --alpha_max 0.70 \
+    --bandit_lr 0.1 \
+    --sigma_max 0.05 \
+    --sigma_min 0.0 \
+    --save_interval 2000 \
+    --log_interval 25 \
+    --norm_log_interval 100 \
+    --wandb_name "410m_mab_langevin"
+EOF
+
+echo "Submitted. Monitor: bjobs / bpeek <jobid>"
+echo "wandb: https://wandb.ai/nima-dehmamy-projects/energy-gpt"

@@ -397,6 +397,11 @@ def train(
         global_step += 1
         steps_since_start_time += 1
 
+        # Propagate global step to model wrapper (used for cosreg ramp schedule).
+        for _m in model_container:
+            if hasattr(_m, "set_training_step"):
+                _m.set_training_step(global_step)
+
         if is_pipeline_parallel_enabled:
             loss_step_dict = train_step_with_pipeline_parallel(
                 model_container=model_container,
@@ -443,6 +448,7 @@ def train(
                 experiments_tracker=experiments_tracker,
                 metrics_tracker=metrics_tracker,
                 context="train",
+                model_container=model_container,
             )
 
             start_time = time.perf_counter()
@@ -671,6 +677,10 @@ def main(args_class: type[DistillationArgs | TrainingArgs] = TrainingArgs) -> No
     )
     # track all hyperparams in args
     experiments_tracker.log_args(args)
+
+    # log param count to wandb config so it's visible as a run column
+    total_params, active_params = model_container[0].calculate_num_parameters()
+    experiments_tracker.log_config({"num_parameters": total_params, "active_parameters": active_params})
 
     # main training loop
     with disable_generation_cache(), enable_kernels(args.kernel_args.kernels):

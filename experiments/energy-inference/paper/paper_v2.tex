@@ -1,0 +1,79 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1.1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\graphicspath{{figs/}}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{microtype}
+
+
+\title{\textbf{From Energy Descent to Energy Gradient:\\
+How Changing the Output Rule Turns Energy Models into Better Transformers}}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Energy-based language models (EGPTs) replace the additive residual update of a standard
+transformer with a gradient step on an implicit energy function.
+Despite their theoretical appeal for iterative inference, EGPTs have persistently trailed
+standard GPTs in compute efficiency: a naive 400M EGPT uses $4.4\times$ more FLOPs per
+token yet achieves only GPT-equivalent accuracy.
+Through a series of targeted ablations, we identify the key bottleneck: in
+\emph{mixed-head} models (some heads use $V{=}K$ energy attention, others standard GPT),
+the $V{=}K$ energy heads go through a shared output projection $W_O$ that does not
+implement the correct energy gradient.
+We propose two output-rule variants---\textbf{EGrad} and \textbf{EDesc}---which
+explicitly apply $W_{Q,h}^\top$ as the energy-head output projection (the true gradient
+direction), and compare them to plain MixedHead baselines (V10, V15, V16).
+MixedHead (V15, 144M/285 MFLOPs) achieves 47.9\% avg and 36.96 PPL, matching or
+exceeding GPT at the same compute budget.
+EGrad (V27, 141M/285 MFLOPs) achieves 46.6\% avg and 37.14 PPL;
+EDesc (V28) achieves 47.0\% and 38.59 PPL --- both matching MixedHead,
+confirming the \emph{mixed-head architecture} (not the specific output rule)
+drives the improvement over plain EGPT.
+At 400M / 503 MFLOPs/token, EGrad V31 achieves 50.7\% avg and 27.9 PPL,
+outperforming matched GPT (48.6\% / 29.8 PPL) and MixedHead V19 (49.9\% / 27.8 PPL) ---
+the first consistent energy-model win over GPT.
+We also characterise the energy landscape through Helmholtz decomposition (trained models
+learn balanced curl--gradient projections emergently), layer similarity analysis
+(attention outputs share a common gradient direction in later EGPT layers), and
+weight-merge experiments (functional similarity does not imply structural mergeability).
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% ============================================================
+
+%% ============================================================
+%% Main body — sections live in sec/*.tex
+%% ============================================================
+\input{sec/intro}
+\input{sec/architecture}
+\input{sec/egpt_gap}
+\input{sec/probes}
+\input{sec/mixed_heads}
+\input{sec/output_rule}
+\input{sec/scaling}
+\input{sec/discussion}
+
+%% ============================================================
+\appendix
+%% ============================================================
+
+\input{sec/appendices/layer_merger}
+\input{sec/appendices/v5_v8}
+\input{sec/appendices/full_400m}
+\input{sec/appendices/full_benchmarks}
+\input{sec/appendices/all_scatter}
+\input{sec/appendices/cka_matrices}
+\input{sec/appendices/gsm8k_scatter}
+\input{sec/appendices/cosreg_align}
+
+\end{document}

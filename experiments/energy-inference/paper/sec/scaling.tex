@@ -1,0 +1,119 @@
+\section{Scaling to 400M: Headline Results}
+\label{sec:scaling}
+%% ============================================================
+
+Having established EGrad and EDesc as the best small-scale energy architectures,
+we scale them to $d=1024$, testing three recurrence schedules:
+
+\begin{itemize}
+  \item \textbf{V19/V20 (24$\times$1, 342M)}: 24 distinct blocks, 1 iteration each.
+    Iso-param ($\approx$342M) and iso-compute (503 MFLOPs/tok) to V9 GPT.
+  \item \textbf{V21/V22 (6$\times$2, 162M)}: 6 unique blocks, 2 iterations.
+    Parameter-efficient: unique params $\approx$ half, same 12 effective passes.
+  \item \textbf{V23/V24 (12$\times$2, 228M)}: 12 unique blocks, 2 iterations.
+    Matches compute of V9/V19/V20 (503 MFLOPs/tok) with weight sharing.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{400M-scale headline results (30k steps, 7.86B tokens).
+  Full table with recurrence ablations in Appendix~\ref{sec:appendix_400m_table}.
+  \textbf{Bold} = best per metric.}
+\label{tab:scaling}
+\resizebox{0.75\textwidth}{!}{%
+\input{tables/scaling}}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/bar_400m_models.pdf}
+  \caption{400M-scale model comparison.  V19 MixH and V20 MixH both surpass V9 GPT and
+    V1 EGPT on both axes.  V21/V22 (6$\times$2, 162M unique params) approach V9 accuracy
+    at less than half the compute.}
+  \label{fig:bar_400m}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_flops_v2.pdf}
+    \caption{PPL vs.\ FLOPs/token (log $x$, no Helmholtz).}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_flops_v2.pdf}
+    \caption{Avg accuracy vs.\ FLOPs/token (log $x$).}
+  \end{subfigure}
+  \caption{All models on the FLOPs-efficiency frontier.  Recurrent models (squares) sit
+    between the 142 MFLOPs and 503 MFLOPs clusters.  V19/V20 MixH push past
+    the V9 GPT frontier at 503 MFLOPs/token.}
+  \label{fig:scatter_flops}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_flops_v3_egrad_only.pdf}
+    \caption{True EGrad/EDesc vs.\ baselines (no Mixed): accuracy vs.\ FLOPs.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_flops_v3_egrad_only.pdf}
+    \caption{True EGrad/EDesc vs.\ baselines: PPL vs.\ FLOPs.}
+  \end{subfigure}
+  \caption{True EGrad/EDesc (V27--V36) on the efficiency frontier.
+    EGrad (red) and EDesc (green) track closely with Mixed (purple) on both axes.
+    At 400M / 503 MFLOPs, V31 EGrad (50.7\%) slightly exceeds V19 Mixed (49.9\%).}
+  \label{fig:scatter_v3_flops}
+\end{figure}
+
+\paragraph{Key observations.}
+\begin{itemize}
+  \item \textbf{MixedHead 24$\times$1 (V19/V20) surpasses GPT at the same compute.}
+    V19 MixH (PPL=27.8, avg=49.9\%) and V20 MixH (PPL=27.9, avg=49.5\%) both
+    outperform V9 GPT (PPL=29.8, avg=48.6\%) at identical FLOPs (503 MFLOPs/tok).
+    The advantage is $-2.0$ PPL and $+1.3$ pp accuracy for MixH.
+    True EGrad V31 (50.7\% avg, PPL=27.9) slightly exceeds V19 Mixed (49.9\%, PPL=27.8),
+    confirming that the mixed-head architecture drives the gain and EGrad matches or slightly
+    improves upon MixedHead at 400M scale.
+    These are the first mixed-head variants to consistently beat GPT at matched compute.
+    V19 MixH slightly edges out V20 MixH on both metrics; V31 EGrad tops all.
+
+  \item \textbf{Recurrent 6$\times$2 is parameter-efficient.}
+    V21/V22 (162M unique params, 252 MFLOPs/tok) achieve $\approx$37 PPL,
+    approaching V9 accuracy at half the compute.
+    At one-third V9's FLOPs, these are the most parameter-efficient models in the study.
+
+  \item \textbf{Weight sharing costs $\sim$4 PPL at matched compute.}
+    V23/V24 (228M, 503 MFLOPs/tok) achieve PPL $\approx$ 31.7 and $\sim$48\% accuracy ---
+    substantially better than V21/V22 but $\sim$4 PPL worse than V19/V20 (342M).
+    The 342M non-recurrent model outperforms the 228M recurrent model at the same FLOPs.
+    Weight sharing is a parameter-efficiency lever, not a free accuracy gain.
+
+  \item \textbf{GSM8K: GPT advantage holds at 400M scale.}
+    V9 GPT (2.9\%) leads, with V19/V21/V23 EGrad scoring 2.0--2.1\%.
+    The gap is smaller than at 144M scale, suggesting EGrad may close it at larger scale.
+\end{itemize}
+
+\paragraph{Recurrence schedule: V25 and V26.}
+\textbf{Note:} V25/V26 were also affected by the config-serialization bug (trained before the fix
+in commit 3191a28), so they trained as plain \textbf{MixedHead} rather than true EGrad.
+They are Mixed variants testing different recurrence schedules:
+\begin{itemize}
+  \item \textbf{V25 Mixed 6$\times$4} (4 uniform iterations per block, 162M unique params,
+    503 MFLOPs/tok): tests whether more recurrence with the same per-layer FLOPs as V23/V24 improves accuracy.
+  \item \textbf{V26 Mixed 6$\times$ramp} ([2,2,3,4,4,9] iterations, 503 MFLOPs/tok):
+    tests whether back-loading recurrence into later blocks helps.
+\end{itemize}
+Both completed 30k steps; benchmark results are shown in Table~\ref{tab:scaling_v25v26}.
+
+\begin{table}[h]
+\centering
+\caption{Recurrence-schedule ablation (Mixed, 162M unique params, 503 MFLOPs/tok, 30k steps).
+  V23/V24 (12$\times$2) and V9 GPT shown for reference.}
+\label{tab:scaling_v25v26}
+\resizebox{\textwidth}{!}{%
+\input{tables/scaling_v25v26}}
+\end{table}
+
+%% ============================================================

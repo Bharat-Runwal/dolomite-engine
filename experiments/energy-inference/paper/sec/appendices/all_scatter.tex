@@ -1,0 +1,50 @@
+\section{All Scatter Plots}
+\label{sec:appendix_scatter}
+%% ============================================================
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/headline_ppl_acc_vs_params.pdf}
+  \caption{Clean PPL and accuracy vs.\ parameters (same as Figs.~\ref{fig:headline_params},~\ref{fig:headline_flops} in main text).
+    Mixed mislabeled runs excluded.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_params_v3_with_mixhead.pdf}
+  \caption{PPL vs.\ parameters — all runs including Mixed (grey).
+    \textbf{Grey points (V15--V26) are mislabeled:} intended as EGrad/EDesc but
+    trained as plain MixedHead due to a config serialization bug (see \S\ref{sec:architectures}).
+    Shown here for reference only; not used in any main-text figures or conclusions.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params_v3_with_mixhead.pdf}
+  \caption{Accuracy vs.\ parameters — all runs including Mixed (grey).
+    Same caveat as above: grey points are mislabeled runs included for comparison only.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_ppl_vs_params_v2.pdf}
+    \caption{PPL vs.\ params (log $x$, no Helmholtz), early runs V0--V18.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/scatter_acc_vs_params_v2.pdf}
+    \caption{Avg accuracy vs.\ params (log $x$), early runs V0--V18.}
+  \end{subfigure}
+  \caption{Parameter-efficiency across early variants (V0--V18).  Recurrent models (squares) cluster
+    at smaller unique parameter counts.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{../results/multi-block-ablation/plots/heatmap_small_models.pdf}
+  \caption{Benchmark accuracy heatmap for all small-scale variants (V0--V18).
+    V15 EGrad and V16 EDesc occupy the top rows alongside V0 GPT.}
+\end{figure}
+
+%% ============================================================

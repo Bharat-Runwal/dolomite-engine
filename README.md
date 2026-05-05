@@ -1,3 +1,6 @@
+arc_challenge		arc_easy		boolq	copa	hellaswag		lambada_openai		openbookqa		piqa		race	sciq		wikitext			winogrande	Average	MMLU	gsm8k	gsm8k_cot	gsm8k_cot_hash
+acc	acc_norm	acc	acc_norm	acc	acc	acc	acc_norm	acc	perplexity	acc	acc_norm	acc	acc_norm	acc	acc	acc_norm	bits_per_byte	byte_perplexity	word_perplexity	acc					
+
 <!-- **************************************************
 Copyright (c) 2025, Mayank Mishra
 ************************************************** -->

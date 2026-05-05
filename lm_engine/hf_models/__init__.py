@@ -5,7 +5,10 @@
 from .config import CommonConfig
 from .loss import get_autoregressive_language_modeling_loss, is_aux_loss_zero
 from .mixins import CausalLMOutputWithPast, PipelineParallelInput, PipelineParallelOutput
-from .model_conversion import export_to_huggingface, import_from_huggingface
+try:
+    from .model_conversion import export_to_huggingface, import_from_huggingface
+except ImportError:
+    pass  # model_conversion requires transformers>=4.47 (GraniteMoeHybridConfig)
 from .models import (
     GPTBaseConfig,
     GPTBaseForCausalLM,
@@ -21,6 +24,9 @@ from .models import (
     PaLMConfig,
     PaLMForCausalLM,
     PaLMModel,
+    EnergyConfig,
+    EnergyForCausalLM,
+    EnergyModel,
 )
 from .parameter import (
     is_parameter_with_mup_learning_rate,

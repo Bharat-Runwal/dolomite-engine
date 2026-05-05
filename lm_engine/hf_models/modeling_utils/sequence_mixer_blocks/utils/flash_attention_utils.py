@@ -76,8 +76,12 @@ def flash_attention(
         assert use_flash_attention_3 or use_flash_attention_2
 
     window_size = (-1, -1)
-    if sliding_window is not None and key.size(1) > sliding_window:
+
+    if sliding_window is not None:
         window_size = (sliding_window, sliding_window)
+
+    # if sliding_window is not None and key.size(1) > sliding_window:
+    #     window_size = (sliding_window, sliding_window)
 
     if use_padding_free_transformer:
         assert sliding_window is None

@@ -11,6 +11,8 @@ from transformers import AutoConfig
 from .enums import GradientCheckpointingMethod
 from .hf_models import CommonConfig, is_custom_model
 from .hf_models.modeling_utils import is_glu
+from .hf_models.modeling_utils.mlp_blocks.mlp import Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP
+from .hf_models.modeling_utils.sequence_mixer_blocks.energy_attention import EnergyAttention_QK
 from .utils import (
     Accelerator,
     ExperimentsTracker,
@@ -44,7 +46,7 @@ def all_reduce_metrics_tracker(metrics_tracker: MetricsTrackingDict) -> MetricsT
 
 
 def track_metrics(
-    global_step: int, experiments_tracker: ExperimentsTracker, metrics_tracker: MetricsTrackingDict, context: str
+    global_step: int, experiments_tracker: ExperimentsTracker, metrics_tracker: MetricsTrackingDict, context: str,model_container=None,
 ) -> None:
     """tracks metrics like training loss, learning rate etc
 
@@ -55,6 +57,36 @@ def track_metrics(
         context (str): experiment context
     """
 
+
+    #TODO: This tracking makes training a bit slower change this :
+    if model_container is not None:
+        scale_ff_values = {}
+        energy_mlp_metrics = {}
+        for name, module in model_container[0].named_modules():
+            # Track scale_ff parameters
+            for param_name, param in module.named_parameters(recurse=False):
+                    # recurse=False gets only direct parameters, not from submodules
+                    if 'scale_ff' in param_name:
+                        scale_ff_values[f"{name}.{param_name}"] = param.item()
+
+            # Track Energy_MLP metrics
+            if isinstance(module, (Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP)):
+                metrics = module.get_metrics()
+                if metrics is not None:
+                    for metric_name, value in metrics.items():
+                        energy_mlp_metrics[f"{name}/{metric_name}"] = value
+
+            # Track EnergyAttention_QK metrics
+            if isinstance(module, EnergyAttention_QK):
+                metrics = module.get_metrics()
+                if metrics is not None:
+                    for metric_name, value in metrics.items():
+                        energy_mlp_metrics[f"{name}/{metric_name}"] = value
+
+        metrics_tracker.update({f"model/scale_ff/{k}": v for k, v in scale_ff_values.items()})
+        metrics_tracker.update({f"model/energy_mlp/{k}": v for k, v in energy_mlp_metrics.items()})
+        # Note: EnergyAttention metrics are also added to energy_mlp_metrics dict for simplicity
+    
     # experiments tracker
     experiments_tracker.track(metrics_tracker.get_dict(), step=global_step, context=context)
 
@@ -209,6 +241,23 @@ def get_model_tflops(
             )
         elif sequence_mixer_type == "gated_deltanet":
             return 0
+        elif sequence_mixer_type == "energy_attention":
+            return 0  # TODO add flops calculation for energy attention
+        elif sequence_mixer_type in ("mixed_head_attention", "energy_grad_mixed_head_attention", "mixed_head_energy_descent"):
+            # c_attn_energy: h → 2*ne*dh (or 3*ne*dh for egrad), c_attn_gpt: h → 3*ng*dh, W_O: h → h
+            ne = block.num_energy_heads
+            ng = block.num_attention_heads - ne
+            dh = h // block.num_attention_heads
+            sequence_mixer_flops = _get_linear_flops(
+                b * s, h, 2 * ne * dh, gradient_checkpointing=gradient_checkpointing_enabled
+            )
+            sequence_mixer_flops += _get_linear_flops(
+                b * s, h, 3 * ng * dh, gradient_checkpointing=gradient_checkpointing_enabled
+            )
+            sequence_mixer_flops += _get_linear_flops(
+                b * s, h, h, gradient_checkpointing=gradient_checkpointing_enabled
+            )
+            sequence_mixer_flops += _get_attention_flops(b, s, h)
         else:
             raise NotImplementedError(f"unexpected sequence_mixer_type ({sequence_mixer_type})")
 

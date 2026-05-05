@@ -12,6 +12,7 @@ from transformers.modeling_outputs import ModelOutput
 class BaseModelOutputWithPast(ModelOutput):
     last_hidden_state: torch.Tensor | None = None
     past_key_values: tuple[tuple[torch.Tensor]] | None = None
+    energy_descent_loss: torch.Tensor | None = None
 
 
 @dataclass

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import shutil
 
 import numpy as np
 import torch
@@ -190,6 +191,20 @@ def save_checkpoint(
 
         log_rank_0(logging.INFO, f"checkpoint saved at {iteration}")
 
+        # Prune old checkpoints if max_to_keep is set
+        max_to_keep = args.save_args.max_to_keep
+        if max_to_keep is not None and max_to_keep > 0:
+            base = args.save_args.save_path
+            existing = sorted(
+                [d for d in os.listdir(base) if d.startswith("global_step")],
+                key=lambda d: int(d.split("global_step")[1]),
+            )
+            to_delete = existing[:-max_to_keep]
+            for old_dir in to_delete:
+                old_path = os.path.join(base, old_dir)
+                run_rank_n(shutil.rmtree)(old_path)
+                log_rank_0(logging.INFO, f"pruned old checkpoint: {old_dir}")
+
         if os.path.exists(os.path.join(args.save_args.save_path, _KILLSWITCH)):
             ProcessGroupManager.destroy_process_groups()
             exit()
@@ -260,7 +275,12 @@ def load_checkpoint_for_training(
             if load_optimizer:
                 saver = _OptimizerSaver(model_container, optimizer_container)
                 state_dict = {"state": saver.state_dict()}
-                dcp.load(state_dict, checkpoint_id=_get_optimizer_path(load_path))
+                # dcp.load(state_dict, checkpoint_id=_get_optimizer_path(load_path))
+                dcp.load(
+                state_dict,
+                checkpoint_id=_get_optimizer_path(load_path),
+                planner=dcp.DefaultLoadPlanner(allow_partial_load=True),
+                    )
                 saver.load_state_dict(state_dict["state"])
 
         del saver, state_dict
@@ -397,6 +417,14 @@ def load_checkpoint_and_unshard(args: UnshardingArgs) -> tuple[ModelWrapper, Tra
         state, _ = xla_consolidate_sharded_model_checkpoints(
             f"{_get_model_optimizer_path(_get_base_path(load_path, iteration))}/", "*.pt", "", save_model=False
         )
+
+    # backward-compat: rename W_O → W_O_gpt for EGrad checkpoints trained before commit 3191a28
+    # Only applies when checkpoint has W_O and model (per current code) expects W_O_gpt.
+    model_keys = set(model.state_dict().keys())
+    if (any(".sequence_mixer.W_O." in k for k in state) and
+            not any(".sequence_mixer.W_O." in k for k in model_keys) and
+            any(".sequence_mixer.W_O_gpt." in k for k in model_keys)):
+        state = {k.replace(".sequence_mixer.W_O.", ".sequence_mixer.W_O_gpt."): v for k, v in state.items()}
 
     model.load_state_dict(state)
 

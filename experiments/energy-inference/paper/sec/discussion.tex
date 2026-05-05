@@ -1,0 +1,76 @@
+\section{Discussion and Conclusions}
+\label{sec:conclusions}
+%% ============================================================
+
+\subsection{The Story in Brief}
+
+We started with the EGPT design: gradient descent on an implicit energy function,
+realised as a $V{=}K$ attention constraint plus learned projection.
+The original design is compute-inefficient (4.4$\times$ FLOPs overhead) and trails GPT
+on perplexity despite tying on accuracy.
+
+Mechanistic analysis reveals that EGPT learns a balanced Helmholtz decomposition
+(curl $\approx$ gradient) in its projections, and that EGPT attention outputs
+are more directionally aligned across layers than in GPT --- consistent with the
+shared-energy hypothesis.
+However, this functional similarity does not imply structural redundancy:
+weight merging is lossy even for the most similar adjacent layer pairs.
+
+Mixed heads (energy $V{=}K$ + GPT $V{=}W_V x$) close the perplexity gap with GPT
+while matching accuracy, but a GSM8K regression reveals the $V{=}K$ output rule
+introduces a bias against arithmetic reasoning.
+
+The key insight is that the energy-head output under the $V{=}K$ rule is not the
+true energy gradient: it lies on the key manifold rather than pointing in the direction
+of steepest descent in hidden space.
+Replacing it with the true gradient ($W_Q^\top \cdot \mathrm{softmax}(\cdot) K$)
+--- EGrad --- simultaneously improves accuracy, perplexity, and GSM8K, strictly
+dominating GPT at 144M scale.
+At 400M scale, true EGrad (V31) achieves 50.7\% avg / 27.9 PPL vs.\ GPT's 48.6\% / 29.8 PPL
+at identical FLOPs --- the first consistent energy-model improvement over GPT.
+
+\subsection{What Makes EGrad Work?}
+
+The $W_Q^\top$ factor in the EGrad output plays two roles:
+(1) it maps from head space ($d_h$) to hidden space ($D$), allowing the energy-head
+signal to interact with the full-dimensional residual stream;
+(2) it introduces a rotation/scaling that is learned alongside $W_Q$, effectively
+giving the energy head a free ``output projection'' at no parameter cost.
+EDesc achieves similar improvements by the subtractive update alone (no $W_Q^\top$),
+suggesting that the directionality of the update matters as much as the exact gradient form.
+
+\subsection{Open Questions}
+
+\begin{enumerate}
+  \item \textbf{Test-time scaling.}  EGrad models are trained with a fixed number of
+    recurrence steps.  Can extra steps at test time (without retraining) improve
+    accuracy on harder tasks?  The shared-energy structure motivates iterative refinement.
+  \item \textbf{Recurrence schedule.}  V25/V26 will test whether concentrating iterations
+    in later layers is better than uniform distribution.  If so, a learned per-layer
+    schedule may be optimal.
+  \item \textbf{Larger scale.}  The EGrad advantage at 400M is $\sim$1.3 pp accuracy
+    and $\sim$2 PPL.  Does this gap grow or shrink at 3B+ scale?
+  \item \textbf{RL-steered inference.}  The EGrad energy gradient provides a natural
+    reward signal for RL-based test-time search: REINFORCE over recurrence schedules.
+\end{enumerate}
+
+\subsection{Summary of Findings}
+
+\begin{enumerate}
+  \item EGPT's $4.4\times$ FLOPs overhead is not justified by accuracy gains.
+  \item Trained EGPT projections learn balanced Helmholtz decomposition ($\|S\|_F \approx \|A\|_F$);
+    enforcing it architecturally hurts training.
+  \item EGPT attention layers share a common gradient direction (cosine 0.176 vs GPT 0.119),
+    consistent with a shared energy function; FFN layers do not.
+  \item High layer-similarity does not imply weight-mergeability; functional similarity is
+    decoupled from structural similarity.
+  \item Mixed heads (6E + 6G per block) match GPT accuracy at fewer FLOPs but regress on GSM8K.
+  \item Replacing the $V{=}K$ energy-head output with the true energy gradient (EGrad)
+    strictly dominates GPT on all metrics at 144M scale.
+  \item At 400M / 503 MFLOPs/tok, true EGrad (V31) achieves 50.7\% avg / 27.9 PPL,
+    outperforming matched GPT (V9: 48.6\% / 29.8 PPL) by $+2.1$ pp accuracy and $-1.9$ PPL,
+    and narrowly exceeding Mixed V19 (49.9\% / 27.8 PPL) --- the first consistent energy-model win over GPT.
+  \item Weight-shared recurrent EGrad (V23/V24) bridges the gap but costs $\sim$4 PPL
+    vs.\ non-recurrent at matched compute.
+\end{enumerate}
+

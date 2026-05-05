@@ -14,10 +14,12 @@ from .gru import GRU
 from .mamba2 import Mamba2
 from .multihead_latent_attention import MultiHeadLatentAttention
 from .rnn import RNN
+from .energy_attention import EnergyAttention_QK
+from .mixed_head_attention import MixedHeadAttention, EnergyGradMixedHeadAttention
 from .utils import flash_attention
 
 
-SEQUENCE_MIXER_TYPE = Attention | CausalConvolution | GRU | Mamba2 | MultiHeadLatentAttention | RNN | GatedDeltaNet
+SEQUENCE_MIXER_TYPE = Attention | CausalConvolution | GRU | Mamba2 | MultiHeadLatentAttention | RNN | GatedDeltaNet | EnergyAttention_QK | MixedHeadAttention
 
 
 def get_sequence_mixer(
@@ -147,6 +149,72 @@ def get_sequence_mixer(
             initializer_range=config.initializer_range,
             num_layers=config.num_layers,
             use_padding_free_transformer=use_padding_free_transformer,
+        )
+
+    elif sequence_mixer_type == "mixed_head_attention":
+        return MixedHeadAttention(
+            hidden_size=config.hidden_size,
+            num_attention_heads=block.num_attention_heads,
+            num_energy_heads=block.num_energy_heads,
+            num_key_value_heads=block.num_key_value_heads,
+            attention_multiplier=block.attention_multiplier,
+            sliding_window=block.sliding_window,
+            position_embedding_type=config.position_embedding_type,
+            add_bias=block.add_bias,
+            qkv_bias=block.qkv_bias,
+            softmax_dropout=block.softmax_dropout,
+            dropout=block.dropout,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            causal=causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=use_padding_free_transformer,
+        )
+    elif sequence_mixer_type in ("energy_grad_mixed_head_attention", "mixed_head_energy_descent"):
+        cls = EnergyGradMixedHeadAttention if sequence_mixer_type == "energy_grad_mixed_head_attention" else MixedHeadAttention
+        return cls(
+            hidden_size=config.hidden_size,
+            num_attention_heads=block.num_attention_heads,
+            num_energy_heads=block.num_energy_heads,
+            num_key_value_heads=block.num_key_value_heads,
+            attention_multiplier=block.attention_multiplier,
+            sliding_window=block.sliding_window,
+            position_embedding_type=config.position_embedding_type,
+            add_bias=block.add_bias,
+            qkv_bias=block.qkv_bias,
+            softmax_dropout=block.softmax_dropout,
+            dropout=block.dropout,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            causal=causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=use_padding_free_transformer,
+        )
+    elif sequence_mixer_type == "energy_attention":
+        return EnergyAttention_QK(
+            hidden_size=config.hidden_size,
+            num_attention_heads=block.num_attention_heads,
+            num_key_value_heads=block.num_key_value_heads,
+            attention_multiplier=block.attention_multiplier,
+            sliding_window=block.sliding_window,
+            position_embedding_type=config.position_embedding_type,
+            add_bias=block.add_bias,
+            qkv_bias=block.qkv_bias,
+            softmax_dropout=block.softmax_dropout,
+            dropout=block.dropout,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            causal=causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=use_padding_free_transformer,
+            stop_grad_key=getattr(config, "energy_stop_grad_key", False),
+            add_wv_wo=getattr(config, "energy_attn_add_wv_wo", False),
         )
     else:
         sequence_mixer_kwargs = dict(

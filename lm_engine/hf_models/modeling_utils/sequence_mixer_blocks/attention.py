@@ -138,6 +138,11 @@ class Attention(nn.Module):
         mark_parameter_as_mup_learning_rate(self.c_attn.weight)
         mark_parameter_as_mup_learning_rate(self.c_proj.weight)
 
+
+    def extra_repr(self):
+        return f"sliding_window={self.sliding_window}, {super().extra_repr()}"
+
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -146,6 +151,7 @@ class Attention(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        layer_id: int | None = None,
     ) -> torch.Tensor:
         use_flash_attention_2 = is_kernel_allowed(Kernel.flash_attention_2)
         use_flash_attention_3 = is_kernel_allowed(Kernel.flash_attention_3)
@@ -187,7 +193,8 @@ class Attention(nn.Module):
             key = apply_rotary_pos_emb(key, rope_cos_sin)
 
         if past_key_values is not None:
-            key, value = past_key_values.update(key_states=key, value_states=value, layer_idx=self.layer_idx)
+            cache_idx = layer_id if layer_id is not None else self.layer_idx
+            key, value = past_key_values.update(key_states=key, value_states=value, layer_idx=cache_idx)
 
         if use_flash_attention_2 or use_flash_attention_3:
             assert accelerator == Accelerator.cuda

@@ -9,3 +9,23 @@ build/
 uv.lock
 .venv
 .DS_Store
+scripts/blue-vela
+
+# Experiment artifacts — model weights, tokenizer vocab, wandb runs
+wandb/
+# Ignore everything in results except plot PDFs
+experiments/energy-inference/results/**
+!experiments/energy-inference/results/**/
+!experiments/energy-inference/results/**/*.pdf
+!experiments/energy-inference/results/**/harness_*.json
+
+# LaTeX build artifacts
+*.aux
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+experiments/energy-inference/paper/*.log
+
+# Claude internal state
+.claude/
