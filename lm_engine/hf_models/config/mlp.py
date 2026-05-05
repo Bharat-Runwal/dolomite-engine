@@ -84,3 +84,33 @@ class _MoEArgs(_MLPArgs):
 
     def model_post_init(self, __context: Any) -> None:
         assert self.mlp_type == "MoE"
+
+
+class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
+    """Config for BoltzmannMoE_Energy_MLP.
+
+    Iso-parameter with Energy_MLP: total FLOPs and params equal one Energy_MLP with the
+    same intermediate_size.  Each expert receives intermediate_size // n_experts neurons.
+
+    For ~400M params with d=768, 12 blocks: intermediate_size=16384, n_experts=16
+    gives 16 experts × 1024 neurons each.
+    """
+
+    mlp_type: str = "BoltzmannMoE_Energy_MLP"
+    intermediate_size: int  # total across all experts = n_experts * per_expert_I
+    n_experts: int = 8
+    temperature: float = 1.0
+    repulsion_coef: float = 0.0      # 0 = disabled; try 0.01 for stochastic repulsion
+    n_repulsion_pairs: int = 4       # random expert pairs sampled per step
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0.0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "BoltzmannMoE_Energy_MLP"
+        assert self.n_experts >= 2, "BoltzmannMoE requires at least 2 experts"
+        assert self.intermediate_size % self.n_experts == 0, (
+            f"intermediate_size ({self.intermediate_size}) must be divisible by "
+            f"n_experts ({self.n_experts})"
+        )
+        assert self.temperature > 0, "temperature must be positive"

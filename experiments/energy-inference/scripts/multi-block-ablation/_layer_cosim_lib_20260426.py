@@ -6,6 +6,7 @@ so each driver script is just a model registry + main() call.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -254,4 +255,19 @@ def run(models: dict, colors: dict, markers: dict, tag: str, title_suffix: str,
                      title_suffix, colors, markers)
     plot_summary_bars(results, f"layer_sim_summary_{tag}_full",
                       summary_title, colors)
-    print("\nDone — plots in", PLOTS_DIR)
+
+    # Save summary stats to JSON
+    stats = {}
+    for label, res in results.items():
+        stats[label] = {}
+        for comp in ["attn", "ffwd", "update"]:
+            stats[label][comp] = {
+                "off_diag_mean": float(res[comp]["off_diag"]),
+                "consec_mean":   float(np.mean(res[comp]["consecutive"])),
+                "consecutive":   [round(v, 6) for v in res[comp]["consecutive"]],
+            }
+    stats_path = PLOTS_DIR / f"layer_cosim_stats_{tag}.json"
+    with open(stats_path, "w") as f:
+        json.dump(stats, f, indent=2)
+    print(f"  saved {stats_path.name}")
+    print("\nDone — plots and stats in", PLOTS_DIR)
