@@ -1,3 +1,50 @@
+# Progress — Session 2026-04-28
+
+## BoltzmannMoE Energy FFN implementation
+
+### Model: `BoltzmannMoE_Energy_MLP`
+
+New `mlp_type` implementing Boltzmann-weighted MoE for the energy FFN:
+
+```
+E_moe(h) = log( Σᵢ exp(Eᵢ(h)) )   where Eᵢ = −φ(W1ᵢh)ᵀ(W2ᵢh)
+∂E_moe/∂h = Σᵢ pᵢ(h) · ∂Eᵢ/∂h   where pᵢ = softmax_i(E(h) / τ)
+```
+
+The forward pass computes both energies (for routing) and gradients (for the
+update) from the same intermediate activations — no redundant work.
+Fully vectorised with `torch.einsum` over the expert dimension.
+
+**Anti-collapse mechanisms** (all independently configurable):
+- `dropout`: noisy intermediate activations perturb Boltzmann routing during training
+- `repulsion_coef` / `n_repulsion_pairs`: stochastic contrastive repulsion — at each
+  step, K random expert pairs are sampled and their output cosine similarity penalised
+  via `add_aux_loss`.  Cheap: K dot-products of size hidden_size per step.
+- `weight_decay=0.3` in the optimizer: prevents dominant expert from growing large
+
+**Key diagnostic**: `routing_entropy_norm` logged per forward pass (1.0 = uniform, 0.0 = collapsed).
+
+### Files changed
+
+- `lm_engine/hf_models/modeling_utils/mlp_blocks/mlp.py` — `BoltzmannMoE_Energy_MLP` class
+- `lm_engine/hf_models/config/mlp.py` — `_BoltzmannMoEEnergyMLPArgs`
+- `lm_engine/hf_models/modeling_utils/mlp_blocks/__init__.py` — dispatch + export
+- `lm_engine/hf_models/config/__init__.py` — registry entry
+
+### Experiment configs
+
+For ~422M params (d=768, 12 blocks, 16 experts × 1024 = 302M FFN):
+
+| Config | Repulsion | Dropout | WD | Question |
+|---|---|---|---|---|
+| B1 (`b1_boltz_moe_16x1024_d768_lr2e3`) | — | 0 | 0.1 | Does Boltzmann routing collapse at 400M? |
+| B2 (`b2_boltz_moe_repulsion_16x1024_d768_lr2e3`) | 0.01 | 0 | 0.1 | Does functional repulsion prevent collapse? |
+| B3 (`b3_boltz_moe_dropout_wd_16x1024_d768_lr2e3`) | 0.01 | 0.1 | 0.3 | Does dropout + high WD force specialisation? |
+
+All log to wandb project `energy-inference-large`.
+
+---
+
 # Progress — Session 2026-04-27
 
 Summary of changes made this session. Pairs with `TODO.md`.
@@ -75,10 +122,14 @@ Touched prose:
 ## 4. Overleaf integration
 
 Cloned the **full paper Overleaf project** from
-`https://git.overleaf.com/69eb9b62c6f271a5b29323bb` into
-`~/__work/LLM/energy/energy-GPT-neurips2026/`. This is the shared NeurIPS
-2026 paper repo — top level holds the joint document (`main.tex`,
-`energy.tex`, `neurips_2026/`, top-level `figs/`).
+`https://git.overleaf.com/69eb9b62c6f271a5b29323bb`.
+
+**Local clone paths** (same repo, different machines):
+- **Beast** (other server): `~/__work/LLM/energy/energy-GPT-neurips2026/`
+- **BLUEVELA cluster** (this cluster, user `ndehmamy`): `~/Code/energy/energy-GPT-neurips2026/`
+
+This is the shared NeurIPS 2026 paper repo — top level holds the joint
+document (`main.tex`, `energy.tex`, `neurips_2026/`, top-level `figs/`).
 
 Added a **`nima/` subfolder** as a self-contained staging area for the
 deep-EGPT analysis slice, mirroring

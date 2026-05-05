@@ -10,7 +10,7 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MixedEnergyMLPArgs
+from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MixedEnergyMLPArgs, _BoltzmannMoEEnergyMLPArgs
 from .sequence_mixer import (
     _CausalConvolution,
     _GatedDeltaNetArgs,
@@ -81,7 +81,7 @@ _SEQUENCE_MIXER_CONFIG_CLASSES = {
     "mixed_head_energy_descent": _MixedHeadAttentionArgs,
 }
 
-_MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs, "Mixed_Energy_MLP": _MixedEnergyMLPArgs}
+_MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs, "Mixed_Energy_MLP": _MixedEnergyMLPArgs, "BoltzmannMoE_Energy_MLP": _BoltzmannMoEEnergyMLPArgs}
 
 
 class CommonConfig(PretrainedConfig):
@@ -126,6 +126,7 @@ class CommonConfig(PretrainedConfig):
         energy_dissipation_rank: int = 16,
         energy_stop_grad_key: bool = False,
         energy_attn_add_wv_wo: bool = False,
+        energy_apply_rayleigh: bool = False,
         scale_ff_init: float | list[float] | None = None,
         energy_descent_loss_coef: float = 0.0,
         shared_backbone: bool = False,
@@ -166,6 +167,7 @@ class CommonConfig(PretrainedConfig):
         self.energy_dissipation_rank = energy_dissipation_rank
         self.energy_stop_grad_key = energy_stop_grad_key
         self.energy_attn_add_wv_wo = energy_attn_add_wv_wo
+        self.energy_apply_rayleigh = energy_apply_rayleigh
         self.scale_ff_init = scale_ff_init
         self.energy_descent_loss_coef = energy_descent_loss_coef
         self.shared_backbone = shared_backbone

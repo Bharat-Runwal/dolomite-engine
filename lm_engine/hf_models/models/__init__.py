@@ -13,3 +13,4 @@ from .gpt_crosslayer import GPTCrossLayerConfig, GPTCrossLayerForCausalLM, GPTCr
 from .ladder_residual import LadderResidualConfig, LadderResidualForCausalLM, LadderResidualModel
 from .palm import PaLMConfig, PaLMForCausalLM, PaLMModel
 from .energy import EnergyConfig, EnergyForCausalLM, EnergyModel
+from .byte_energy import ByteEnergyConfig, ByteEnergyModel, ByteEnergyPreTrainedModel

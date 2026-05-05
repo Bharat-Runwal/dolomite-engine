@@ -11,7 +11,7 @@ from transformers import AutoConfig
 from .enums import GradientCheckpointingMethod
 from .hf_models import CommonConfig, is_custom_model
 from .hf_models.modeling_utils import is_glu
-from .hf_models.modeling_utils.mlp_blocks.mlp import Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP
+from .hf_models.modeling_utils.mlp_blocks.mlp import Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP
 from .hf_models.modeling_utils.sequence_mixer_blocks.energy_attention import EnergyAttention_QK
 from .utils import (
     Accelerator,
@@ -70,7 +70,7 @@ def track_metrics(
                         scale_ff_values[f"{name}.{param_name}"] = param.item()
 
             # Track Energy_MLP metrics
-            if isinstance(module, (Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP)):
+            if isinstance(module, (Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP)):
                 metrics = module.get_metrics()
                 if metrics is not None:
                     for metric_name, value in metrics.items():

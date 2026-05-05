@@ -17,11 +17,13 @@ from .instruction_tuning import AlpacaDataset, DollyDataset, SlimOrcaDataset
 from .megatron import get_megatron_gpt_dataloaders
 from .sampler import BlendedDistributedSampler
 from .sst2 import SST2Dataset
+from .byte_megatron_dataset import ByteMegatronDataset
 from .utils import collate_fn, custom_iterator, get_next_batch
 
 
 _DATASETS_LIST = {
     "AlpacaDataset": AlpacaDataset,
+    "ByteMegatronDataset": ByteMegatronDataset,
     "DebugDataset": DebugDataset,
     "DollyDataset": DollyDataset,
     "HuggingFaceDataset": HuggingFaceDataset,

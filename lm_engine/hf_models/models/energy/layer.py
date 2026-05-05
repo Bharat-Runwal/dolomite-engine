@@ -500,6 +500,13 @@ class EnergyBlock(nn.Module):
 
             # Store proj_type for reference
             self.proj_type = proj_type
+
+            # Rayleigh (tangent) projection: P(v, g) = v - g(g·v)/d
+            # where g = RMSNorm(x), ||g||²=d. Equivalent to (I - ĝĝᵀ)v.
+            # Removes the gradient component along the RMSNorm direction.
+            # Config key: energy_apply_rayleigh. Legacy alias: energy_apply_reileigh.
+            self.apply_reileigh = (getattr(config, 'energy_apply_rayleigh', False) or
+                                   getattr(config, 'energy_apply_reileigh', False))
         else:
 
             hidden_size = config.hidden_size
@@ -562,6 +569,14 @@ class EnergyBlock(nn.Module):
 
             # Dual projection: separate matrices for attn and MLP (scale_ff frozen at 1.0)
             if self.proj_type == "dual_unconstrained":
+                if self.apply_reileigh:
+                    # Batched Rayleigh: read ln_x once for both streams.
+                    # stacked: [B, T, 2, D]; coeffs = ln_x · each / D → [B, T, 2, 1]
+                    inv_d = 1.0 / ln_x.shape[-1]
+                    stacked = torch.stack([attn_out, ffwd_out], dim=2)
+                    coeffs  = (ln_x.unsqueeze(2) * stacked).sum(-1, keepdim=True).mul_(inv_d)
+                    stacked = stacked - ln_x.unsqueeze(2) * coeffs
+                    attn_out, ffwd_out = stacked.unbind(2)
                 hidden_states = hidden_states - self.proj_attn(attn_out) - self.proj_mlp(ffwd_out)
             # Split port-Hamiltonian: h := h + proj(attn_out, ffwd_out)
             elif self.proj_type == "dual_low_rank_port_hamiltonian":
@@ -579,6 +594,13 @@ class EnergyBlock(nn.Module):
             # Descent projections (unconstrained, pos_scalar, identity): h := h - proj(grad_E)
             else:
                 grad_E = attn_out + self.scale_ff * ffwd_out
+                if self.apply_reileigh:
+                    # Reileigh tangent projection: P(v,g) = v - g*(g·v)/d
+                    # where g = ln_x = RMSNorm(x) satisfies ||g||^2 = d.
+                    # Projects grad_E onto the tangent space of the RMSNorm sphere.
+                    d = ln_x.shape[-1]
+                    gv = (ln_x * grad_E).sum(dim=-1, keepdim=True)
+                    grad_E = grad_E - ln_x * gv / d
                 hidden_states = hidden_states - self.proj(grad_E)
             return hidden_states
         else:

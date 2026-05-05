@@ -114,7 +114,7 @@ class SaveArgs(BaseArgs):
     # interval for checkpointing
     save_interval: int = None
     # keep only the N most recent checkpoints (None = keep all)
-    max_to_keep: int = None
+    max_to_keep: int | None = None
     # whether to save optimizer
     save_optimizer: bool = True
     # whether to use async checkpointing
