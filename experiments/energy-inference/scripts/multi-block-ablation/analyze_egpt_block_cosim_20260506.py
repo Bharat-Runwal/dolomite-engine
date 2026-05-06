@@ -63,6 +63,7 @@ PREFILL_TEXTS = [
 
 MODELS = {
     "v71": BASE / "v71_hybrid_8gpt_4egpt_rmsray_d1280" / "unsharded",
+    "v9":  BASE / "v9_gpt_baseline_d1024_lr1e3" / "unsharded",
     # Add more as they become available:
     # "u1": BASE / "u1_2gpt_4egpt3x_rmsray_d1280" / "unsharded",
 }
@@ -86,7 +87,12 @@ def get_blocks(model):
 
 
 def get_egpt_block_indices(model):
-    """Return indices of EGPT blocks (energy_attention)."""
+    """Return indices of EGPT blocks.
+
+    For models with EGPT blocks: returns only those blocks.
+    For pure GPT models (no EGPT): returns ALL block indices so we can compare
+    cross-layer similarity in a standard transformer.
+    """
     indices = []
     blocks = get_blocks(model)
     for i, blk in enumerate(blocks):
@@ -95,13 +101,16 @@ def get_egpt_block_indices(model):
             indices.append(i)
         elif hasattr(blk, "is_energy_block") and blk.is_energy_block:
             indices.append(i)
-    # Fallback: check layer_iterations
+    # Check layer_iterations for EGPT blocks
     if not indices:
         cfg = model.config
         if hasattr(cfg, "layer_iterations"):
             for i, itr in enumerate(cfg.layer_iterations):
                 if itr > 1:
                     indices.append(i)
+    # For pure GPT: return ALL layers (measure cross-layer similarity as baseline)
+    if not indices:
+        indices = list(range(len(blocks)))
     return indices
 
 
@@ -209,15 +218,18 @@ def functional_weight_cosim(model, egpt_indices):
     wqk_vecs = []
     for i in egpt_indices:
         blk = blocks[i]
-        # dolomite EnergyAttention_QK: blk.attn.c_attn weight = [2D, D] = [W_Q; W_K]
+        # Try EGPT (blk.attn) then GPT (blk.sequence_mixer)
         mixer = getattr(blk, "attn", None) or getattr(blk, "sequence_mixer", None)
         wq = wk = None
         if mixer is not None and hasattr(mixer, "c_attn") and hasattr(mixer.c_attn, "weight"):
-            w = mixer.c_attn.weight.detach().float()  # [2D, D]
+            w = mixer.c_attn.weight.detach().float()
             d = w.shape[1]
-            wq, wk = w[:d], w[d:2*d]      # [D, D] each
+            # EGPT: c_attn = [2D, D] = [W_Q; W_K]
+            # GPT:  c_attn = [3D, D] = [W_Q; W_K; W_V]
+            # Either way, W_Q = w[:d], W_K = w[d:2*d]
+            wq, wk = w[:d], w[d:2*d]
         if wq is not None and wk is not None:
-            wqk = (wq.T @ wk).reshape(-1)  # D² scalar product, gauge-invariant
+            wqk = (wq.T @ wk).reshape(-1)
             wqk_vecs.append(wqk)
     if wqk_vecs:
         results["W_QK=W_Q^T@W_K"] = flat_cosim_matrix(wqk_vecs)
@@ -226,19 +238,54 @@ def functional_weight_cosim(model, egpt_indices):
     wffn_vecs = []
     for i in egpt_indices:
         blk = blocks[i]
-        # dolomite Energy_MLP: blk.ffwd.W1 = gate [int_s, D], W2 = up [int_s, D]
-        # Effective FFN ≈ W2^T @ W1 (captures which input directions are gated/passed)
-        ffn = getattr(blk, "ffwd", None) or getattr(blk, "mlp", None)
+        # EGPT: blk.ffwd.W1 (gate), W2 (up), both [int_s, D]
+        # GPT:  blk.mlp_block.c_fc [up_dim, D], c_proj [D, out_dim]
+        ffn = getattr(blk, "ffwd", None) or getattr(blk, "mlp_block", None) or getattr(blk, "mlp", None)
         if ffn is None:
             continue
-        w1 = getattr(ffn, "W1", None)  # gate [int_s, D]
-        w2 = getattr(ffn, "W2", None)  # up   [int_s, D]
+        w1 = getattr(ffn, "W1", None)   # EGPT gate [int_s, D]
+        w2 = getattr(ffn, "W2", None)   # EGPT up   [int_s, D]
         if w1 is not None and w2 is not None and hasattr(w1, "weight") and hasattr(w2, "weight"):
-            # W2^T @ W1: [D, int_s] @ [int_s, D] → [D, D] gauge-invariant product
             wffn = (w2.weight.detach().float().T @ w1.weight.detach().float()).reshape(-1)
             wffn_vecs.append(wffn)
+        else:
+            # GPT: c_fc [up_dim, D], c_proj [D, down_dim]
+            c_fc   = getattr(ffn, "c_fc",   None)
+            c_proj = getattr(ffn, "c_proj", None)
+            if c_fc is not None and c_proj is not None and hasattr(c_fc, "weight") and hasattr(c_proj, "weight"):
+                # c_proj: [D, out_dim], c_fc: [up_dim, D]
+                # For SwiGLU: up_dim = 2*int_s, take second half as "value" path
+                wup  = c_fc.weight.detach().float()    # [up_dim, D]
+                wdwn = c_proj.weight.detach().float()  # [D, out_dim or 2*int_s]
+                # Linearization: if SwiGLU uses first half as gate, second as value
+                half = wup.shape[0] // 2
+                wffn = (wdwn @ wup[half:]).reshape(-1)  # [D, half] @ [half, D] → [D, D] approx
+                if wffn.shape[0] != wdwn.shape[0] * wdwn.shape[0]:
+                    # fallback: c_proj.T @ c_fc
+                    wffn = (wdwn.T @ wup).reshape(-1)
+                wffn_vecs.append(wffn)
     if wffn_vecs:
-        results["W_ffn=W_down@W_up"] = flat_cosim_matrix(wffn_vecs)
+        results["W_ffn=W2^T@W1"] = flat_cosim_matrix(wffn_vecs)
+
+    # Π·W2^T·W1 — EGPT only: proj_mlp @ W2^T @ W1 (full energy-projected FFN kernel)
+    pi_wffn_vecs = []
+    for i in egpt_indices:
+        blk = blocks[i]
+        ffn  = getattr(blk, "ffwd", None) or getattr(blk, "mlp", None)
+        proj = getattr(blk, "proj_mlp", None)
+        if ffn is None or proj is None:
+            continue
+        w1 = getattr(ffn, "W1", None)
+        w2 = getattr(ffn, "W2", None)
+        if w1 is None or w2 is None or not hasattr(w1, "weight"):
+            continue
+        Pi  = proj.weight.detach().float()             # [D, D]
+        W2t = w2.weight.detach().float().T             # [D, int_s]
+        W1  = w1.weight.detach().float()               # [int_s, D]
+        pi_wffn = (Pi @ W2t @ W1).reshape(-1)          # [D, D] flattened
+        pi_wffn_vecs.append(pi_wffn)
+    if pi_wffn_vecs:
+        results["Pi@W2^T@W1"] = flat_cosim_matrix(pi_wffn_vecs)
 
     return results
 
@@ -279,14 +326,13 @@ def main():
     model = load_model(ckpt)
 
     egpt_idx = get_egpt_block_indices(model)
-    print(f"EGPT block indices: {egpt_idx}")
+    print(f"Block indices: {egpt_idx} ({len(egpt_idx)} blocks)")
     cfg = model.config
     if hasattr(cfg, "layer_iterations"):
         iters = cfg.layer_iterations
-        print(f"layer_iterations: {iters}")
         block_labels = [f"B{i}(×{iters[i]})" for i in egpt_idx]
     else:
-        block_labels = [f"Block{i}" for i in egpt_idx]
+        block_labels = [f"L{i}" for i in egpt_idx]   # GPT: just layer index
 
     # Accumulate updates over multiple batches
     all_updates = {i: [] for i in egpt_idx}
