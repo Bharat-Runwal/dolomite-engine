@@ -27,13 +27,13 @@ class RegisterEnergyForCausalLM(RegisterEnergyPreTrainedModel, CausalLMModelMixi
         if (n_reg > 0 and past_key_values is not None
                 and inputs.get('attention_mask') is not None):
             try:
-                kv_len = past_key_values.key_cache[0].shape[2]
+                # Always extend by exactly n_reg positions.
+                # At decode step k: HF mask length = T+k, key length = R+T+k.
+                # We need mask length = R+T+k, so extend by R = n_reg.
                 mask = inputs['attention_mask']
-                if mask.shape[-1] < kv_len:
-                    n_extra = kv_len - mask.shape[-1]
-                    pad = torch.ones(mask.shape[0], n_extra,
-                                     dtype=mask.dtype, device=mask.device)
-                    inputs['attention_mask'] = torch.cat([pad, mask], dim=1)
+                pad = torch.ones(mask.shape[0], n_reg,
+                                 dtype=mask.dtype, device=mask.device)
+                inputs['attention_mask'] = torch.cat([pad, mask], dim=1)
             except Exception:
                 pass
         return inputs
