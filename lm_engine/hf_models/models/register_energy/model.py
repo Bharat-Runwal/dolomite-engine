@@ -180,12 +180,12 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
             max_seqlen=max_seqlen,
         )
 
-        # During cached generation (T=1, KV cache already populated from prefill),
-        # fall through to the parent EnergyModel.forward() which handles the decode
-        # step correctly without register prepending.  The KV cache already has the
-        # register key/value pairs from the prefill step.
-        if (past_key_values is not None and input_ids is not None
-                and input_ids.shape[-1] == 1):
+        # During generation (use_cache=True), skip register prepending entirely.
+        # Registers change the KV cache length, causing a mismatch between prefill
+        # (T+R cached entries) and decode (expects T cached entries) steps.
+        # The model gracefully degrades to non-register behaviour at test time.
+        effective_use_cache = use_cache if use_cache is not None else self.config.use_cache
+        if effective_use_cache and not self.training:
             return super().forward(
                 input_ids=input_ids,
                 past_key_values=past_key_values,
