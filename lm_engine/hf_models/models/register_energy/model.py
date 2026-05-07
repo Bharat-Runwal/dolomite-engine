@@ -180,6 +180,22 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
             max_seqlen=max_seqlen,
         )
 
+        # During cached generation (T=1, KV cache already populated from prefill),
+        # fall through to the parent EnergyModel.forward() which handles the decode
+        # step correctly without register prepending.  The KV cache already has the
+        # register key/value pairs from the prefill step.
+        if (past_key_values is not None and input_ids is not None
+                and input_ids.shape[-1] == 1):
+            return super().forward(
+                input_ids=input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=use_cache,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+
         if is_generation_cache_enabled():
             past_key_values = (
                 GenerationCache(self.config)
@@ -191,42 +207,40 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         R = self.n_registers
         device = hidden_states.device
         dtype = hidden_states.dtype
+        is_cached_decode = False  # always False here (handled above)
 
-        # ----------------------------------------------------------------
-        # 2. Prepend register tokens: [B, R+T, d]
-        # ----------------------------------------------------------------
-        # register_embeddings: [R, d] → [B, R, d]
-        reg_emb = self.register_embeddings.unsqueeze(0).expand(B, -1, -1).to(dtype)
-        hidden_states = torch.cat([reg_emb, hidden_states], dim=1)  # [B, R+T, d]
+        if is_cached_decode:
+            # Standard decode: no register prepending, use causal_mask as-is
+            extended_mask = causal_mask
+            extended_rope_cos_sin = rope_cos_sin
+        else:
+            # ----------------------------------------------------------------
+            # 2. Prepend register tokens: [B, R+T, d]
+            # ----------------------------------------------------------------
+            reg_emb = self.register_embeddings.unsqueeze(0).expand(B, -1, -1).to(dtype)
+            hidden_states = torch.cat([reg_emb, hidden_states], dim=1)  # [B, R+T, d]
 
-        # ----------------------------------------------------------------
-        # 3. Extend attention mask for registers
-        # ----------------------------------------------------------------
-        extended_mask = self._extend_attention_mask_for_registers(
-            causal_mask, B, R, T, device, dtype
-        )
-
-        # ----------------------------------------------------------------
-        # 4. Extend rope_cos_sin for the longer sequence
-        #    Registers get position IDs 0..R-1; content keeps original positions.
-        #    Re-compute RoPE for the extended length so register positions have
-        #    valid cosines/sines.
-        # ----------------------------------------------------------------
-        extended_rope_cos_sin = None
-        if rope_cos_sin is not None:
-            # position_ids may be [1, T] (broadcast) or [B, T]. Expand to [B, T].
-            pos_ids_expanded = position_ids.expand(B, -1)  # [B, T]
-            # Build register position ids: 0..R-1, shape [B, R]
-            reg_pos_ids = torch.arange(R, device=device, dtype=position_ids.dtype).unsqueeze(0).expand(B, -1)
-            # Concatenate: [B, R+T]
-            ext_pos_ids = torch.cat([reg_pos_ids, pos_ids_expanded], dim=1)
-            # Re-compute RoPE for the extended sequence length
-            ext_key_length = R + T
-            extended_rope_cos_sin = self._get_rope_cos_sin(
-                key_length=ext_key_length,
-                position_ids=ext_pos_ids,
-                dtype=dtype,
+            # ----------------------------------------------------------------
+            # 3. Extend attention mask for registers
+            # ----------------------------------------------------------------
+            extended_mask = self._extend_attention_mask_for_registers(
+                causal_mask, B, R, T, device, dtype
             )
+
+        # ----------------------------------------------------------------
+        # 4. Extend rope_cos_sin (skipped for cached decode — already computed)
+        # ----------------------------------------------------------------
+        if not is_cached_decode:
+            extended_rope_cos_sin = None
+            if rope_cos_sin is not None:
+                pos_ids_expanded = position_ids.expand(B, -1)
+                reg_pos_ids = torch.arange(R, device=device, dtype=position_ids.dtype).unsqueeze(0).expand(B, -1)
+                ext_pos_ids = torch.cat([reg_pos_ids, pos_ids_expanded], dim=1)
+                extended_rope_cos_sin = self._get_rope_cos_sin(
+                    key_length=R + T,
+                    position_ids=ext_pos_ids,
+                    dtype=dtype,
+                )
 
         # ----------------------------------------------------------------
         # 5. Run all transformer blocks (energy + GPT) on extended sequence
