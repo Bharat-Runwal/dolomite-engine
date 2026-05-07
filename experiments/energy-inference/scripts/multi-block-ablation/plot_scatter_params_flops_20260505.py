@@ -62,8 +62,9 @@ MODELS: dict[str, tuple] = {
     "V36":     ("EDesc 12×2 d=1024 v2",    "v36_edesc_12x2_d1024_lr1e3",        228.0, 503,  "edesc"),
     "V38":     ("Full EGrad 24×1 d=1024",  "v38_full_egrad_24x1_d1024_lr1e3",   342.0, 503,  "full_egrad"),
 
-    # ── Hybrid (new V73) ──
-    "V73":     ("6GPT+EGPT×6 d=1280 (V73)","v73_6gpt_1egpt6x_rmsray_d1280",     279.2, 535,  "hybrid"),
+    # ── RMS+Rayleigh hybrids (★ star marker) ──
+    "V73":     ("6GPT+EGPT×6 d=1280 ★RMS-Ray","v73_6gpt_1egpt6x_rmsray_d1280",   279.2, 535,  "rmsray"),
+    "V76":     ("4GPT+EGPT×6+128reg d=1024 ★","v76_4gpt_1egpt6x_rmsray_d1024_reg128", 182.0, 335, "rmsray_reg"),
 }
 
 FAMILY_STYLE: dict[str, dict] = {
@@ -73,16 +74,21 @@ FAMILY_STYLE: dict[str, dict] = {
     "egrad":      dict(color="#F44336", marker="D",  ms=7,  zorder=3,  label="EGrad/EDesc"),
     "edesc":      dict(color="#4CAF50", marker="D",  ms=7,  zorder=3,  label="EGrad/EDesc"),
     "full_egrad": dict(color="#E91E63", marker="P",  ms=9,  zorder=4,  label="Full EGrad"),
-    "hybrid":     dict(color="#FF5722", marker="*",  ms=16, zorder=5,  label="V73 Hybrid"),
+    "rmsray":     dict(color="#FF5722", marker="*",  ms=18, zorder=5,  label="★ RMS+Rayleigh"),
+    "rmsray_reg": dict(color="#E91E63", marker="*",  ms=18, zorder=5,  label="★ RMS+Ray+Registers"),
 }
 
 def load_results(subdir: str):
-    files = sorted((BASE / subdir / "unsharded").glob("harness_results_*.json"))
-    if not files:
-        files = sorted((BASE / subdir / "unsharded").glob("harness_results.json"))
-    if not files:
+    unsharded = BASE / subdir / "unsharded"
+    # Try all harness_results*.json files (timestamped and non-timestamped)
+    files = sorted(unsharded.glob("harness_results*.json"))
+    # Prefer non-generation files (nogen) over gsm8k-only files
+    nogen = [f for f in files if "nogen" in f.name]
+    main = [f for f in files if "nogen" not in f.name and "gsm" not in f.name]
+    candidates = main or nogen or files
+    if not candidates:
         return None, None
-    r = json.loads(files[-1].read_text()).get("results", {})
+    r = json.loads(candidates[-1].read_text()).get("results", {})
     ppl = r.get("wikitext", {}).get("word_perplexity,none")
     accs = [r.get(t, {}).get(m) for t, m in AVG_TASKS_10]
     accs = [a for a in accs if a is not None]
@@ -129,8 +135,8 @@ def make_scatter():
                     edgecolors="white", linewidths=0.5,
                 )
                 # Label only V73, V9, V0, V31, V38 to avoid clutter
-                if r["key"] in ("V73", "V9", "V0", "V31", "V38", "V63"):
-                    offset = (8, -14) if r["key"] == "V73" else (5, 5)
+                if r["key"] in ("V73", "V76", "V9", "V0", "V31", "V38", "V63"):
+                    offset = (8, -14) if r["key"] in ("V73", "V76") else (5, 5)
                     ax.annotate(
                         r["key"],
                         xy=(r[xkey], r[ykey]),
