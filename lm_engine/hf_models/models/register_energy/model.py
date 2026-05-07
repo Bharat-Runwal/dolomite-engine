@@ -207,18 +207,22 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                     # Infer past KV length from cache
                     kv_len = past_key_values.key_cache[0].shape[2] if hasattr(past_key_values, 'key_cache') \
                              else past_key_values[0][0].shape[2]
-                    if attention_mask.shape[-1] < kv_len:
-                        # Extend mask to cover register positions at the start
-                        pad = torch.ones(attention_mask.shape[0], kv_len - attention_mask.shape[-1],
+                    # key_length = kv_len (past) + 1 (current token); mask must match key_length.
+                    # The custom generate() only appends 1/step (no register offset), so
+                    # attention_mask.shape[-1] = T+k but key_length = R+T+k → extend by R.
+                    target_len = kv_len + 1
+                    if attention_mask.shape[-1] < target_len:
+                        pad = torch.ones(attention_mask.shape[0], target_len - attention_mask.shape[-1],
                                          dtype=attention_mask.dtype, device=attention_mask.device)
                         attention_mask = torch.cat([pad, attention_mask], dim=1)
-                except Exception:
+                except Exception as e:
                     pass
             return super().forward(
                 input_ids=input_ids,
                 past_key_values=past_key_values,
                 attention_mask=attention_mask,
-                position_ids=position_ids,
+                position_ids=None,  # recompute from extended attention_mask; outer position_ids
+                                    # was computed before mask extension → wrong slice on short mask
                 use_cache=use_cache,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
