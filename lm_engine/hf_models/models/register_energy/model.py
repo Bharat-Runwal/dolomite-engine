@@ -188,32 +188,51 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         #   "no_cache": force use_cache=False, recomputing the full R+T sequence each
         #     decode step — slow but registers are always active (correct behaviour).
         effective_use_cache = use_cache if use_cache is not None else self.config.use_cache
-        reg_mode = getattr(self.config, 'register_generation_mode', 'bypass')
 
-        if effective_use_cache and not self.training:
-            if reg_mode == 'no_cache':
-                # Correct but slow: recompute full sequence with registers each step.
-                # Force use_cache=False to avoid KV-cache mismatch.
-                return self.forward(
-                    input_ids=input_ids,
-                    past_key_values=None,   # discard cache
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    use_cache=False,        # no caching
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
-            else:
-                # Default "bypass": fast but registers inactive during generation.
-                return super().forward(
-                    input_ids=input_ids,
-                    past_key_values=past_key_values,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    use_cache=use_cache,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
+        # ── Cached-decode step (T=1, past_kv already populated from prefill) ──
+        # Registers were prepended during prefill → KV cache has R+T entries.
+        # HF's generate() tracks the full R+T length and passes attention_mask=[B,R+T+1]
+        # for decode steps (after the first token), so we can just call super().forward().
+        # For the very first decode step, attention_mask may still be [B,T_prefill].
+        # We detect this case by checking if past_kv length > attention_mask length.
+        if (effective_use_cache and not self.training
+                and past_key_values is not None
+                and input_ids is not None
+                and input_ids.shape[-1] == 1):
+            # Decode step: registers already in KV cache, just decode the new token.
+            # HF should have extended the attention mask to cover R+T past tokens,
+            # but if not (e.g. first decode step), we extend it here.
+            if attention_mask is not None:
+                try:
+                    # Infer past KV length from cache
+                    kv_len = past_key_values.key_cache[0].shape[2] if hasattr(past_key_values, 'key_cache') \
+                             else past_key_values[0][0].shape[2]
+                    if attention_mask.shape[-1] < kv_len:
+                        # Extend mask to cover register positions at the start
+                        pad = torch.ones(attention_mask.shape[0], kv_len - attention_mask.shape[-1],
+                                         dtype=attention_mask.dtype, device=attention_mask.device)
+                        attention_mask = torch.cat([pad, attention_mask], dim=1)
+                except Exception:
+                    pass
+            return super().forward(
+                input_ids=input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=use_cache,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+
+        # ── Prefill or training ──
+        # Extend 2D attention_mask by R positions so that:
+        #   (a) _prepare_a_bunch_of_stuff builds the correct R+T causal mask, and
+        #   (b) HF's generate() tracks R+T as the sequence length for future decode steps.
+        if attention_mask is not None and past_key_values is None:
+            B_am = attention_mask.shape[0]
+            reg_ones = torch.ones(B_am, self.n_registers,
+                                  dtype=attention_mask.dtype, device=attention_mask.device)
+            attention_mask = torch.cat([reg_ones, attention_mask], dim=1)
 
         if is_generation_cache_enabled():
             past_key_values = (
