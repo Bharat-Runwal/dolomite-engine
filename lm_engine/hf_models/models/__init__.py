@@ -14,3 +14,4 @@ from .ladder_residual import LadderResidualConfig, LadderResidualForCausalLM, La
 from .palm import PaLMConfig, PaLMForCausalLM, PaLMModel
 from .energy import EnergyConfig, EnergyForCausalLM, EnergyModel
 from .byte_energy import ByteEnergyConfig, ByteEnergyModel, ByteEnergyPreTrainedModel
+from .register_energy import RegisterEnergyConfig, RegisterEnergyForCausalLM, RegisterEnergyModel, RegisterEnergyPreTrainedModel
