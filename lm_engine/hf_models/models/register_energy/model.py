@@ -225,14 +225,10 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
             )
 
         # ── Prefill or training ──
-        # Extend 2D attention_mask by R positions so that:
-        #   (a) _prepare_a_bunch_of_stuff builds the correct R+T causal mask, and
-        #   (b) HF's generate() tracks R+T as the sequence length for future decode steps.
-        if attention_mask is not None and past_key_values is None:
-            B_am = attention_mask.shape[0]
-            reg_ones = torch.ones(B_am, self.n_registers,
-                                  dtype=attention_mask.dtype, device=attention_mask.device)
-            attention_mask = torch.cat([reg_ones, attention_mask], dim=1)
+        # Do NOT modify attention_mask before _prepare_a_bunch_of_stuff.
+        # The causal mask is built from [T_q=input_ids.shape, T_k=attention_mask.shape]
+        # and then _extend_attention_mask_for_registers extends it to [R+T, R+T].
+        # (Extending before would create a [T, R+T] mask — T_q vs T_k mismatch.)
 
         if is_generation_cache_enabled():
             past_key_values = (
