@@ -20,6 +20,7 @@ class RegisterEnergyConfig(EnergyConfig):
 
     model_type = "register_energy"
 
-    def __init__(self, n_registers: int = 128, **kwargs):
+    def __init__(self, n_registers: int = 128, register_generation_mode: str = "bypass", **kwargs):
         super().__init__(**kwargs)
         self.n_registers = n_registers
+        self.register_generation_mode = register_generation_mode

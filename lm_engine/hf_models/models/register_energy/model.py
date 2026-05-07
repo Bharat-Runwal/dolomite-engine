@@ -180,21 +180,40 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
             max_seqlen=max_seqlen,
         )
 
-        # During generation (use_cache=True), skip register prepending entirely.
-        # Registers change the KV cache length, causing a mismatch between prefill
-        # (T+R cached entries) and decode (expects T cached entries) steps.
-        # The model gracefully degrades to non-register behaviour at test time.
+        # During cached generation (use_cache=True, not training), registers create a
+        # KV-cache length mismatch: prefill caches R+T entries, decode expects T.
+        # Two options controlled by config.register_generation_mode:
+        #   "bypass" (default): skip registers entirely during generation — fast but
+        #     registers are inactive at test time (train-test mismatch).
+        #   "no_cache": force use_cache=False, recomputing the full R+T sequence each
+        #     decode step — slow but registers are always active (correct behaviour).
         effective_use_cache = use_cache if use_cache is not None else self.config.use_cache
+        reg_mode = getattr(self.config, 'register_generation_mode', 'bypass')
+
         if effective_use_cache and not self.training:
-            return super().forward(
-                input_ids=input_ids,
-                past_key_values=past_key_values,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                use_cache=use_cache,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            )
+            if reg_mode == 'no_cache':
+                # Correct but slow: recompute full sequence with registers each step.
+                # Force use_cache=False to avoid KV-cache mismatch.
+                return self.forward(
+                    input_ids=input_ids,
+                    past_key_values=None,   # discard cache
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,        # no caching
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
+            else:
+                # Default "bypass": fast but registers inactive during generation.
+                return super().forward(
+                    input_ids=input_ids,
+                    past_key_values=past_key_values,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
 
         if is_generation_cache_enabled():
             past_key_values = (

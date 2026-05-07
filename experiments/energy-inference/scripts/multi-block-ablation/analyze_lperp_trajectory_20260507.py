@@ -53,9 +53,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # ---------------------------------------------------------------------------
 # Model paths
 # ---------------------------------------------------------------------------
+BSAHA = Path("/proj/dmfexp/energy-gpt/checkpoints-bsaha/egpt_400m")
 MODELS = {
     "v71": BASE / "v71_hybrid_8gpt_4egpt_rmsray_d1280" / "unsharded",
     "v9":  BASE / "v9_gpt_baseline_d1024_lr1e3" / "unsharded",
+    "410m_hybrid_s8e4": BASE / "410m_hybrid_s8e4" / "unsharded",
+    "410m_recgpt_s8e4": BASE / "410m_recgpt_s8e4" / "unsharded",
 }
 
 # ---------------------------------------------------------------------------
@@ -515,6 +518,9 @@ def main():
     parser.add_argument("--k_svd", type=int, default=256,
                         help="Number of top singular vectors to use for L_k basis")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--dataset", type=str, default="text",
+                        choices=["text", "math", "all"],
+                        help="text=general passages, math=GSM8K-style, all=both")
     args = parser.parse_args()
 
     model_keys = [k.strip() for k in args.models.split(",")]
