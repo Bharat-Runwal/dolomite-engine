@@ -648,7 +648,9 @@ class BaseModelMixin(PreTrainedModelMixin):
         if self.position_embedding_type == "learned_absolute":
             self.wpe = ParameterizedEmbedding(max_position_embeddings, self.embed_dim, std=self.initializer_range)
         elif self.position_embedding_type == "rope":
-            if self.config.rope_scaling is None:
+            rope_scaling = self.config.rope_scaling
+            has_yarn_scaling = rope_scaling is not None and "factor" in rope_scaling
+            if not has_yarn_scaling:
                 self.rope = RoPE(
                     self.rope_dim,
                     max_position_embeddings=max_position_embeddings,
