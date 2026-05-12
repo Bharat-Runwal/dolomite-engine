@@ -61,9 +61,14 @@ PREFILL_TEXTS = [
     "synapses that enable complex cognitive functions including memory, language, and reasoning.",
 ]
 
+BSAHA = Path("/proj/dmfexp/energy-gpt/checkpoints-bsaha/egpt_400m")
 MODELS = {
     "v71": BASE / "v71_hybrid_8gpt_4egpt_rmsray_d1280" / "unsharded",
     "v9":  BASE / "v9_gpt_baseline_d1024_lr1e3" / "unsharded",
+    "410m_hybrid_s8e4": BASE / "410m_hybrid_s8e4" / "unsharded",
+    "410m_recgpt_s8e4": BASE / "410m_recgpt_s8e4" / "unsharded",
+    "v76_final": BASE / "v76_4gpt_1egpt6x_rmsray_d1024_reg128" / "unsharded",
+    "u4_rmsray":  BASE / "u4_2gpt_4egpt3x_rmsray_d1024" / "unsharded",
     # Add more as they become available:
     # "u1": BASE / "u1_2gpt_4egpt3x_rmsray_d1280" / "unsharded",
 }

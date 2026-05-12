@@ -20,8 +20,8 @@ TASKS="arc_challenge,arc_easy,boolq,copa,hellaswag,openbookqa,piqa,sciq,wikitext
 # bbh_fewshot excluded: SaylorTwift/bbh not cached; use submit_bbh_eval.sh after pre-downloading dataset
 
 bsub \
-    -q normal \
-    -G grp_ebm \
+    -q preemptable \
+    -G grp_preemptable \
     -J "${JOB_NAME}" \
     -gpu "num=1" \
     -n 1 \

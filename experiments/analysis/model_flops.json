@@ -1,0 +1,18 @@
+{
+  "V0 GPT 12\u00d71": 321,
+  "V1 EGPT 12\u00d71": 359,
+  "V15 EGrad-MixH 12\u00d71": 285,
+  "V41 Sandwich": 359,
+  "H3 6GPT+4EGPT": 154,
+  "H5 6GPT+1EGPT\u00d71": 102,
+  "H1 6GPT+1EGPT\u00d76": 189,
+  "h1-topk-moe": 264,
+  "V1+R128": 208,
+  "h1-sel-R128": 189,
+  "h1-topk+R128": 264,
+  "V9 GPT 24\u00d71": 503,
+  "V1-400M EGPT 24\u00d71": 755,
+  "V19 EGrad-MixH 24\u00d71": 503,
+  "V31 EGrad-Attn 24\u00d71": 503,
+  "V73 6GPT+1EGPT\u00d76": 511
+}

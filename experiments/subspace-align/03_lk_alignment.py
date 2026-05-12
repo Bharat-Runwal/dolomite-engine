@@ -42,6 +42,8 @@ MODELS: dict[str, tuple[Path, bool]] = {
     # Other baselines
     "v71_rmsray":        (DEFAULT_BASE / "v71_hybrid_8gpt_4egpt_rmsray_d1280/unsharded", True),
     "v9_gpt":            (DEFAULT_BASE / "v9_gpt_baseline_d1024_lr1e3/unsharded", False),
+    "v76_final": (DEFAULT_BASE / "v76_4gpt_1egpt6x_rmsray_d1024_reg128/unsharded", True),
+    "u4_rmsray":  (DEFAULT_BASE / "u4_2gpt_4egpt3x_rmsray_d1024/unsharded", True),
     # Add your 800M / 1B models here:
     # "my_egpt_800m":    (Path("/path/to/unsharded"), True),
     # "my_recgpt_800m":  (Path("/path/to/unsharded"), False),

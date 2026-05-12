@@ -1,3 +1,50 @@
+# Progress — Session 2026-05-08
+
+## paper_v2 update: V56–V78, R1–R3, U1–U4, B1–B5 analysis
+
+Comprehensive update to `nima/paper_v2.tex` incorporating all experiments since V53.
+
+### New paper sections added
+
+**sec/hybrid.tex** (new §7): Hybrid GPT+EGPT architecture
+- V73 (6GPT+1EGPT×6, d=1280): PPL 29.62, 49.9% avg — beats V9 GPT (29.84, 49.3%)
+- R1–R3 progression (more GPT prefix layers → better PPL): 43.9 → 39.8 → 31.3
+- U1 vs U2 controlled comparison: EGPT beats GPT recurrent +1.9 PPL at matched compute
+- Rayleigh update: marginal (<0.5 PPL), not worth the complexity
+
+**sec/appendices/recurrent_egpt.tex** (new App E): V56–V66 detailed analysis
+- Key finding: deep EGPT (12 distinct blocks × 1) >> recurrent EGPT (1 shared × 12)
+- PPL gap: V1 47.7 vs V56 81.6 at d=768; V1-400M 38.6 vs V58 65.7 at d=1024
+- Width alone doesn't help: V63 (d=1408, 285M) barely matches V1 (143M)
+- Normalization: RMSNorm ≈ LayerNorm ≈ RMSNorm+Rayleigh (all ≈ PPL 80–81 at d=768)
+
+**sec/appendices/hybrid_full.tex** (new App F): Full R/U/V73/V76 benchmark tables
+- R-series full results (36k steps, 9.4B tokens)
+- U-series full results (30k steps, 15.7B tokens)
+- V76 registers analysis (controlled comparison confounded by FFN size + tokens)
+
+**sec/appendices/boltz_moe.tex** (updated): B1–B5 final benchmark results
+- B1–B5 final PPL and 10-task accuracy (was "pending")
+- MoE underperforms due to FFN:Attn imbalance (21:1 vs 2-3:1)
+
+### Updated existing sections
+- Abstract: mentions V1–V78, R, U series; highlights hybrid + deep vs recurrent finding
+- sec/intro.tex: roadmap updated with hybrid section
+- sec/egpt_gap.tex: added "deep vs recurrent EGPT" paragraph
+- sec/scaling.tex: added hybrid paragraph with V73 results
+- sec/discussion.tex: 3 new findings + 2 new open questions in summary list
+
+### Key analysis findings (2026-05-08)
+
+1. **Hybrid beats recurrent EGPT**: V73 (6GPT+1EGPT×6) achieves PPL 29.62 vs V58 recurrent 65.7
+2. **V73 matches V9 GPT**: 29.62 PPL / 49.9% avg vs 29.84 / 49.3% at ~same FLOPs
+3. **EGPT > GPT in U-series**: U1 EGPT 33.0/49.4% vs U2 GPT 34.9/49.0% (controlled)
+4. **More GPT prefix layers help**: R1(43.9) → R2(39.8) → R3(31.3), V73(29.6)
+5. **Rayleigh update: marginal**: V56 81.6 vs V66 80.4 (RMSNorm+Rayleigh) — negligible
+6. **BoltzMoE underperforms**: B1 PPL 51.9 vs V1 EGPT 47.7 due to FFN:Attn 21:1 imbalance
+
+---
+
 # Progress — Session 2026-04-28
 
 ## BoltzmannMoE Energy FFN implementation

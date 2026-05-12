@@ -103,8 +103,24 @@ MODELS = {
     "V53":      dict(label="V53 act-cosreg ramp$\\to$1.0",  subdir="v53_egpt_cosreg_ramp1p0_12x1_d768_lr2e3",   params_M=143, mflops=359, family="energy",      type="EGPT+act-cosreg"),
 
     # Misc shared
-    "V3":       dict(label="V3 Shared d=1152",             subdir="v3_shared_d1152",                            params_M=163, mflops=359, family="energy",      type="Shared"),
-    "V4":       dict(label="V4 Shared wide",               subdir="v4_shared_wide_d1152_lr2e3",                 params_M=174, mflops=359, family="energy",      type="Shared"),
+    # NOTE: V3/V4 use shared_backbone (1 unique block × 12 iterations).
+    # params_M = UNIQUE parameter count (1 block); actual training used ~2× due to
+    # FSDP-2 weight-tying bug (weights were duplicated 12×).  Use with caution in
+    # params-axis scatter plots — the 174M/163M represents capacity, not memory.
+    "V3":       dict(label="V3 Shared $d{=}1152$",        subdir="v3_shared_d1152",                            params_M=163, mflops=359, family="energy",      type="Shared"),
+    "V4":       dict(label="V4 Shared wide$^\\dagger$",   subdir="v4_shared_wide_d1152_lr2e3",                 params_M=174, mflops=359, family="energy",      type="Shared"),
+
+    # Hybrid GPT+EGPT (new series: V73, R1–R3, U1–U4)
+    # FLOPs = 2 × effective_params_per_token ≈ 2 × (GPT_unique + EGPT_unique × iters)
+    "V73":  dict(label="V73 6GPT+1E$\\times$6",           subdir="v73_6gpt_1egpt6x_rmsray_d1280",              params_M=282, mflops=511, family="hybrid",      type="Hybrid"),
+    "V41":  dict(label="V41 Sandwich 2G+8E+2G",           subdir="v41_sandwich_2gpt8e2gpt_d768_lr2e3",         params_M=143, mflops=359, family="hybrid",      type="Hybrid"),
+    "R1":   dict(label="R1 4GPT+1E$\\times$6",            subdir="r1_4gpt_1egpt6x_rmsray_d1024",               params_M=166, mflops=247, family="hybrid",      type="Hybrid",  alt_json="harness_final_36k.json"),
+    "R2":   dict(label="R2 6GPT+1E$\\times$6",            subdir="r2_6gpt_1egpt6x_rmsray_d1280",               params_M=213, mflops=398, family="hybrid",      type="Hybrid",  alt_json="harness_final_36k.json"),
+    "R3":   dict(label="R3 11GPT+1E$\\times$6",           subdir="r3_11gpt_1egpt6x_rmsray_d1280",              params_M=393, mflops=734, family="hybrid",      type="Hybrid",  alt_json="harness_final_36k.json"),
+    "U1":   dict(label="U1 2G+4E$\\times$3+1G",           subdir="u1_2gpt_4egpt3x_rmsray_d1280",               params_M=277, mflops=622, family="hybrid",      type="Hybrid"),
+    "U2":   dict(label="U2 2G+4GPTrec+1G",                subdir="u2_2gpt_4gptrec3x_d1280",                    params_M=284, mflops=668, family="hybrid",      type="Hybrid"),
+    "U3":   dict(label="U3 2G+4E$\\times$3+1G (RMS)",     subdir="u3_2gpt_4egpt3x_rmsnorm_d1280",              params_M=277, mflops=622, family="hybrid",      type="Hybrid"),
+    "U4":   dict(label="U4 2G+4E$\\times$3+1G $d{=}1024$",subdir="u4_2gpt_4egpt3x_rmsray_d1024",               params_M=214, mflops=483, family="hybrid",      type="Hybrid"),
 }
 
 # ---------------------------------------------------------------------------
@@ -150,7 +166,16 @@ def load_results(model_id: str) -> dict | None:
     """Return the harness `results` dict for model_id, or None if missing."""
     if model_id in _results_cache:
         return _results_cache[model_id]
-    sub = MODELS[model_id]["subdir"]
+    m = MODELS[model_id]
+    sub = m["subdir"]
+    # Some models (R1-R3) store results as harness_final_36k.json at the subdir root
+    alt = m.get("alt_json")
+    if alt:
+        alt_path = BASE / sub / alt
+        if alt_path.exists():
+            res = json.load(open(alt_path))["results"]
+            _results_cache[model_id] = res
+            return res
     files = sorted(glob.glob(str(BASE / sub / "unsharded" / "harness_results_*.json")))
     if not files:
         _results_cache[model_id] = None
