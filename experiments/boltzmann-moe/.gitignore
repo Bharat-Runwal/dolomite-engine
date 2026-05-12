@@ -1,0 +1,7 @@
+results/
+wandb/
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/wandb/
