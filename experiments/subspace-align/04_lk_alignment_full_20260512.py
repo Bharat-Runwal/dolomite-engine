@@ -46,6 +46,15 @@ MODELS = {
                     "U4 EGPT+RMSRay",         "2GPT+4×3, d=1024"),
     "v9_gpt":      (BASE/"v9_gpt_baseline_d1024_lr1e3/unsharded", False,
                     "Deep GPT",               "24×1, d=1024"),
+    # Token-matched to H1: same arch as V73, 4 GPUs, 7.86B tokens at step 30k
+    "r2_step30k":  (BASE/"r2_6gpt_1egpt6x_rmsray_d1280/unsharded_step30k", True,
+                    "r2+RMSRay@7.86Btok",     "6GPT+1×6, d=1280, 7.86B tok"),
+    # V73 for reference (same arch, 15.73B tokens)
+    "v73_rmsray":  (BASE/"v73_6gpt_1egpt6x_rmsray_d1280/unsharded", True,
+                    "V73+RMSRay@15.7Btok",    "6GPT+1×6, d=1280, 15.7B tok"),
+    # H1 base for reference (no Rayleigh, 7.86B tokens)
+    "h1_base":     (BASE/"h1_6gpt_1egpt6x_d768/unsharded", True,
+                    "H1 noRay@7.86Btok",      "6GPT+1×6, d=768, 7.86B tok"),
 }
 
 K_VALUES = [512, 128, 32]

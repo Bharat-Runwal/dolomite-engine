@@ -46,6 +46,14 @@ MODELS = {
     "410m_egpt":     (BASE / "410m_hybrid_s8e4/unsharded",   True,  "EGPT"),
     "410m_recgpt":   (BASE / "410m_recgpt_s8e4/unsharded",   False, "RecGPT"),
     "v71_egpt_dual": (BASE / "v71_hybrid_8gpt_4egpt_rmsray_d1280/unsharded", True, "EGPT-Dual"),
+    # Token-length study: same arch (6GPT+1EGPTx6, d=1280, RMSRay), 7.86B vs 15.7B tokens
+    "r2_step30k":  (BASE/"r2_6gpt_1egpt6x_rmsray_d1280/unsharded_step30k", True,
+                    "r2+Ray@7.9B"),
+    "v73_rmsray":  (BASE/"v73_6gpt_1egpt6x_rmsray_d1280/unsharded", True,
+                    "V73+Ray@15.7B"),
+    # H1: same tokens as r2, different d and no Rayleigh
+    "h1_base":     (BASE/"h1_6gpt_1egpt6x_d768/unsharded", True,
+                    "H1 noRay@7.9B"),
 }
 
 # Colours per model-operator pair
@@ -56,6 +64,13 @@ STYLES = {
     ("410m_recgpt",   "WOV"):  dict(color="#1a5276", ls="--", marker="s", lw=2.0),
     ("v71_egpt_dual", "J"):    dict(color="#e67e22", ls="-",  marker="^", lw=1.5),
     ("v71_egpt_dual", "PiJ"):  dict(color="#d35400", ls="--", marker="v", lw=1.5),
+    # Token-length study
+    ("r2_step30k",   "J"):    dict(color="#8e44ad", ls="-",  marker="o", lw=2.0),
+    ("r2_step30k",   "PiJ"):  dict(color="#6c3483", ls="--", marker="s", lw=2.0),
+    ("v73_rmsray",   "J"):    dict(color="#e74c3c", ls="-",  marker="D", lw=2.0),
+    ("v73_rmsray",   "PiJ"):  dict(color="#c0392b", ls="--", marker="D", lw=2.0),
+    ("h1_base",      "J"):    dict(color="#27ae60", ls="-",  marker="^", lw=1.5),
+    ("h1_base",      "PiJ"):  dict(color="#1e8449", ls="--", marker="v", lw=1.5),
 }
 
 OP_LABELS = {"J": r"$J = W_Q^\top W_K$", "PiJ": r"$\Pi J$",
@@ -306,7 +321,15 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--models", default=None,
+                        help="Comma-separated model keys to plot (default: all)")
     args = parser.parse_args()
+    if args.models:
+        keep = set(m.strip() for m in args.models.split(","))
+        for mid in sorted(keep - set(MODELS.keys())):
+            print(f"Unknown model key: {mid}. Available: {list(MODELS.keys())}")
+        for mid in sorted(set(MODELS.keys()) - keep):
+            del MODELS[mid]
 
     all_data = {}
     for mid, (path, is_egpt, label) in MODELS.items():
