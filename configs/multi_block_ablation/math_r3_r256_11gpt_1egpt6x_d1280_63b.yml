@@ -1,0 +1,139 @@
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/energy-gpt/cache-bsaha
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: register_energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 6
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1280
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    energy_apply_rayleigh: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - &id001
+      sequence_mixer_type: softmax_attention
+      num_attention_heads: 20
+      num_key_value_heads: 20
+      add_bias: false
+      attention_multiplier: 0.125
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 20
+      num_key_value_heads: 20
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - &id002
+      mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - mlp_type: Energy_MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    n_registers: 256
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_r3_r256_11gpt_1egpt6x_d1280_63b
+  save_interval: 2000
+  max_to_keep: 3
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-math
+    name: math_r3_r256_11gpt_1egpt6x_d1280_63b
+training_parameters:
+  num_training_steps: 60000
+  eval_interval: 10000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.002
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 4000
+  num_constant_steps: 0
+  num_decay_steps: 56000
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
