@@ -209,13 +209,12 @@ def load_and_analyze(model_id: str, path: Path, device: str):
 
 def plot_5bin(all_data: dict, d: int = 1280):
     n_bins = 5
-    bin_w = d // n_bins  # 256 for d=1280
-    bin_edges = [(i * bin_w, (i + 1) * bin_w) for i in range(n_bins)]
-    bin_labels = [f"Top\n{int(100*s/d)}-{int(100*e/d)}%" for s, e in bin_edges]
-    bin_labels[-1] = f"Bot\n{int(100*(d-bin_w)/d)}-100%"
+    # Bin labels as percentiles (same for all models regardless of d)
+    bin_labels = [f"Top\n{i*20}-{(i+1)*20}%" for i in range(n_bins)]
+    bin_labels[-1] = "Bot\n80-100%"
+    random_frac = 1.0 / n_bins
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=False)
-    random_frac = 1.0 / n_bins
 
     for ax_idx, (group_label, op_keys, ax) in enumerate([
         ("J = W_Q^T W_K  (scoring kernel)", ["J"], axes[0]),
@@ -226,14 +225,17 @@ def plot_5bin(all_data: dict, d: int = 1280):
         i_bar = 0
         for mid, (d_m, S, Vh, ops) in all_data.items():
             _, _, label = MODELS[mid]
-            # Only use the first model's Vh for bin definitions (all d=1280 matched)
+            # Per-model bin edges: each bin is exactly 20% of that model's d
+            bin_w_m = d_m // n_bins
+            model_bin_edges = [(i * bin_w_m, min((i + 1) * bin_w_m, d_m))
+                               for i in range(n_bins)]
             for op_key in op_keys:
                 if op_key not in ops:
                     continue
-                fracs = bin_energy(ops[op_key], Vh, bin_edges)
+                fracs = bin_energy(ops[op_key], Vh, model_bin_edges)
                 style = STYLES.get((mid, op_key), {})
                 color = style.get("color", "gray")
-                lbl = f"{label} {OP_LABELS.get(op_key, op_key)}"
+                lbl = f"{label} {OP_LABELS.get(op_key, op_key)} (d={d_m})"
                 ax.bar(x + i_bar * width - 0.4 + width / 2, fracs,
                        width=width, color=color, alpha=0.75, label=lbl,
                        edgecolor="white", linewidth=0.5)
