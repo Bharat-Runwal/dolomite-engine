@@ -1,0 +1,126 @@
+# C4: PairedUnitMoE — 2 paired (attn+FFN) expert units per block with joint routing
+# n_units=2: each unit = full EnergyAttention_QK + full Energy_MLP
+# Routing energy E_i = x · (attn_out_i + ffn_out_i) / d; p_i = softmax(E_i / T)
+# Returns (attn_weighted_sum, ffn_weighted_sum) for dual proj_attn + proj_mlp application.
+# Key property: FFN:Attn ratio is ALWAYS balanced (same as V1's 2.7:1) per unit.
+# Attn params: 2 × 14M = 28M; FFN: 2 × 38M = 76M; FFN:Attn = 2.7:1 ✓
+# moe_n_units and moe_temperature are top-level config fields read by EnergyBlock.
+# Training settings: B5 (d=768, lr=2e-3, wd=0.3, dropout=0.1)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    initializer_range: 0.02
+    layer_norm_epsilon: 1e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 12
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    moe_n_units: 2         # number of paired (attn+FFN) expert units
+    moe_temperature: 1.0   # Boltzmann temperature for unit routing
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      # boltzmann_moe_paired_unit: attn args used by PairedUnitMoE for each unit's attention
+      - &c4_attn {sequence_mixer_type: boltzmann_moe_paired_unit, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.125}
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+      - *c4_attn
+    mlp_blocks:
+      # FFN args used by PairedUnitMoE for each unit's FFN (int=2048 = V1 size)
+      - &c4_ffn {mlp_type: Energy_MLP, intermediate_size: 2048, activation_function: swiglu, add_bias: false, dropout: 0.1}
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+      - *c4_ffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/c4_paired_unit_moe_2x_d768
+  save_interval: 5000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: boltzmann-moe
+    name: c4_paired_unit_moe_2x_d768
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.3
+    betas: [0.9, 0.95]
+    eps: 1e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

@@ -1,0 +1,124 @@
+# C1: TopK_Energy_MoE_MLP — proper non-iso-param design
+# 4 full-size experts (int=2048 each, same as V1's single MLP), top-2 routing.
+# Linear router selects top-2; outputs softmax-normalised among selected.
+# vs B1-B5 (iso-param): each expert is FULL-SIZE, not int/K.
+# FFN params: 4 × 2 × 768 × 2048 = 12.6M/layer × 12 = 151M (vs V1 38M)
+# FFN:Attn ≈ 10.8:1 (better than B1's 21:1, still imbalanced vs V1's 2.7:1)
+# Training settings: B5 (d=768, lr=2e-3, wd=0.3, dropout=0.1)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    initializer_range: 0.02
+    layer_norm_epsilon: 1e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 12
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &ea {sequence_mixer_type: energy_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.125}
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+      - *ea
+    mlp_blocks:
+      # intermediate_size = per-expert size (full, NOT divided by n_experts)
+      # 4 experts × int=2048 each; top_k=2 activated per token
+      # load_balance_coef=0.01 prevents routing collapse (Switch Transformer §2.1)
+      - &c1_ffn {mlp_type: TopK_Energy_MoE_MLP, intermediate_size: 2048, n_experts: 4, top_k: 2, load_balance_coef: 0.01, dropout: 0.1, add_bias: false}
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+      - *c1_ffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/c1_topk_energy_moe_4x2048_top2_d768
+  save_interval: 5000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: boltzmann-moe
+    name: c1_topk_energy_moe_4x2048_top2_d768
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.3
+    betas: [0.9, 0.95]
+    eps: 1e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

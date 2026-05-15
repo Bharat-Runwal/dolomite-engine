@@ -66,9 +66,11 @@ save_args:
 
 ---
 
-## Experiment configs (B-series)
+## Experiment configs
 
-Located in `configs/boltzmann_moe/`:
+All located in `configs/boltzmann_moe/`.
+
+### B-series (deep EGPT, iso-param, d=768):
 
 | Config | repulsion_coef | dropout | weight_decay | Purpose |
 |--------|---------------|---------|-------------|---------|
@@ -78,7 +80,26 @@ Located in `configs/boltzmann_moe/`:
 | `b4_boltz_moe_repulsion_strong_16x1024_d768_lr2e3.yml` | 0.1 | 0 | 0.1 | Strong repulsion (best load balance) |
 | `b5_boltz_moe_rep_strong_dropout_wd_16x1024_d768_lr2e3.yml` | 0.1 | 0.1 | 0.3 | Combined |
 
-All use: `d=768`, 12 blocks, 16 experts × 1024 = **~422M total params**.
+All use: `d=768`, 12 blocks, 16 experts × 1024 = **~422M total params**. Note: all B variants underperform V1 EGPT d=768 (143M) due to 21:1 FFN:Attn imbalance.
+
+### C-series (design fixes, d=768):
+
+| Config | Description |
+|--------|-------------|
+| `c1_topk_energy_moe_4x2048_top2_d768.yml` | 4 full-size experts, top-2 sparse, load-balance loss |
+| `c2_surrogate_boltz_16x1024_d768.yml` | Boltzmann routing + learned linear surrogate router |
+| `c3_attn_moe_2x_d768.yml` | MoE on **attention** (2 energy-attn experts), normal FFN |
+| `c4_paired_unit_moe_2x_d768.yml` | 2 paired (attn+FFN) units, balanced FFN:Attn |
+
+### H-series (hybrid GPT+EGPT-MoE, **best results**):
+
+6 standard GPT layers + 1 recurrent EGPT block (×6). MoE only in the EGPT block.
+
+| Config | Description | Avg acc | WikiPPL |
+|--------|-------------|---------|---------|
+| `h1_topk_egpt_moe_d768.yml` | **BEST**: 4 full experts×2048, top-2 | **0.499** | 39.8 |
+| `h1_topk_egpt_moe_r128_d768.yml` | Same + 128 register tokens | 0.484 | 39.6 |
+| `h1_boltz_egpt_moe_d768.yml` | Boltzmann routing (iso-param, fails) | 0.464 | 46.1 |
 
 ---
 
