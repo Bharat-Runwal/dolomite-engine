@@ -21,7 +21,9 @@ from .models import (
     EnergyConfig,
     EnergyForCausalLM,
     EnergyModel,
-
+    RegisterEnergyConfig,
+    RegisterEnergyForCausalLM,
+    RegisterEnergyModel,
 )
 
 
@@ -32,6 +34,7 @@ _CUSTOM_MODEL_REGISTRY = [
     (LadderResidualConfig, LadderResidualModel, LadderResidualForCausalLM),
     (PaLMConfig, PaLMModel, PaLMForCausalLM),
     (EnergyConfig, EnergyModel, EnergyForCausalLM),
+    (RegisterEnergyConfig, RegisterEnergyModel, RegisterEnergyForCausalLM),
 ]
 _CUSTOM_MODEL_TYPES = []
 _CUSTOM_MODEL_CLASSES = []

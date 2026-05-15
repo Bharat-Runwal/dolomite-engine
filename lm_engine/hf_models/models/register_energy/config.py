@@ -20,7 +20,13 @@ class RegisterEnergyConfig(EnergyConfig):
 
     model_type = "register_energy"
 
-    def __init__(self, n_registers: int = 128, register_generation_mode: str = "bypass", **kwargs):
+    def __init__(self, n_registers: int = 128, register_generation_mode: str = "bypass",
+                 register_start_layer: int = 0, **kwargs):
         super().__init__(**kwargs)
         self.n_registers = n_registers
         self.register_generation_mode = register_generation_mode
+        # register_start_layer: first layer index at which registers are injected.
+        # 0 = all layers (default, original behaviour).
+        # >0 = registers only active from that layer onward — e.g. set to 6 for a
+        # 6-GPT+1-EGPT×6 hybrid to add registers only to the energy block.
+        self.register_start_layer = register_start_layer

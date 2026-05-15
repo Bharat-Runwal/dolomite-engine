@@ -169,3 +169,31 @@ class _GatedDeltaNetArgs(BaseArgs):
 
     def model_post_init(self, __context: Any) -> None:
         assert self.sequence_mixer_type == "gated_deltanet"
+
+
+class _BoltzmannMoEEnergyAttentionArgs(BaseArgs):
+    """Config for BoltzmannMoE_Energy_Attention (C3: Attn-MoE).
+
+    n_attn_experts independent EnergyAttention_QK modules with the full hidden_size each
+    (no head-dim division). Equivalent to n_attn_experts × num_heads energy attention
+    with Boltzmann mixing instead of concatenation.
+    """
+
+    sequence_mixer_type: str = "boltzmann_moe_energy_attention"
+    num_attention_heads: int = 12
+    num_key_value_heads: int = 1
+    softmax_dropout: float = 0
+    dropout: float = 0
+    add_bias: bool = False
+    attention_multiplier: float | None = None
+    sliding_window: int | None = None
+    qkv_bias: bool = None
+    position_embedding_type: str | None = None
+    n_attn_experts: int = 2          # number of independent attention experts
+    temperature: float = 1.0
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.qkv_bias is None:
+            self.qkv_bias = self.add_bias
+        assert self.sequence_mixer_type == "boltzmann_moe_energy_attention"
+        assert self.n_attn_experts >= 2

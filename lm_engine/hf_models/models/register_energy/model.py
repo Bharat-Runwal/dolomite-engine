@@ -189,44 +189,72 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         #     decode step — slow but registers are always active (correct behaviour).
         effective_use_cache = use_cache if use_cache is not None else self.config.use_cache
 
+        register_start = getattr(self.config, 'register_start_layer', 0)
+        R = self.n_registers  # convenience alias
+
         # ── Cached-decode step (T=1, past_kv already populated from prefill) ──
-        # Registers were prepended during prefill → KV cache has R+T entries.
-        # HF's generate() tracks the full R+T length and passes attention_mask=[B,R+T+1]
-        # for decode steps (after the first token), so we can just call super().forward().
-        # For the very first decode step, attention_mask may still be [B,T_prefill].
-        # We detect this case by checking if past_kv length > attention_mask length.
         if (effective_use_cache and not self.training
                 and past_key_values is not None
                 and input_ids is not None
                 and input_ids.shape[-1] == 1):
-            # Decode step: registers already in KV cache, just decode the new token.
-            # HF should have extended the attention mask to cover R+T past tokens,
-            # but if not (e.g. first decode step), we extend it here.
-            if attention_mask is not None:
-                try:
-                    # Infer past KV length from cache
-                    kv_len = past_key_values.key_cache[0].shape[2] if hasattr(past_key_values, 'key_cache') \
-                             else past_key_values[0][0].shape[2]
-                    # key_length = kv_len (past) + 1 (current token); mask must match key_length.
-                    # The custom generate() only appends 1/step (no register offset), so
-                    # attention_mask.shape[-1] = T+k but key_length = R+T+k → extend by R.
-                    target_len = kv_len + 1
-                    if attention_mask.shape[-1] < target_len:
-                        pad = torch.ones(attention_mask.shape[0], target_len - attention_mask.shape[-1],
-                                         dtype=attention_mask.dtype, device=attention_mask.device)
-                        attention_mask = torch.cat([pad, attention_mask], dim=1)
-                except Exception as e:
-                    pass
-            return super().forward(
-                input_ids=input_ids,
-                past_key_values=past_key_values,
-                attention_mask=attention_mask,
-                position_ids=None,  # recompute from extended attention_mask; outer position_ids
-                                    # was computed before mask extension → wrong slice on short mask
-                use_cache=use_cache,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            )
+
+            if register_start == 0:
+                # Standard full-register decode: single mask extended by R covers all layers.
+                if attention_mask is not None:
+                    try:
+                        kv_len = past_key_values.key_cache[0].shape[2] if hasattr(past_key_values, 'key_cache') \
+                                 else past_key_values[0][0].shape[2]
+                        target_len = kv_len + 1
+                        if attention_mask.shape[-1] < target_len:
+                            pad = torch.ones(attention_mask.shape[0], target_len - attention_mask.shape[-1],
+                                             dtype=attention_mask.dtype, device=attention_mask.device)
+                            attention_mask = torch.cat([pad, attention_mask], dim=1)
+                    except Exception:
+                        pass
+                return super().forward(
+                    input_ids=input_ids, past_key_values=past_key_values,
+                    attention_mask=attention_mask, position_ids=None,
+                    use_cache=use_cache, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
+                )
+            else:
+                # Selective-register decode: per-layer mask selection.
+                # Layers 0..register_start-1: KV has T entries  → normal mask (T+step length)
+                # Layers register_start..:   KV has T+R entries → extended mask (T+R+step length)
+                (
+                    use_cache_eff, hidden_states, causal_mask, position_ids,
+                    rope_cos_sin, past_key_values,
+                ) = self._prepare_a_bunch_of_stuff(
+                    input_ids=input_ids, past_key_values=past_key_values,
+                    attention_mask=attention_mask, position_ids=position_ids,
+                    use_cache=use_cache, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
+                )
+                # causal_mask for decode: [B,1,1,T+step] (float, 0=attend, -inf=block).
+                # Extended version: prepend R zeros to the key dimension.
+                if causal_mask is not None:
+                    causal_mask_ext = torch.nn.functional.pad(
+                        causal_mask, (R, 0), value=0.0)  # [B,1,1,R+T+step]
+                else:
+                    causal_mask_ext = None
+
+                energy_descent_loss = torch.tensor(0.0, device=hidden_states.device)
+                layer_id = 0
+                for i, num_iter in enumerate(self.layer_iterations):
+                    mask_to_use = causal_mask_ext if i >= register_start else causal_mask
+                    for j in range(num_iter):
+                        hidden_states = self._run_block(
+                            hidden_states, past_key_values, attention_mask,
+                            cu_seqlens, max_seqlen, mask_to_use, rope_cos_sin,
+                            False, i, layer_id=layer_id, iter_idx=j,
+                        )
+                        layer_id += 1
+                    if num_iter < self.layer_iterations[i]:
+                        layer_id += (self.layer_iterations[i] - num_iter)
+
+                hidden_states = self.ln_f(hidden_states)
+                return BaseModelOutputWithPast(
+                    last_hidden_state=hidden_states,
+                    past_key_values=past_key_values,
+                )
 
         # ── Prefill or training ──
         # Do NOT modify attention_mask before _prepare_a_bunch_of_stuff.
@@ -245,49 +273,45 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         R = self.n_registers
         device = hidden_states.device
         dtype = hidden_states.dtype
-        is_cached_decode = False  # always False here (handled above)
+        register_start = getattr(self.config, 'register_start_layer', 0)
 
-        if is_cached_decode:
-            # Standard decode: no register prepending, use causal_mask as-is
+        # Pre-compute the extended mask and rope for when registers ARE active.
+        # For selective registers (register_start > 0), we apply this only from
+        # layer register_start onward; layers 0..register_start-1 use the plain mask.
+        def _make_extended(hs, T_):
+            reg_emb = self.register_embeddings.unsqueeze(0).expand(B, -1, -1).to(dtype)
+            hs_ext = torch.cat([reg_emb, hs], dim=1)
+            ext_mask = self._extend_attention_mask_for_registers(causal_mask, B, R, T_, device, dtype)
+            ext_rope = None
+            if rope_cos_sin is not None:
+                pos_ids_exp = position_ids.expand(B, -1)
+                reg_pos = torch.arange(R, device=device, dtype=position_ids.dtype).unsqueeze(0).expand(B, -1)
+                ext_pos = torch.cat([reg_pos, pos_ids_exp], dim=1)
+                ext_rope = self._get_rope_cos_sin(key_length=R + T_, position_ids=ext_pos, dtype=dtype)
+            return hs_ext, ext_mask, ext_rope
+
+        registers_injected = False
+        if register_start == 0:
+            # Original behaviour: prepend registers before all layers
+            hidden_states, extended_mask, extended_rope_cos_sin = _make_extended(hidden_states, T)
+            registers_injected = True
+        else:
+            # Selective: layers 0..register_start-1 run without registers
             extended_mask = causal_mask
             extended_rope_cos_sin = rope_cos_sin
-        else:
-            # ----------------------------------------------------------------
-            # 2. Prepend register tokens: [B, R+T, d]
-            # ----------------------------------------------------------------
-            reg_emb = self.register_embeddings.unsqueeze(0).expand(B, -1, -1).to(dtype)
-            hidden_states = torch.cat([reg_emb, hidden_states], dim=1)  # [B, R+T, d]
-
-            # ----------------------------------------------------------------
-            # 3. Extend attention mask for registers
-            # ----------------------------------------------------------------
-            extended_mask = self._extend_attention_mask_for_registers(
-                causal_mask, B, R, T, device, dtype
-            )
 
         # ----------------------------------------------------------------
-        # 4. Extend rope_cos_sin (skipped for cached decode — already computed)
-        # ----------------------------------------------------------------
-        if not is_cached_decode:
-            extended_rope_cos_sin = None
-            if rope_cos_sin is not None:
-                pos_ids_expanded = position_ids.expand(B, -1)
-                reg_pos_ids = torch.arange(R, device=device, dtype=position_ids.dtype).unsqueeze(0).expand(B, -1)
-                ext_pos_ids = torch.cat([reg_pos_ids, pos_ids_expanded], dim=1)
-                extended_rope_cos_sin = self._get_rope_cos_sin(
-                    key_length=R + T,
-                    position_ids=ext_pos_ids,
-                    dtype=dtype,
-                )
-
-        # ----------------------------------------------------------------
-        # 5. Run all transformer blocks (energy + GPT) on extended sequence
+        # Run all transformer blocks (energy + GPT) on extended sequence
         # ----------------------------------------------------------------
         energy_descent_loss = torch.tensor(0.0, device=device)
         mamba_mask_computed = False
 
         layer_id = 0
         for i, num_iter in enumerate(self.layer_iterations):
+            # Selective injection: prepend registers at layer register_start
+            if not registers_injected and i == register_start:
+                hidden_states, extended_mask, extended_rope_cos_sin = _make_extended(hidden_states, hidden_states.shape[1])
+                registers_injected = True
             if self.training:
                 block_range = (self.iter_dropout_range_per_block[i]
                                if self.iter_dropout_range_per_block is not None

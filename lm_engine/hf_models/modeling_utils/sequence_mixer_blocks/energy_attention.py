@@ -354,3 +354,101 @@ class EnergyAttention_QK(nn.Module):
         energy = -lse.sum(dim=1)  # (B, T) - sum over heads, negate for energy
 
         return energy
+
+
+class BoltzmannMoE_Energy_Attention(nn.Module):
+    """Boltzmann MoE over K independent energy attention experts.
+
+    Each expert i is a full EnergyAttention_QK with the same hidden_size (no head-dim
+    division by K).  Equivalent to K×num_heads energy attention with Boltzmann mixing
+    instead of head concatenation — naturally grows attention capacity without increasing
+    FFN:Attn imbalance.
+
+    Routing: per-token alignment score align_i = (x · attn_out_i) / hidden_size.
+    p_i = softmax(align_i / temperature).
+    Output: Σ_i p_i · attn_out_i.
+
+    All K experts run in the forward pass (no sparse masking for simplicity).
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        attention_multiplier: float,
+        sliding_window: int | None,
+        position_embedding_type: str,
+        add_bias: bool,
+        qkv_bias: bool,
+        softmax_dropout: float,
+        dropout: float,
+        init_method: str,
+        initializer_range: float,
+        m_width: float,
+        num_layers: int,
+        causal: bool,
+        layer_idx: int,
+        use_padding_free_transformer: bool,
+        n_attn_experts: int = 2,
+        temperature: float = 1.0,
+        stop_grad_key: bool = False,
+        add_wv_wo: bool = False,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.n_attn_experts = n_attn_experts
+        self.temperature = temperature
+
+        expert_kwargs = dict(
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            attention_multiplier=attention_multiplier,
+            sliding_window=sliding_window,
+            position_embedding_type=position_embedding_type,
+            add_bias=add_bias,
+            qkv_bias=qkv_bias,
+            softmax_dropout=softmax_dropout,
+            dropout=dropout,
+            init_method=init_method,
+            initializer_range=initializer_range,
+            m_width=m_width,
+            num_layers=num_layers,
+            causal=causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=use_padding_free_transformer,
+            stop_grad_key=stop_grad_key,
+            add_wv_wo=add_wv_wo,
+        )
+        self.experts = nn.ModuleList([EnergyAttention_QK(**expert_kwargs) for _ in range(n_attn_experts)])
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        past_key_values=None,
+        attention_mask=None,
+        rope_cos_sin=None,
+        cu_seqlens=None,
+        max_seqlen=None,
+        layer_id=None,
+    ) -> torch.Tensor:
+        # Run all K attention experts
+        outputs = [
+            expert(
+                hidden_states,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                rope_cos_sin=rope_cos_sin,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                layer_id=layer_id,
+            )
+            for expert in self.experts
+        ]  # K tensors of (..., hidden)
+
+        expert_stack = torch.stack(outputs, dim=-2)                         # (..., K, hidden)
+        # Routing: alignment of each expert's output with the input
+        scores = (hidden_states.unsqueeze(-2) * expert_stack).sum(-1) / self.hidden_size  # (..., K)
+        p = F.softmax(scores / self.temperature, dim=-1)                    # (..., K)
+        return (p.unsqueeze(-1) * expert_stack).sum(-2)                     # (..., hidden)

@@ -371,6 +371,120 @@ class HelmholtzDualReversedProjection(nn.Module):
         return torch.matmul(attn_out, A.T) + torch.matmul(ffwd_out, R.T)
 
 
+class PairedUnitMoE(nn.Module):
+    """Boltzmann MoE over K paired (attention + FFN) expert units.
+
+    Each unit i = (EnergyAttention_QK_i, Energy_MLP_i) shares a routing energy:
+        E_i = x · (attn_out_i + ffn_out_i) / hidden_size
+    p_i = softmax(E_i / temperature).
+
+    Returns (attn_weighted_sum, ffn_weighted_sum) separately so the caller (EnergyBlock)
+    can apply dual projections (proj_attn, proj_mlp) independently.
+    Naturally keeps FFN:Attn balanced: each unit adds one attention block and one FFN together.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        # attention args
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        attention_multiplier: float,
+        sliding_window: int | None,
+        position_embedding_type: str,
+        attn_add_bias: bool,
+        qkv_bias: bool,
+        softmax_dropout: float,
+        attn_dropout: float,
+        # ffn args
+        intermediate_size: int,
+        activation_function: str,
+        ffn_add_bias: bool,
+        ffn_dropout: float,
+        # shared
+        n_units: int,
+        temperature: float,
+        init_method: str,
+        initializer_range: float,
+        m_width: float,
+        num_layers: int,
+        causal: bool,
+        layer_idx: int,
+        use_padding_free_transformer: bool,
+        stop_grad_key: bool = False,
+    ) -> None:
+        super().__init__()
+        from ...modeling_utils.sequence_mixer_blocks.energy_attention import EnergyAttention_QK
+        from ...modeling_utils.mlp_blocks.mlp import Energy_MLP
+
+        self.n_units = n_units
+        self.temperature = temperature
+        self.hidden_size = hidden_size
+
+        attn_kwargs = dict(
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            attention_multiplier=attention_multiplier,
+            sliding_window=sliding_window,
+            position_embedding_type=position_embedding_type,
+            add_bias=attn_add_bias,
+            qkv_bias=qkv_bias,
+            softmax_dropout=softmax_dropout,
+            dropout=attn_dropout,
+            init_method=init_method,
+            initializer_range=initializer_range,
+            m_width=m_width,
+            num_layers=num_layers,
+            causal=causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=use_padding_free_transformer,
+            stop_grad_key=stop_grad_key,
+        )
+        ffn_kwargs = dict(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            activation_function=activation_function,
+            add_bias=ffn_add_bias,
+            dropout=ffn_dropout,
+            init_method=init_method,
+            initializer_range=initializer_range,
+            m_width=m_width,
+            num_layers=num_layers,
+        )
+        self.attn_experts = nn.ModuleList([EnergyAttention_QK(**attn_kwargs) for _ in range(n_units)])
+        self.ffn_experts  = nn.ModuleList([Energy_MLP(**ffn_kwargs) for _ in range(n_units)])
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_key_values=None,
+        attention_mask=None,
+        rope_cos_sin=None,
+        cu_seqlens=None,
+        max_seqlen=None,
+        layer_id=None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        attn_outs = [
+            attn(x, past_key_values=past_key_values, attention_mask=attention_mask,
+                 rope_cos_sin=rope_cos_sin, cu_seqlens=cu_seqlens,
+                 max_seqlen=max_seqlen, layer_id=layer_id)
+            for attn in self.attn_experts
+        ]
+        ffn_outs = [ffn(x) for ffn in self.ffn_experts]
+
+        attn_stack = torch.stack(attn_outs, dim=-2)                         # (..., K, d)
+        ffn_stack  = torch.stack(ffn_outs,  dim=-2)                         # (..., K, d)
+
+        # Routing energy: alignment of combined output with input
+        scores = (x.unsqueeze(-2) * (attn_stack + ffn_stack)).sum(-1) / self.hidden_size
+        p = torch.nn.functional.softmax(scores / self.temperature, dim=-1)  # (..., K)
+
+        attn_out = (p.unsqueeze(-1) * attn_stack).sum(-2)                   # (..., d)
+        ffn_out  = (p.unsqueeze(-1) * ffn_stack).sum(-2)                    # (..., d)
+        return attn_out, ffn_out
+
+
 class EnergyBlock(nn.Module):
     """Energy Transformer block with customizable attention and feedforward.
 
@@ -404,7 +518,8 @@ class EnergyBlock(nn.Module):
             self.proj_mlp = nn.Linear(hidden_size, hidden_size, bias=False)
             self.proj = None
             self.proj_type = "parallel_gpt"
-        elif self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent"):
+        elif self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent",
+                                          "boltzmann_moe_energy_attention"):
             # Use energy-specific norm if configured, otherwise fall back to global
             norm_type = getattr(config, 'energy_norm_type', None) or config.normalization_function
             self.ln = get_normalization_function(
@@ -507,6 +622,43 @@ class EnergyBlock(nn.Module):
             # Config key: energy_apply_rayleigh. Legacy alias: energy_apply_reileigh.
             self.apply_reileigh = (getattr(config, 'energy_apply_rayleigh', False) or
                                    getattr(config, 'energy_apply_reileigh', False))
+        elif self.sequence_mixer_type == "boltzmann_moe_paired_unit":
+            # C4: Paired (attn+ffn) expert units with joint Boltzmann routing.
+            # PairedUnitMoE handles both attn and ffn; we only need ln + dual projections.
+            norm_type = getattr(config, 'energy_norm_type', None) or config.normalization_function
+            self.ln = get_normalization_function(norm_type, hidden_size, eps=config.layer_norm_epsilon)
+            attn_block = config.sequence_mixer_blocks[layer_idx]
+            mlp_block  = config.mlp_blocks[layer_idx]
+            self.paired = PairedUnitMoE(
+                hidden_size=hidden_size,
+                num_attention_heads=attn_block.num_attention_heads,
+                num_key_value_heads=attn_block.num_key_value_heads,
+                attention_multiplier=attn_block.attention_multiplier,
+                sliding_window=getattr(attn_block, 'sliding_window', None),
+                position_embedding_type=config.position_embedding_type,
+                attn_add_bias=attn_block.add_bias,
+                qkv_bias=getattr(attn_block, 'qkv_bias', False),
+                softmax_dropout=getattr(attn_block, 'softmax_dropout', 0.0),
+                attn_dropout=getattr(attn_block, 'dropout', 0.0),
+                intermediate_size=mlp_block.intermediate_size,
+                activation_function=mlp_block.activation_function,
+                ffn_add_bias=mlp_block.add_bias,
+                ffn_dropout=getattr(mlp_block, 'dropout', 0.0),
+                n_units=getattr(config, 'moe_n_units', 2),
+                temperature=getattr(config, 'moe_temperature', 1.0),
+                init_method=config.init_method,
+                initializer_range=config.initializer_range,
+                m_width=config.m_width,
+                num_layers=config.num_layers,
+                causal=True,
+                layer_idx=layer_idx,
+                use_padding_free_transformer=use_padding_free_transformer,
+                stop_grad_key=getattr(config, 'energy_stop_grad_key', False),
+            )
+            self.proj_attn = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.proj_mlp  = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.proj_type = "boltzmann_moe_paired_unit"
+            self.apply_reileigh = False
         else:
 
             hidden_size = config.hidden_size
@@ -541,7 +693,21 @@ class EnergyBlock(nn.Module):
                 rope_cos_sin, cu_seqlens, max_seqlen, layer_id
             )
 
-        if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent"):
+        if self.sequence_mixer_type == "boltzmann_moe_paired_unit":
+            ln_x = self.ln(hidden_states)
+            attn_out, ffn_out = self.paired(
+                ln_x,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                rope_cos_sin=rope_cos_sin,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                layer_id=layer_id,
+            )
+            return hidden_states - self.proj_attn(attn_out) - self.proj_mlp(ffn_out)
+
+        if self.sequence_mixer_type in ("energy_attention", "mixed_head_energy_descent",
+                                        "boltzmann_moe_energy_attention"):
 
             ln_x = self.ln(hidden_states)
             attn_out = self.attn(
@@ -742,7 +908,7 @@ class EnergyBlock(nn.Module):
         max_seqlen: int | None = None,
         layer_id: int | None = None,
     ) -> torch.Tensor:
-        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention", "mixed_head_attention", "energy_grad_mixed_head_attention"]:
+        if self.sequence_mixer_type in ["softmax_attention", "parallel_softmax_attention", "multihead_latent_attention", "mixed_head_attention", "energy_grad_mixed_head_attention"]:
             hidden_states = self.sequence_mixer(
                 hidden_states,
                 past_key_values=past_key_values,

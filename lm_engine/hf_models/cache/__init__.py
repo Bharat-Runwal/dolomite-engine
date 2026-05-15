@@ -20,11 +20,14 @@ _CACHE_CLASSES = {
     "mixed_head_attention": _SoftmaxAttentionCache,
     "energy_grad_mixed_head_attention": _SoftmaxAttentionCache,
     "mixed_head_energy_descent": _SoftmaxAttentionCache,
+    "boltzmann_moe_energy_attention": _SoftmaxAttentionCache,
+    "boltzmann_moe_paired_unit": _SoftmaxAttentionCache,
     "gru": _RNNCache,
     "mamba2": _Mamba2Cache,
     "multihead_latent_attention": _SoftmaxAttentionCache,
     "rnn": _RNNCache,
     "softmax_attention": _SoftmaxAttentionCache,
+    "parallel_softmax_attention": _SoftmaxAttentionCache,  # alias
 }
 
 CACHE_TYPE = torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None
