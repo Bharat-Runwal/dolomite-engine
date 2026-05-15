@@ -82,15 +82,15 @@ BSUB_SCRIPT
 mkdir -p "${HOME}/bsub_logs"
 
 submit_boltz b1_boltz_moe_16x1024_d768_lr2e3 \
-    ${REPO}/configs/multi_block_ablation/b1_boltz_moe_16x1024_d768_lr2e3.yml \
+    ${REPO}/configs/boltzmann_moe/b1_boltz_moe_16x1024_d768_lr2e3.yml \
     ${REPO}/experiments/energy-inference/results/multi-block-ablation/b1_boltz_moe_16x1024_d768_lr2e3
 
 submit_boltz b2_boltz_moe_repulsion_16x1024_d768_lr2e3 \
-    ${REPO}/configs/multi_block_ablation/b2_boltz_moe_repulsion_16x1024_d768_lr2e3.yml \
+    ${REPO}/configs/boltzmann_moe/b2_boltz_moe_repulsion_16x1024_d768_lr2e3.yml \
     ${REPO}/experiments/energy-inference/results/multi-block-ablation/b2_boltz_moe_repulsion_16x1024_d768_lr2e3
 
 submit_boltz b3_boltz_moe_dropout_wd_16x1024_d768_lr2e3 \
-    ${REPO}/configs/multi_block_ablation/b3_boltz_moe_dropout_wd_16x1024_d768_lr2e3.yml \
+    ${REPO}/configs/boltzmann_moe/b3_boltz_moe_dropout_wd_16x1024_d768_lr2e3.yml \
     ${REPO}/experiments/energy-inference/results/multi-block-ablation/b3_boltz_moe_dropout_wd_16x1024_d768_lr2e3
 
 echo "All 3 BoltzmannMoE jobs submitted to preemptable queue."

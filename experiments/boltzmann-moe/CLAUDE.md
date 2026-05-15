@@ -68,7 +68,7 @@ save_args:
 
 ## Experiment configs (B-series)
 
-Located in `configs/multi_block_ablation/`:
+Located in `configs/boltzmann_moe/`:
 
 | Config | repulsion_coef | dropout | weight_decay | Purpose |
 |--------|---------------|---------|-------------|---------|
@@ -102,7 +102,7 @@ bsub \
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=/proj/dmfexp/nima/Code/dolomite-engine:${PYTHONPATH:-}
 bash /proj/dmfexp/nima/Code/dolomite-engine/scripts/common/pretrain.sh \
-    /proj/dmfexp/nima/Code/dolomite-engine/configs/multi_block_ablation/b1_boltz_moe_16x1024_d768_lr2e3.yml
+    /proj/dmfexp/nima/Code/dolomite-engine/configs/boltzmann_moe/b1_boltz_moe_16x1024_d768_lr2e3.yml
 EOF
 ```
 
