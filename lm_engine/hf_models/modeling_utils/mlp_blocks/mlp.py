@@ -579,6 +579,232 @@ def _get_std_for_linear(initializer_range: float, init_method: str, m_width: flo
     return std
 
 
+class TopK_Energy_MoE_MLP(nn.Module):
+    """Top-K MoE with full-size Energy_MLP experts.
+
+    Unlike BoltzmannMoE_Energy_MLP (iso-param: divides int by n_experts), each expert
+    here gets the FULL intermediate_size — following Switch Transformer / Mixtral practice.
+    A learned linear router selects top_k experts per token; outputs are softmax-normalised
+    among the selected (differentiable top-K, same as Switch/Mixtral during training).
+
+    load_balance_coef: auxiliary load-balancing loss (Switch Transformer §2.1) that
+    penalises routing imbalance. L_lb = n_experts * Σ_i f_i * P_i where f_i is the
+    fraction of tokens dispatched to expert i and P_i is the mean router probability for
+    expert i. Without this, the router collapses to always selecting the same top_k experts.
+
+    All n_experts compute their gradients in the forward pass; only top_k outputs are used.
+    This wastes FLOPs on unselected experts — acceptable for an ablation prototype.
+    """
+
+    _SIGMOID_SCALE: float = (2.0 / math.pi) ** 0.5
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,  # per-expert; NOT divided by n_experts
+        n_experts: int,
+        top_k: int,
+        load_balance_coef: float,  # auxiliary load-balancing loss weight (e.g. 0.01)
+        activation_function: str,
+        add_bias: bool,
+        dropout: float,
+        init_method: str,
+        initializer_range: float,
+        m_width: float,
+        num_layers: int,
+        layer_idx: int | None = None,
+    ) -> None:
+        super().__init__()
+        assert top_k <= n_experts, f"top_k ({top_k}) must be <= n_experts ({n_experts})"
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.n_experts = n_experts
+        self.top_k = top_k
+        self.load_balance_coef = load_balance_coef
+        self.layer_idx = layer_idx
+
+        std = _get_std_for_linear(initializer_range, init_method, m_width)
+        # Fused expert weights: each (n_experts * intermediate_size, hidden)
+        self.W1 = ParameterizedLinear(hidden_size, n_experts * intermediate_size, bias=add_bias, std=std)
+        self.W2 = ParameterizedLinear(hidden_size, n_experts * intermediate_size, bias=add_bias, std=std)
+        mark_parameter_as_mup_learning_rate(self.W1.weight)
+        mark_parameter_as_mup_learning_rate(self.W2.weight)
+
+        # Linear router — cheap (d → n_experts)
+        self.router = nn.Linear(hidden_size, n_experts, bias=False)
+        torch.nn.init.normal_(self.router.weight, std=0.01)
+
+        self.dropout = Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        leading = x.shape[:-1]
+
+        # Router: top-K selection
+        logits = self.router(x)                                             # (..., n_experts)
+        topk_logits, topk_indices = logits.topk(self.top_k, dim=-1)        # (..., top_k)
+        topk_weights = F.softmax(topk_logits, dim=-1)                      # (..., top_k)
+
+        # Expert weights (reshaped views — zero-copy)
+        W1_e = self.W1.weight.view(self.n_experts, self.intermediate_size, self.hidden_size)
+        W2_e = self.W2.weight.view(self.n_experts, self.intermediate_size, self.hidden_size)
+
+        # Compute all expert gradients (fused matmuls)
+        W1x = self.dropout(self.W1(x)).view(*leading, self.n_experts, self.intermediate_size)
+        W2x = self.dropout(self.W2(x)).view(*leading, self.n_experts, self.intermediate_size)
+        phi        = F.gelu(W1x)
+        phi_prime  = torch.sigmoid(self._SIGMOID_SCALE * W1x) * 0.5
+        term1      = torch.einsum("...ei,eih->...eh", phi,             W2_e)
+        term2      = torch.einsum("...ei,eih->...eh", phi_prime * W2x, W1_e)
+        expert_grads = term1 + term2                                        # (..., n_experts, hidden)
+
+        # Auxiliary load-balancing loss (Switch Transformer §2.1): prevents routing collapse.
+        # L_lb = n_experts * Σ_i f_i * P_i  (differentiable through P_i only)
+        if self.training and self.load_balance_coef > 0:
+            # f_i: fraction of tokens routed to expert i (non-differentiable indicator sum)
+            # P_i: mean router softmax probability for expert i over the batch (differentiable)
+            all_probs = F.softmax(logits, dim=-1)               # (..., n_experts) full probs
+            tokens = all_probs.reshape(-1, self.n_experts)       # (T, n_experts)
+            T = tokens.shape[0]
+            # f_i: fraction of tokens where expert i is in top_k (indicator)
+            one_hot = torch.zeros_like(tokens)
+            one_hot.scatter_(-1, topk_indices.reshape(T, self.top_k), 1.0 / self.top_k)
+            f = one_hot.mean(0)                                  # (n_experts,) non-diff
+            P = tokens.mean(0)                                   # (n_experts,) differentiable
+            lb_loss = self.n_experts * (f.detach() * P).sum()
+            add_aux_loss(self.load_balance_coef * lb_loss)
+
+        # Gather top_k and combine
+        idx      = topk_indices.unsqueeze(-1).expand(*leading, self.top_k, self.hidden_size)
+        selected = expert_grads.gather(dim=-2, index=idx)                   # (..., top_k, hidden)
+        return (topk_weights.unsqueeze(-1) * selected).sum(-2)              # (..., hidden)
+
+
+class SurrogateBoltzmannMoE_Energy_MLP(nn.Module):
+    """BoltzmannMoE_Energy_MLP with a linear surrogate router for cheap inference.
+
+    Iso-parameter with Energy_MLP (same as BoltzmannMoE): n_experts experts each with
+    (intermediate_size // n_experts) neurons.
+
+    Training:
+      - Computes Boltzmann weights p_boltz from expert energies (full cost)
+      - Computes surrogate weights p_surr from a learned linear layer (cheap: d → n_experts)
+      - KL(p_surr ‖ p_boltz.detach()) added to aux loss with coefficient surrogate_coef
+
+    Inference (use_surrogate=True, default on eval):
+      - Skip energy routing; use p_surr only — O(d·n_experts) vs O(d·expert_I) per token
+      - Expert gradients (term1 + term2) still computed for the output
+    """
+
+    _SIGMOID_SCALE: float = (2.0 / math.pi) ** 0.5
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,    # total = n_experts * per_expert_I (iso-param)
+        n_experts: int,
+        temperature: float,
+        repulsion_coef: float,
+        n_repulsion_pairs: int,
+        surrogate_coef: float,
+        use_surrogate: bool,
+        activation_function: str,
+        add_bias: bool,
+        dropout: float,
+        init_method: str,
+        initializer_range: float,
+        m_width: float,
+        num_layers: int,
+        layer_idx: int | None = None,
+    ) -> None:
+        super().__init__()
+        assert intermediate_size % n_experts == 0
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.n_experts = n_experts
+        self.expert_I = intermediate_size // n_experts
+        self.temperature = temperature
+        self.repulsion_coef = repulsion_coef
+        self.n_repulsion_pairs = n_repulsion_pairs
+        self.surrogate_coef = surrogate_coef
+        self.use_surrogate = use_surrogate
+        self.layer_idx = layer_idx
+        self._all_pairs: list[tuple[int, int]] = list(itertools.combinations(range(n_experts), 2))
+        self._cached_metrics: dict[str, float] | None = None
+
+        std = _get_std_for_linear(initializer_range, init_method, m_width)
+        self.W1 = ParameterizedLinear(hidden_size, intermediate_size, bias=add_bias, std=std)
+        self.W2 = ParameterizedLinear(hidden_size, intermediate_size, bias=add_bias, std=std)
+        mark_parameter_as_mup_learning_rate(self.W1.weight)
+        mark_parameter_as_mup_learning_rate(self.W2.weight)
+
+        # Surrogate router (cheap linear)
+        self.surrogate_router = nn.Linear(hidden_size, n_experts, bias=False)
+        torch.nn.init.normal_(self.surrogate_router.weight, std=0.01)
+
+        self.dropout = Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        leading = x.shape[:-1]
+
+        W1_e = self.W1.weight.view(self.n_experts, self.expert_I, self.hidden_size)
+        W2_e = self.W2.weight.view(self.n_experts, self.expert_I, self.hidden_size)
+        W1x  = self.dropout(self.W1(x)).view(*leading, self.n_experts, self.expert_I)
+        phi        = F.gelu(W1x)
+        phi_prime  = torch.sigmoid(self._SIGMOID_SCALE * W1x) * 0.5
+        term1      = torch.einsum("...ei,eih->...eh", phi,            W2_e)
+        W2x        = self.dropout(self.W2(x)).view(*leading, self.n_experts, self.expert_I)
+        term2      = torch.einsum("...ei,eih->...eh", phi_prime * W2x, W1_e)
+        expert_grads = term1 + term2                                        # (..., n_experts, hidden)
+
+        # Surrogate routing (always computed — needed for KL loss and cheap inference)
+        p_surr = F.softmax(self.surrogate_router(x) / self.temperature, dim=-1)
+
+        if not self.training and self.use_surrogate:
+            # Cheap inference path: skip energy routing
+            return torch.einsum("...e,...eh->...h", p_surr, expert_grads)
+
+        # Full Boltzmann routing
+        E = torch.einsum("...h,...eh->...e", x, term1)                     # (..., n_experts)
+        p_boltz = F.softmax(E / self.temperature, dim=-1)
+        out = torch.einsum("...e,...eh->...h", p_boltz, expert_grads)
+
+        if self.training:
+            if self.surrogate_coef > 0:
+                kl = -(p_boltz.detach() * (p_surr + 1e-8).log()).sum(-1).mean()
+                add_aux_loss(self.surrogate_coef * kl)
+            if self.repulsion_coef > 0:
+                eg      = expert_grads.reshape(-1, self.n_experts, self.hidden_size)
+                eg_norm = F.normalize(eg, dim=-1)
+                k       = min(self.n_repulsion_pairs, len(self._all_pairs))
+                pairs   = random.sample(self._all_pairs, k)
+                i_idx   = [p[0] for p in pairs]
+                j_idx   = [p[1] for p in pairs]
+                cos_sim = (eg_norm[:, i_idx] * eg_norm[:, j_idx]).sum(-1).mean()
+                add_aux_loss(self.repulsion_coef * cos_sim)
+
+        if not torch.compiler.is_compiling():
+            self._log_metrics(p_boltz, p_surr, out)
+        return out
+
+    def _log_metrics(self, p_boltz, p_surr, out):
+        with torch.no_grad():
+            p_flat = p_boltz.reshape(-1, self.n_experts)
+            H = -(p_flat * (p_flat + 1e-8).log()).sum(-1)
+            kl = -(p_boltz.detach().reshape(-1, self.n_experts) *
+                   (p_surr.reshape(-1, self.n_experts) + 1e-8).log()).sum(-1).mean().item()
+            dominant  = p_flat.argmax(-1)
+            max_load  = dominant.bincount(minlength=self.n_experts).float().max().item() / p_flat.shape[0]
+            self._cached_metrics = {
+                "effective_n_experts": math.exp(H.mean().item()),
+                "max_load": max_load,
+                "kl_surr_boltz": kl,
+                "output_norm": out.norm(dim=-1).mean().item(),
+            }
+
+    def get_metrics(self):
+        return self._cached_metrics
+
+
 def interleave_up_gate_tensor_for_mlp(up_weight: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
     return torch.cat([up_weight, gate_weight])
 

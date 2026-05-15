@@ -241,8 +241,9 @@ def get_model_tflops(
             )
         elif sequence_mixer_type == "gated_deltanet":
             return 0
-        elif sequence_mixer_type == "energy_attention":
-            return 0  # TODO add flops calculation for energy attention
+        elif sequence_mixer_type in ("energy_attention", "boltzmann_moe_energy_attention",
+                                      "boltzmann_moe_paired_unit"):
+            return 0  # TODO add flops calculation for energy attention variants
         elif sequence_mixer_type in ("mixed_head_attention", "energy_grad_mixed_head_attention", "mixed_head_energy_descent"):
             # c_attn_energy: h → 2*ne*dh (or 3*ne*dh for egrad), c_attn_gpt: h → 3*ng*dh, W_O: h → h
             ne = block.num_energy_heads

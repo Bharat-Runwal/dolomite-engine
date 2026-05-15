@@ -114,3 +114,55 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
             f"n_experts ({self.n_experts})"
         )
         assert self.temperature > 0, "temperature must be positive"
+
+
+class _TopKEnergyMoEMLPArgs(BaseArgs):
+    """Config for TopK_Energy_MoE_MLP.
+
+    Each of n_experts experts gets the full intermediate_size (not divided by n_experts).
+    top_k experts are selected per token by a learned linear router.
+    load_balance_coef: auxiliary load-balancing loss weight (Switch §2.1). Use 0.01.
+    """
+
+    mlp_type: str = "TopK_Energy_MoE_MLP"
+    intermediate_size: int   # per-expert (full size, NOT divided by n_experts)
+    n_experts: int = 4
+    top_k: int = 2
+    load_balance_coef: float = 0.01   # prevents routing collapse; 0.01 follows Switch
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0.0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "TopK_Energy_MoE_MLP"
+        assert 1 <= self.top_k <= self.n_experts, (
+            f"top_k ({self.top_k}) must be in [1, n_experts ({self.n_experts})]"
+        )
+
+
+class _SurrogateBoltzmannMoEMLPArgs(BaseArgs):
+    """Config for SurrogateBoltzmannMoE_Energy_MLP.
+
+    Iso-parameter with Energy_MLP (intermediate_size = n_experts * per_expert_I).
+    Adds a linear surrogate router trained to mimic Boltzmann routing via KL distillation.
+    """
+
+    mlp_type: str = "SurrogateBoltzmannMoE_Energy_MLP"
+    intermediate_size: int   # total = n_experts * per_expert_I (iso-param)
+    n_experts: int = 16
+    temperature: float = 1.0
+    repulsion_coef: float = 0.0
+    n_repulsion_pairs: int = 4
+    surrogate_coef: float = 1.0   # weight of KL(surrogate || boltzmann) distillation loss
+    use_surrogate: bool = True    # use linear router at eval time (cheap inference)
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0.0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "SurrogateBoltzmannMoE_Energy_MLP"
+        assert self.n_experts >= 2
+        assert self.intermediate_size % self.n_experts == 0, (
+            f"intermediate_size ({self.intermediate_size}) must be divisible by n_experts ({self.n_experts})"
+        )
+        assert self.temperature > 0

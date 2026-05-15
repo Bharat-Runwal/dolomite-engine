@@ -10,7 +10,9 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MixedEnergyMLPArgs, _BoltzmannMoEEnergyMLPArgs
+from .mlp import (_MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs,
+                  _MixedEnergyMLPArgs, _BoltzmannMoEEnergyMLPArgs,
+                  _TopKEnergyMoEMLPArgs, _SurrogateBoltzmannMoEMLPArgs)
 from .sequence_mixer import (
     _CausalConvolution,
     _GatedDeltaNetArgs,
@@ -21,6 +23,7 @@ from .sequence_mixer import (
     _SoftmaxAttentionArgs,
     _EnergyAttentionArgs,
     _MixedHeadAttentionArgs,
+    _BoltzmannMoEEnergyAttentionArgs,
 )
 
 
@@ -74,14 +77,26 @@ _SEQUENCE_MIXER_CONFIG_CLASSES = {
     "multihead_latent_attention": _MultiHeadLatentAttentionArgs,
     "rnn": _RNNArgs,
     "softmax_attention": _SoftmaxAttentionArgs,
+    "parallel_softmax_attention": _SoftmaxAttentionArgs,  # alias for older checkpoints
     "gated_deltanet": _GatedDeltaNetArgs,
     "energy_attention": _EnergyAttentionArgs,
     "mixed_head_attention": _MixedHeadAttentionArgs,
     "energy_grad_mixed_head_attention": _MixedHeadAttentionArgs,
     "mixed_head_energy_descent": _MixedHeadAttentionArgs,
+    "boltzmann_moe_energy_attention": _BoltzmannMoEEnergyAttentionArgs,
+    "boltzmann_moe_paired_unit": _EnergyAttentionArgs,  # paired unit reuses attn config for attn half
 }
 
-_MLP_CONFIG_CLASSES = {"MLP": _MLPArgs, "MoE": _MoEArgs, "Energy_MLP": _EnergyMLPArgs, "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs, "Mixed_Energy_MLP": _MixedEnergyMLPArgs, "BoltzmannMoE_Energy_MLP": _BoltzmannMoEEnergyMLPArgs}
+_MLP_CONFIG_CLASSES = {
+    "MLP": _MLPArgs,
+    "MoE": _MoEArgs,
+    "Energy_MLP": _EnergyMLPArgs,
+    "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs,
+    "Mixed_Energy_MLP": _MixedEnergyMLPArgs,
+    "BoltzmannMoE_Energy_MLP": _BoltzmannMoEEnergyMLPArgs,
+    "TopK_Energy_MoE_MLP": _TopKEnergyMoEMLPArgs,
+    "SurrogateBoltzmannMoE_Energy_MLP": _SurrogateBoltzmannMoEMLPArgs,
+}
 
 
 class CommonConfig(PretrainedConfig):
