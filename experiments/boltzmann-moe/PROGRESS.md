@@ -52,13 +52,14 @@ These target the root cause: the MoE FFN should not dwarf attention.
 - Linear gate router, load-balance loss, dropout=0.1
 - 4× more FFN params than B-series per active expert, but proper capacity per expert
 - FFN:Attn ~ 5:1 (much better than 21:1 of B-series)
-- Status: **running** (job 250840)
+- avg=0.474, ppl=47.3 — same as B1. Non-iso-param doesn't help if routing still collapses.
+- Status: **done**
 
 **C2 — SurrogateBoltzmannMoE (iso-param as B5 + learned linear router)**
 - Same B5 architecture + linear layer (d→16) trained to mimic Boltzmann weights (KL loss)
 - At inference: cheap surrogate router (O(d·K) vs O(d·I) for Boltzmann)
 - Tests the surrogate routing hypothesis: can a linear approximation replace energy routing?
-- Status: **running** (job 250841)
+- Status: **running** (job 254254) — preempted at step 20k, resubmitted
 
 **C3 — BoltzmannMoE on Attention (2 energy-attn experts)**
 - Normal Energy_MLP FFN (int=2048, same as V1)
@@ -66,14 +67,18 @@ These target the root cause: the MoE FFN should not dwarf attention.
 - Routing: alignment score x·attn_out_i / d → softmax weights
 - Addresses FFN-heaviness by adding capacity on the attention side
 - FFN:Attn ratio is *reduced* not increased
-- Status: **running** (job 250842)
+- **avg=0.393, ppl=1383** — catastrophic generalization failure. Training loss 3.29 is
+  *better* than C1 (3.33), suggesting overfitting rather than architectural failure.
+  Investigation needed: likely memorizes training distribution but doesn't generalize.
 
 **C4 — PairedUnitMoE (2 joint attn+FFN expert units)**
 - 2 full paired units (EnergyAttention_QK + Energy_MLP) per block
 - Joint routing: E_i = x·(attn_out_i + ffn_out_i) / d
 - FFN:Attn ratio preserved at V1's ~2.7:1 regardless of n_units
 - Most architecturally balanced MoE design
-- Status: **running** (job 250843)
+- **avg=0.370, ppl=5637** — worse generalization than C3. Training loss 3.23 is
+  excellent but eval PPL is catastrophically high. Joint routing over (attn+FFN) may
+  encourage mode-collapse to one expert unit that memorizes training patterns.
 
 ### H-series: Hybrid GPT+EGPT-MoE **(currently best results)**
 
