@@ -18,7 +18,10 @@ class EnergyBlock(nn.Module):
 
     Unlike standard Transformer blocks that use additive residual connections,
     EnergyBlock uses a subtractive update inspired by energy-based models:
-        x = x - proj(attn(ln(x)) + scale_ff * ffwd(ln(x)))
+        x = x - alpha[j] * proj(attn(ln(x)) + scale_ff * ffwd(ln(x)))
+
+    When iter_step_scales is enabled, alpha[j] is a learnable per-iteration
+    step size initialized with a decaying schedule to prevent oscillation.
     """
 
     def __init__(
@@ -41,10 +44,42 @@ class EnergyBlock(nn.Module):
                 config, use_padding_free_transformer=use_padding_free_transformer, layer_idx=layer_idx
             )
 
-            self.scale_ff = nn.Parameter(torch.ones(1) * 4, requires_grad=True)
-            # self.scale_ff = nn.Parameter(torch.ones(1) * 1, requires_grad=False)
+            # Diamond-shaped scale_ff init: edges strong, middle weak (breaks symmetry)
+            # e.g. for 6 blocks: [4, 3, 1, 1, 3, 4]
+            n = config.num_layers
+            mid = (n - 1) / 2.0
+            dist = abs(layer_idx - mid) / mid  # 1.0 at edges, 0.0 at center
+            scale_ff_init = 1.0 + 3.0 * dist   # center=1.0, edges=4.0
+            self.scale_ff = nn.Parameter(torch.ones(1) * scale_ff_init, requires_grad=True)
 
-            self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.proj_mode = getattr(config, 'proj_mode', 'unconstrained')
+            if self.proj_mode in ("unconstrained", "riemannian"):
+                self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+            elif self.proj_mode in ("split", "riemannian_split"):
+                self.proj_attn = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.proj_ff = nn.Linear(hidden_size, hidden_size, bias=False)
+            else:
+                raise ValueError(f"unexpected proj_mode ({self.proj_mode})")
+
+            # Per-iteration learnable step size: alpha[j] scales the energy update
+            num_iters = config.layer_iterations[layer_idx]
+            use_step_scales = getattr(config, 'iter_step_scales', False)
+            if use_step_scales and num_iters > 1:
+                # Initialize with linear decay from 1.0 to 0.3
+                init_vals = torch.linspace(1.0, 0.3, num_iters)
+                self.iter_step_scales = nn.Parameter(init_vals)
+            else:
+                self.iter_step_scales = None
+        elif self.sequence_mixer_type in ("parallel_softmax_attention", "egrad_attention"):
+            # PaLM-style parallel block: single LN, attn + MLP computed in parallel
+            # x = x + attn(ln(x)) + mlp(ln(x))
+            self.ln = get_normalization_function(
+                config.normalization_function, hidden_size, eps=config.layer_norm_epsilon
+            )
+            self.sequence_mixer = get_sequence_mixer(config, True, use_padding_free_transformer, layer_idx)
+            self.mlp_block = get_mlp_block(
+                config, use_padding_free_transformer=use_padding_free_transformer, layer_idx=layer_idx
+            )
         else:
 
             hidden_size = config.hidden_size
@@ -70,6 +105,7 @@ class EnergyBlock(nn.Module):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
         layer_id: int | None = None, #TODO: Handle KV Caching for Energy Models
+        iteration_idx: int = 0,
     ) -> torch.Tensor:
 
         if self.sequence_mixer_type=="energy_attention":
@@ -85,10 +121,35 @@ class EnergyBlock(nn.Module):
                 layer_id=layer_id,
             )
             ffwd_out = self.ffwd(ln_x)
-            hidden_states = hidden_states - self.proj(attn_out + self.scale_ff * ffwd_out)
+
+            if self.proj_mode == "unconstrained":
+                update = self.proj(attn_out + self.scale_ff * ffwd_out)
+            elif self.proj_mode == "riemannian":
+                combined = attn_out + self.scale_ff * ffwd_out
+                # Project out radial component (tangent to layer norm sphere)
+                h_norm = hidden_states / hidden_states.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                combined = combined - (combined * h_norm).sum(dim=-1, keepdim=True) * h_norm
+                update = self.proj(combined)
+            elif self.proj_mode == "split":
+                update = self.proj_attn(attn_out) + self.proj_ff(self.scale_ff * ffwd_out)
+            elif self.proj_mode == "riemannian_split":
+                h_norm = hidden_states / hidden_states.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                attn_corr = attn_out - (attn_out * h_norm).sum(dim=-1, keepdim=True) * h_norm
+                ff_scaled = self.scale_ff * ffwd_out
+                ff_corr = ff_scaled - (ff_scaled * h_norm).sum(dim=-1, keepdim=True) * h_norm
+                update = self.proj_attn(attn_corr) + self.proj_ff(ff_corr)
+
+            # Apply per-iteration step scale if available
+            if self.iter_step_scales is not None:
+                alpha = self.iter_step_scales[iteration_idx]
+                update = alpha * update
+
+            hidden_states = hidden_states - update
             return hidden_states
+        elif self.sequence_mixer_type in ("parallel_softmax_attention", "egrad_attention"):
+            return self.forward_parallel_gpt(hidden_states,past_key_values,attention_mask,rope_cos_sin,cu_seqlens,max_seqlen,layer_id=layer_id)
         else:
-            return self.forward_gpt(hidden_states,past_key_values,attention_mask,rope_cos_sin,cu_seqlens,max_seqlen)
+            return self.forward_gpt(hidden_states,past_key_values,attention_mask,rope_cos_sin,cu_seqlens,max_seqlen,layer_id=layer_id)
 
 
     def energy_per_token(self, x: torch.Tensor, rope_cos_sin=None) -> torch.Tensor:
@@ -98,6 +159,30 @@ class EnergyBlock(nn.Module):
 
 
 
+    def forward_parallel_gpt(
+        self,
+        hidden_states: torch.Tensor,
+        past_key_values: GenerationCache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        rope_cos_sin: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: int | None = None,
+        layer_id: int | None = None,
+    ) -> torch.Tensor:
+        ln_x = self.ln(hidden_states)
+        attn_out = self._sequence_mixer_forward(
+            hidden_states=ln_x,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            rope_cos_sin=rope_cos_sin,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            layer_id=layer_id,
+        )
+        mlp_out = self.mlp_block(ln_x)
+        hidden_states = hidden_states + attn_out + mlp_out
+        return hidden_states
+
     def forward_gpt(
         self,
         hidden_states: torch.Tensor,
@@ -106,6 +191,7 @@ class EnergyBlock(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        layer_id: int | None = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -117,6 +203,7 @@ class EnergyBlock(nn.Module):
             rope_cos_sin=rope_cos_sin,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            layer_id=layer_id,
         )
 
         if self.m_residual is not None:
@@ -144,8 +231,13 @@ class EnergyBlock(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        layer_id: int | None = None,
     ) -> torch.Tensor:
-        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention"]:
+        if self.sequence_mixer_type in ["softmax_attention", "parallel_softmax_attention", "multihead_latent_attention", "egrad_attention"]:
+            # Use iteration-aware layer_id for KV cache indexing when available
+            orig_layer_idx = self.sequence_mixer.layer_idx
+            if layer_id is not None:
+                self.sequence_mixer.layer_idx = layer_id
             hidden_states = self.sequence_mixer(
                 hidden_states,
                 past_key_values=past_key_values,
@@ -154,6 +246,7 @@ class EnergyBlock(nn.Module):
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
+            self.sequence_mixer.layer_idx = orig_layer_idx
         elif self.sequence_mixer_type in ["causal_convolution", "mamba2"]:
             hidden_states = self.sequence_mixer(
                 hidden_states, cache_params=past_key_values, attention_mask=attention_mask

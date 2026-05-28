@@ -48,7 +48,7 @@ class _SoftmaxAttentionArgs(BaseArgs):
         if self.qkv_bias is None:
             self.qkv_bias = self.add_bias
 
-        assert self.sequence_mixer_type == "softmax_attention"
+        assert self.sequence_mixer_type in ("softmax_attention", "parallel_softmax_attention")
         if self.position_embedding_type is not None:
             assert self.position_embedding_type in ["rope", "learned_absolute", "nope"]
 
@@ -143,6 +143,30 @@ class _CausalConvolution(BaseArgs):
 
     def model_post_init(self, __context: Any) -> None:
         assert self.sequence_mixer_type == "causal_convolution"
+
+
+class _EGradAttentionArgs(BaseArgs):
+    sequence_mixer_type: str = "egrad_attention"
+    num_attention_heads: int = 12
+    num_key_value_heads: int = 12
+    num_energy_heads: int = 6
+    energy_head_placement: str = "first"
+    softmax_dropout: float = 0
+    dropout: float = 0
+    add_bias: bool = False
+    attention_multiplier: float | None = None
+    sliding_window: int | None = None
+    qkv_bias: bool = None
+    position_embedding_type: str | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.qkv_bias is None:
+            self.qkv_bias = self.add_bias
+        assert self.sequence_mixer_type == "egrad_attention"
+        assert 0 < self.num_energy_heads < self.num_attention_heads
+        assert self.energy_head_placement in ["first", "last", "interleaved"]
+        if self.position_embedding_type is not None:
+            assert self.position_embedding_type in ["rope", "learned_absolute", "nope"]
 
 
 class _GatedDeltaNetArgs(BaseArgs):

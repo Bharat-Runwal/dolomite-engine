@@ -13,7 +13,14 @@ from .hf_models import CommonConfig, is_custom_model
 from .hf_models.modeling_utils import is_glu
 from .hf_models.modeling_utils.mlp_blocks.mlp import Energy_MLP, Compositional_Energy_MLP
 from .hf_models.modeling_utils.mlp_blocks.moe_energy import _MoEMetricsMixin
+from .hf_models.modeling_utils.mlp_blocks.boltzmann_moe import BoltzmannMoE_Energy_MLP
+from .hf_models.modeling_utils.mlp_blocks.topk_energy_moe import TopK_Energy_MoE_MLP
 from .hf_models.modeling_utils.sequence_mixer_blocks.energy_attention import EnergyAttention_QK
+from .utils.packages import is_wandb_available
+
+if is_wandb_available():
+    import wandb
+
 from .utils import (
     Accelerator,
     ExperimentsTracker,
@@ -61,6 +68,11 @@ def track_metrics(
 
     #TODO: This tracking makes training a bit slower change this :
     if model_container is not None:
+        total_params = sum(
+            p.full_tensor().numel() if hasattr(p, 'full_tensor') else p.numel()
+            for p in model_container[0].parameters()
+        )
+        metrics_tracker["model/total_params_M"] = total_params / 1e6
         scale_ff_values = {}
         energy_mlp_metrics = {}
         for name, module in model_container[0].named_modules():
@@ -87,7 +99,7 @@ def track_metrics(
         # Track MoE routing metrics (expert utilization, entropy, beta_r, etc.)
         moe_metrics = {}
         for name, module in model_container[0].named_modules():
-            if isinstance(module, _MoEMetricsMixin):
+            if isinstance(module, (_MoEMetricsMixin, BoltzmannMoE_Energy_MLP, TopK_Energy_MoE_MLP)):
                 metrics = module.get_metrics()
                 if metrics is not None:
                     for metric_name, value in metrics.items():
@@ -97,7 +109,44 @@ def track_metrics(
         metrics_tracker.update({f"model/energy_mlp/{k}": v for k, v in energy_mlp_metrics.items()})
         metrics_tracker.update({f"model/moe/{k}": v for k, v in moe_metrics.items()})
         # Note: EnergyAttention metrics are also added to energy_mlp_metrics dict for simplicity
-    
+
+        # W1-W2 cosine similarity matrix across blocks (n x n where n = num energy blocks)
+        # Use full_tensor() to escape DTensor from FSDP, then move to CPU
+        w1_list, w2_list = [], []
+        for _name, module in model_container[0].named_modules():
+            if isinstance(module, (Energy_MLP, Compositional_Energy_MLP)):
+                w1 = module.W1.weight.detach()
+                w2 = module.W2.weight.detach()
+                if hasattr(w1, 'full_tensor'):
+                    w1 = w1.full_tensor()
+                    w2 = w2.full_tensor()
+                w1 = w1.float().cpu().flatten()
+                w2 = w2.float().cpu().flatten()
+                w1_list.append(w1 / w1.norm())
+                w2_list.append(w2 / w2.norm())
+        n = len(w1_list)
+        if n > 1:
+            w1_stack = torch.stack(w1_list)
+            w2_stack = torch.stack(w2_list)
+            cos_matrix = w1_stack @ w2_stack.T  # (n, n)
+            cos_values = cos_matrix.tolist()
+            # Scalar entries for line charts over time
+            for i in range(n):
+                for j in range(n):
+                    metrics_tracker[f"model/w1w2_cosine/block{i}_vs_block{j}"] = cos_values[i][j]
+            # Heatmap for matrix view in wandb
+            try:
+                block_labels = [f"block{i}" for i in range(n)]
+                cos_heatmap = wandb.plots.HeatMap(
+                    x_labels=block_labels,
+                    y_labels=block_labels,
+                    matrix_values=cos_values,
+                    show_text=True,
+                )
+                metrics_tracker[f"model/w1w2_cosine_matrix"] = cos_heatmap
+            except Exception:
+                pass  # skip heatmap if wandb plotting unavailable
+
     # experiments tracker
     experiments_tracker.track(metrics_tracker.get_dict(), step=global_step, context=context)
 
@@ -254,6 +303,10 @@ def get_model_tflops(
             return 0
         elif sequence_mixer_type == "energy_attention":
             return 0 # TODO add flops calculation for energy attention
+        elif sequence_mixer_type == "egrad_attention":
+            return 0 # TODO add flops calculation for egrad attention
+        elif sequence_mixer_type == "parallel_softmax_attention":
+            return 0 # TODO add flops calculation for parallel softmax attention
         else:
             raise NotImplementedError(f"unexpected sequence_mixer_type ({sequence_mixer_type})")
 

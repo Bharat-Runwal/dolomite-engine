@@ -10,16 +10,17 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MoEEnergyArgs, _MoEEnergyModuleArgs, _MoEEnergyF5Args, _MoEEnergyF6Args, _GaussianBoltzmannMoEArgs, _LRDiagonalGaussBoltzmannMoEArgs
+from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MoEEnergyArgs, _MoEEnergyModuleArgs, _MoEEnergyF5Args, _MoEEnergyF6Args, _GaussianBoltzmannMoEArgs, _LRDiagonalGaussBoltzmannMoEArgs, _BoltzmannMoEEnergyMLPArgs, _TopKEnergyMoEMLPArgs
 from .sequence_mixer import (
     _CausalConvolution,
+    _EGradAttentionArgs,
+    _EnergyAttentionArgs,
     _GatedDeltaNetArgs,
     _GRUArgs,
     _Mamba2Args,
     _MultiHeadLatentAttentionArgs,
     _RNNArgs,
     _SoftmaxAttentionArgs,
-    _EnergyAttentionArgs
 )
 
 
@@ -73,8 +74,10 @@ _SEQUENCE_MIXER_CONFIG_CLASSES = {
     "multihead_latent_attention": _MultiHeadLatentAttentionArgs,
     "rnn": _RNNArgs,
     "softmax_attention": _SoftmaxAttentionArgs,
+    "parallel_softmax_attention": _SoftmaxAttentionArgs,
     "gated_deltanet": _GatedDeltaNetArgs,
     "energy_attention": _EnergyAttentionArgs,
+    "egrad_attention": _EGradAttentionArgs,
 }
 
 _MLP_CONFIG_CLASSES = {
@@ -88,6 +91,8 @@ _MLP_CONFIG_CLASSES = {
     "MoE_Energy_F6": _MoEEnergyF6Args,
     "GaussianBoltzmannMoE": _GaussianBoltzmannMoEArgs,
     "LRDiagonalGaussBoltzmannMoE": _LRDiagonalGaussBoltzmannMoEArgs,
+    "BoltzmannMoE_Energy_MLP": _BoltzmannMoEEnergyMLPArgs,
+    "TopK_Energy_MoE_MLP": _TopKEnergyMoEMLPArgs,
 }
 
 
@@ -124,8 +129,11 @@ class CommonConfig(PretrainedConfig):
         num_post_layers: int = 8,
         num_iterations: int = 1,
         layer_iterations: list[int] | None = None,
-        iter_dropout_range: int = 0,
+        layer_loop_groups: list[dict] | None = None,
+        iter_dropout_range: int | list[int] = 0,
         iter_noise_eta: float = 0.0,
+        iter_step_scales: bool = False,
+        proj_mode: str = "unconstrained",
         **kwargs,
     ) -> CommonConfig:
         self.vocab_size = vocab_size
@@ -152,13 +160,44 @@ class CommonConfig(PretrainedConfig):
         self.num_iterations = num_iterations
         self.iter_dropout_range = iter_dropout_range
         self.iter_noise_eta = iter_noise_eta
+        self.iter_step_scales = iter_step_scales
+        self.proj_mode = proj_mode
 
-        if layer_iterations is not None:
+        self.layer_loop_groups = layer_loop_groups
+        if layer_loop_groups is not None:
+            # Derive per-block iteration counts from groups so the cache sizing
+            # and any downstream consumers of layer_iterations still work.
+            # A group with {start, end, iters, block_iters} fires each block in
+            # [start, end) `block_iters` times in place, then repeats the whole
+            # group sequence `iters` times. Total per-block passes = iters*block_iters.
+            derived = [1] * num_layers
+            seen = [False] * num_layers
+            for g in layer_loop_groups:
+                start, end, iters = int(g["start"]), int(g["end"]), int(g["iters"])
+                block_iters = int(g.get("block_iters", 1))
+                assert 0 <= start < end <= num_layers, (
+                    f"invalid layer_loop_group {g}: need 0 <= start < end <= num_layers={num_layers}"
+                )
+                assert iters >= 1, f"layer_loop_group iters must be >= 1, got {iters}"
+                assert block_iters >= 1, f"layer_loop_group block_iters must be >= 1, got {block_iters}"
+                for i in range(start, end):
+                    assert not seen[i], f"layer {i} covered by multiple layer_loop_groups"
+                    seen[i] = True
+                    derived[i] = iters * block_iters
+            if layer_iterations is not None:
+                # When reloading a saved config, both fields are serialized.
+                # Accept only if the explicit list matches what groups would derive.
+                assert list(layer_iterations) == derived, (
+                    f"layer_iterations {layer_iterations} does not match layer_loop_groups-derived {derived}"
+                )
+            self.layer_iterations = derived
+        elif layer_iterations is not None:
             self.layer_iterations = layer_iterations
         else:
             num_loop = num_layers - num_pre_layers - num_post_layers
             self.layer_iterations = [1] * num_pre_layers + [num_iterations] * num_loop + [1] * num_post_layers
-        
+
+
 
         # check if enums are valid
         assert init_method in ["normal", "mup"]

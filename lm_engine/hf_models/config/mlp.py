@@ -103,6 +103,12 @@ class _MoEEnergyF5Args(_EnergyMLPArgs):
     learnable_temperature: bool = True       # make temperature a learnable parameter
     distillation_weight: float = 0.01        # weight for KL distillation loss
     use_boltzmann_at_inference: bool = False  # override to use Boltzmann routing at inference
+    expert_repulsion_lambda: float = 0.0     # cosine diversity penalty on expert W1 weights
+    # Stabilize aux loss path: detach expert_energies in router_logits_for_aux
+    # AND zero out z_loss inside switch loss. Eliminates the squared-logsumexp
+    # gradient-explosion vector that drives early-training spikes. Default False
+    # for back-compat with prior runs.
+    aux_loss_stable: bool = False
 
     def model_post_init(self, __context: Any) -> None:
         assert self.mlp_type == "MoE_Energy_F5"
@@ -148,6 +154,70 @@ class _GaussianBoltzmannMoEArgs(BaseArgs):
 
     def model_post_init(self, __context: Any) -> None:
         assert self.mlp_type == "GaussianBoltzmannMoE"
+
+class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
+    """Iso-parameter Boltzmann MoE Energy FFN.
+
+    No linear router, no Switch aux/z-loss, no KL distillation. Routing comes
+    directly from per-expert energies (softmax over E_i = phi(W1_i h)^T W2_i h),
+    which sidesteps the squared-logsumexp gradient explosion that drove the
+    early-training spikes in MoE_Energy_F5.
+
+    intermediate_size is the TOTAL across all experts; each expert gets
+    intermediate_size // n_experts hidden units.
+    """
+
+    mlp_type: str = "BoltzmannMoE_Energy_MLP"
+    intermediate_size: int
+    n_experts: int = 16
+    temperature: float = 1.0
+    repulsion_coef: float = 0.0
+    n_repulsion_pairs: int = 4
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0.0
+    add_bias: bool = False
+    # top_k=0 → dense (Nima's original). top_k>0 → F5-style sparse routing
+    # weights (all expert outputs still computed; only mixing becomes sparse).
+    top_k: int = 0
+    normalized_topk: bool = True
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "BoltzmannMoE_Energy_MLP"
+        assert self.n_experts >= 2, "BoltzmannMoE requires at least 2 experts"
+        assert self.intermediate_size % self.n_experts == 0, (
+            f"intermediate_size ({self.intermediate_size}) must be divisible by "
+            f"n_experts ({self.n_experts})"
+        )
+        assert self.temperature > 0, "temperature must be positive"
+        assert 0 <= self.top_k <= self.n_experts, (
+            f"top_k ({self.top_k}) must be in [0, n_experts={self.n_experts}]"
+        )
+
+
+class _TopKEnergyMoEMLPArgs(BaseArgs):
+    """Top-K Energy MoE — Nima's TopK_Energy_MoE_MLP.
+
+    Each expert is a FULL-SIZE Energy_MLP (intermediate_size NOT divided).
+    Linear router selects top_k; Switch-style load_balance_coef is the only
+    aux loss (no z-loss, no KL distillation, no repulsion).
+    """
+
+    mlp_type: str = "TopK_Energy_MoE_MLP"
+    intermediate_size: int                # per-expert (NOT divided by n_experts)
+    n_experts: int = 4
+    top_k: int = 2
+    load_balance_coef: float = 0.01
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0.0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "TopK_Energy_MoE_MLP"
+        assert self.n_experts >= 2, "TopK_Energy_MoE_MLP requires at least 2 experts"
+        assert 1 <= self.top_k <= self.n_experts, (
+            f"top_k ({self.top_k}) must be in [1, n_experts={self.n_experts}]"
+        )
+
 
 class _LRDiagonalGaussBoltzmannMoEArgs(BaseArgs):
     mlp_type: str = "LRDiagonalGaussBoltzmannMoE"

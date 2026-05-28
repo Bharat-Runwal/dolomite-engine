@@ -1,6 +1,16 @@
-export CUDA_DEVICE_ORDER=PCI_BUS_ID # Recommended 
-export CUDA_MODULE_LOADING=LAZY # Recommended 
-# export CUDA_DEVICE_MAX_CONNECTIONS=1 # Required 
+# Activate the project .venv so torchrun/python resolve to the 3.12 interpreter
+# that helpers.so was built against. Without this, LSF's reset PATH falls back
+# to /u/bsaha3/miniconda3/bin/torchrun (Python 3.13) and imports crash with:
+#   undefined symbol: _PyThreadState_UncheckedGet
+_PRETRAIN_REPO_ROOT="/proj/dmfexp/bishwajit/Code/dolomite-engine"
+if [ -f "${_PRETRAIN_REPO_ROOT}/.venv/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "${_PRETRAIN_REPO_ROOT}/.venv/bin/activate"
+fi
+
+export CUDA_DEVICE_ORDER=PCI_BUS_ID # Recommended
+export CUDA_MODULE_LOADING=LAZY # Recommended
+# export CUDA_DEVICE_MAX_CONNECTIONS=1 # Required
 
 # NCCl/InfiniBand options
 export NCCL_IB_PCI_RELAXED_ORDERING=2 # only use if available and beneficial

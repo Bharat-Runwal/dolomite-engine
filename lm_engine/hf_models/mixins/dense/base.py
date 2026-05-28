@@ -112,6 +112,7 @@ class BaseModelMixin(PreTrainedModelMixin):
         self.num_post_layers = config.num_post_layers
         self.num_iterations = config.num_iterations
         self.layer_iterations = config.layer_iterations
+        self.layer_loop_groups = getattr(config, 'layer_loop_groups', None)
 
         # Adaptive halting
         halt_cfg = getattr(config, 'halt_thresholds', None)
@@ -120,7 +121,14 @@ class BaseModelMixin(PreTrainedModelMixin):
         else:
             self.halt_thresholds = None
 
-        self.iter_dropout_range = getattr(config, 'iter_dropout_range', 0)
+        _idr = getattr(config, 'iter_dropout_range', 0)
+        if isinstance(_idr, list):
+            assert len(_idr) == len(self.h), (
+                f"iter_dropout_range length ({len(_idr)}) must match num_layers ({len(self.h)})"
+            )
+            self.iter_dropout_range = _idr
+        else:
+            self.iter_dropout_range = [_idr] * len(self.h)
         self.iter_noise_eta = getattr(config, 'iter_noise_eta', 0.0)
 
         num_layers = len(self.h)
@@ -200,13 +208,80 @@ class BaseModelMixin(PreTrainedModelMixin):
         # mamba_mask_computed = False
         # mamba_mask = None
 
+        if self.layer_loop_groups is not None:
+            # Group-loop semantics: the contiguous block range [start, end) is
+            # repeated as a UNIT `iters` times. Blocks outside any group run once.
+            # layer_id is incremented per (block, iteration) pass so the KV cache
+            # slot count matches sum(layer_iterations), consistent with the
+            # per-block layer_iterations path.
+            mamba_mask_computed = False
+            num_layers = len(self.h)
+
+            # Build a schedule: list of (block_idx, iteration_idx_within_block)
+            # where iteration_idx_within_block counts how many times that block
+            # has already fired in this forward pass.
+            groups_sorted = sorted(
+                [dict(start=int(g["start"]), end=int(g["end"]), iters=int(g["iters"]),
+                      block_iters=int(g.get("block_iters", 1)))
+                 for g in self.layer_loop_groups],
+                key=lambda g: g["start"],
+            )
+            schedule = []
+            per_block_iter_seen = [0] * num_layers
+            i = 0
+            g_idx = 0
+            while i < num_layers:
+                if g_idx < len(groups_sorted) and i == groups_sorted[g_idx]["start"]:
+                    g = groups_sorted[g_idx]
+                    # Nested looping: outer `iters` passes over the group, and
+                    # within each pass each block fires `block_iters` times
+                    # in place before advancing to the next block.
+                    for _pass in range(g["iters"]):
+                        for b in range(g["start"], g["end"]):
+                            for _bi in range(g["block_iters"]):
+                                schedule.append((b, per_block_iter_seen[b]))
+                                per_block_iter_seen[b] += 1
+                    i = g["end"]
+                    g_idx += 1
+                else:
+                    schedule.append((i, per_block_iter_seen[i]))
+                    per_block_iter_seen[i] += 1
+                    i += 1
+
+            for layer_id, (b, iter_idx) in enumerate(schedule):
+                hidden_states = self._run_block(
+                    hidden_states,
+                    past_key_values,
+                    attention_mask,
+                    cu_seqlens,
+                    max_seqlen,
+                    causal_mask,
+                    rope_cos_sin,
+                    mamba_mask_computed,
+                    b,
+                    layer_id=layer_id,
+                    iteration_idx=iter_idx,
+                )
+
+            hidden_states = self.ln_f(hidden_states)
+
+            return BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
+
         if self.layer_iterations is not None:
             # Per-layer iteration counts: each layer i runs layer_iterations[i] times
             mamba_mask_computed = False
             layer_id = 0
 
             for i in range(len(self.h)):
-                for _j in range(self.layer_iterations[i]):
+                num_iter = self.layer_iterations[i]
+                dropout_range = self.iter_dropout_range[i]
+                if self.training and dropout_range > 0:
+                    min_iter = max(1, num_iter - dropout_range)
+                    max_iter = num_iter + dropout_range
+                    effective_iter = torch.randint(min_iter, max_iter + 1, (1,)).item()
+                else:
+                    effective_iter = num_iter
+                for _j in range(effective_iter):
                     hidden_states = self._run_block(
                         hidden_states,
                         past_key_values,
@@ -218,6 +293,7 @@ class BaseModelMixin(PreTrainedModelMixin):
                         mamba_mask_computed,
                         i,
                         layer_id=layer_id,
+                        iteration_idx=_j,
                     )
                     layer_id += 1
 
@@ -253,9 +329,10 @@ class BaseModelMixin(PreTrainedModelMixin):
             layer_id = 0
             for i, num_iter in enumerate(self.layer_iterations):
                 # Iteration dropout: randomize iteration count during training
-                if self.training and self.iter_dropout_range > 0:
-                    min_iter = max(1, num_iter - self.iter_dropout_range)
-                    max_iter = num_iter + self.iter_dropout_range
+                dropout_range = self.iter_dropout_range[i]
+                if self.training and dropout_range > 0:
+                    min_iter = max(1, num_iter - dropout_range)
+                    max_iter = num_iter + dropout_range
                     effective_iter = torch.randint(min_iter, max_iter + 1, (1,)).item()
                 else:
                     effective_iter = num_iter
@@ -281,6 +358,7 @@ class BaseModelMixin(PreTrainedModelMixin):
                         mamba_mask_computed,
                         i,
                         layer_id=layer_id,
+                        iteration_idx=j,
                     )
                     layer_id += 1
 
@@ -310,6 +388,7 @@ class BaseModelMixin(PreTrainedModelMixin):
         mamba_mask_computed,
         i,
         layer_id = None,
+        iteration_idx = 0,
 ):
         sequence_mixer_type = self.sequence_mixer_block_types[i]
         block = self.h[i]
@@ -327,7 +406,8 @@ class BaseModelMixin(PreTrainedModelMixin):
             rope_cos_sin=rope_cos_sin,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            layer_id = layer_id
+            layer_id = layer_id,
+            iteration_idx = iteration_idx,
         )
 
         return hidden_states
@@ -431,7 +511,9 @@ class BaseModelMixin(PreTrainedModelMixin):
         self, key_length: int, position_ids: torch.Tensor, dtype: torch.dtype
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         if hasattr(self, "rope"):
-            cos, sin = self.rope(key_length, dtype=dtype)
+            # Ensure RoPE cache covers all position IDs (needed for generate without KV cache)
+            max_pos = max(key_length, position_ids.max().item() + 1) if position_ids.numel() > 0 else key_length
+            cos, sin = self.rope(max_pos, dtype=dtype)
             cos = cos[position_ids].unsqueeze(1)
             sin = sin[position_ids].unsqueeze(1)
             return cos, sin

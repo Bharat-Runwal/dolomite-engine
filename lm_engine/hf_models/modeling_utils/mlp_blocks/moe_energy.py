@@ -344,7 +344,12 @@ class MoE_Energy(_MoEMetricsMixin, nn.Module):
         )
         z_loss = (torch.logsumexp(logits, dim=-1) ** 2).mean()
 
-        loss = switch_loss + 0.1 * z_loss
+        # When aux_loss_stable is set, drop z_loss entirely. z_loss penalizes
+        # logsumexp magnitude — appropriate for a linear router, but in F5 the
+        # "logits" are -β_r·energies, so penalizing them squashes legitimate
+        # expert specialization and provides the dominant gradient explosion path.
+        z_loss_coef = 0.0 if getattr(self, 'aux_loss_stable', False) else 0.1
+        loss = switch_loss + z_loss_coef * z_loss
         return loss.type_as(logits)
 
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
@@ -663,7 +668,12 @@ class MoE_Energy_Module(_MoEMetricsMixin, nn.Module):
         )
         z_loss = (torch.logsumexp(logits, dim=-1) ** 2).mean()
 
-        loss = switch_loss + 0.1 * z_loss
+        # When aux_loss_stable is set, drop z_loss entirely. z_loss penalizes
+        # logsumexp magnitude — appropriate for a linear router, but in F5 the
+        # "logits" are -β_r·energies, so penalizing them squashes legitimate
+        # expert specialization and provides the dominant gradient explosion path.
+        z_loss_coef = 0.0 if getattr(self, 'aux_loss_stable', False) else 0.1
+        loss = switch_loss + z_loss_coef * z_loss
         return loss.type_as(logits)
 
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
@@ -752,6 +762,8 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
         learnable_temperature: bool = True,
         distillation_weight: float = 0.01,
         use_boltzmann_at_inference: bool = False,
+        expert_repulsion_lambda: float = 0.0,
+        aux_loss_stable: bool = False,
     ) -> None:
         super().__init__()
 
@@ -765,16 +777,20 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
         self.normalized_topk = normalized_topk
         self.distillation_weight = distillation_weight
         self.use_boltzmann_at_inference = use_boltzmann_at_inference
+        self.expert_repulsion_lambda = expert_repulsion_lambda
+        self.aux_loss_stable = aux_loss_stable
 
         std = _get_std_for_linear(initializer_range, init_method, m_width)
 
-        # Boltzmann inverse temperature (1D tensor for FSDP compatibility)
+        # Boltzmann inverse temperature (1D tensor for FSDP compatibility).
+        # Always a Parameter — gradient is gated by `self.learnable_temperature`
+        # so state_dict / optimizer state are identical whether β_r is being
+        # trained or frozen. This keeps two-stage warmup (frozen → learnable)
+        # checkpoint-compatible.
         _init_log_beta = math.log(1.0 / boltzmann_temperature)
-        if learnable_temperature:
-            self.log_beta_r = nn.Parameter(torch.tensor([_init_log_beta]))
-            mark_parameter_as_no_weight_decay(self.log_beta_r)
-        else:
-            self.register_buffer("log_beta_r", torch.tensor([_init_log_beta]))
+        self.log_beta_r = nn.Parameter(torch.tensor([_init_log_beta]))
+        mark_parameter_as_no_weight_decay(self.log_beta_r)
+        self.learnable_temperature = learnable_temperature
 
         # Linear router gate (used at inference, distilled during training)
         self.gate = ParameterizedLinear(
@@ -873,6 +889,14 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
     # Boltzmann routing (training path)
     # ------------------------------------------------------------------
 
+    def _get_beta_r(self) -> torch.Tensor:
+        # Detach when temperature is frozen so log_beta_r receives no gradient
+        # from any downstream loss — cheaper and more robust than zeroing
+        # grads after .backward(), and keeps state_dict identical to the
+        # learnable-temperature case.
+        log_beta = self.log_beta_r if self.learnable_temperature else self.log_beta_r.detach()
+        return torch.exp(log_beta)
+
     def _compute_boltzmann_routing(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
@@ -884,7 +908,7 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
             expert_outputs: list of (N, hidden_size), one per expert.
         """
         N = hidden_states.size(0)
-        beta_r = torch.exp(self.log_beta_r)
+        beta_r = self._get_beta_r()
 
         expert_energies = torch.empty(
             N, self.num_experts, device=hidden_states.device, dtype=hidden_states.dtype
@@ -962,7 +986,12 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
         )
         z_loss = (torch.logsumexp(logits, dim=-1) ** 2).mean()
 
-        loss = switch_loss + 0.1 * z_loss
+        # When aux_loss_stable is set, drop z_loss entirely. z_loss penalizes
+        # logsumexp magnitude — appropriate for a linear router, but in F5 the
+        # "logits" are -β_r·energies, so penalizing them squashes legitimate
+        # expert specialization and provides the dominant gradient explosion path.
+        z_loss_coef = 0.0 if getattr(self, 'aux_loss_stable', False) else 0.1
+        loss = switch_loss + z_loss_coef * z_loss
         return loss.type_as(logits)
 
     def _get_topk(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -983,6 +1012,14 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
             output = output * F.sigmoid(gate)
 
         return output
+
+    def _compute_expert_repulsion_loss(self) -> torch.Tensor:
+        """Cosine similarity penalty on expert W1 weights: mean_{i!=j} cos²(W1_i, W1_j)."""
+        W_flat = self.expert_W1.weight.flatten(1)
+        W_norm = F.normalize(W_flat, dim=1)
+        cos_sim = W_norm @ W_norm.T
+        mask = ~torch.eye(self.num_experts, device=cos_sim.device, dtype=torch.bool)
+        return (cos_sim[mask] ** 2).mean()
 
     # ------------------------------------------------------------------
     # Forward — the core F5 dual-mode logic
@@ -1015,17 +1052,15 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
 
         hidden_states = self.dropout(hidden_states)
 
-        aux_loss = (
-            self._compute_switch_loss(
+        if self.training:
+            aux_loss = self._compute_switch_loss(
                 logits=router_logits,
                 probs=torch.softmax(router_logits, dim=-1),
                 expert_frequency=expert_frequency,
             )
-            if self.training
-            else 0
-        )
-
-        add_aux_loss(aux_loss)
+            if self.expert_repulsion_lambda > 0:
+                aux_loss = aux_loss + self.expert_repulsion_lambda * self._compute_expert_repulsion_loss()
+            add_aux_loss(aux_loss)
 
         return hidden_states
 
@@ -1069,9 +1104,12 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
         distill_loss = self._compute_distillation_loss(linear_logits, boltzmann_weights)
         add_aux_loss(self.distillation_weight * distill_loss)
 
-        # Use Boltzmann logits for switch/z-loss
-        beta_r = torch.exp(self.log_beta_r)
-        router_logits_for_aux = -beta_r * expert_energies
+        # Use Boltzmann logits for switch/z-loss. When aux_loss_stable is set,
+        # detach expert_energies so aux gradients cannot reach expert weights —
+        # severs the squared-logsumexp explosion path.
+        beta_r = self._get_beta_r()
+        energies_for_aux = expert_energies.detach() if getattr(self, 'aux_loss_stable', False) else expert_energies
+        router_logits_for_aux = -beta_r * energies_for_aux
 
         return moe_output, expert_frequency, router_logits_for_aux
 
@@ -1142,7 +1180,7 @@ class MoE_Energy_F5(_MoEMetricsMixin, nn.Module):
         E^MoE_B(h) = -(1/beta_r) * log sum_e exp(-beta_r * E_e(h))
         """
         x_flat = x.view(-1, self.hidden_size)
-        beta_r = torch.exp(self.log_beta_r)
+        beta_r = self._get_beta_r()
 
         expert_energies = torch.stack(
             [self._expert_energy(x_flat, i) for i in range(self.num_experts)],
@@ -1232,13 +1270,12 @@ class MoE_Energy_F6(_MoEMetricsMixin, nn.Module):
 
         std = _get_std_for_linear(initializer_range, init_method, m_width)
 
-        # Boltzmann inverse temperature (1D tensor for FSDP compatibility)
+        # Boltzmann inverse temperature (always a Parameter; gradient gated by
+        # `self.learnable_temperature` via `_get_beta_r()`).
         _init_log_beta = math.log(1.0 / boltzmann_temperature)
-        if learnable_temperature:
-            self.log_beta_r = nn.Parameter(torch.tensor([_init_log_beta]))
-            mark_parameter_as_no_weight_decay(self.log_beta_r)
-        else:
-            self.register_buffer("log_beta_r", torch.tensor([_init_log_beta]))
+        self.log_beta_r = nn.Parameter(torch.tensor([_init_log_beta]))
+        mark_parameter_as_no_weight_decay(self.log_beta_r)
+        self.learnable_temperature = learnable_temperature
 
         # Linear router gate (used at inference, distilled during training)
         self.gate = ParameterizedLinear(
@@ -1324,6 +1361,10 @@ class MoE_Energy_F6(_MoEMetricsMixin, nn.Module):
     # Boltzmann routing (training path)
     # ------------------------------------------------------------------
 
+    def _get_beta_r(self) -> torch.Tensor:
+        log_beta = self.log_beta_r if self.learnable_temperature else self.log_beta_r.detach()
+        return torch.exp(log_beta)
+
     def _compute_boltzmann_routing(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
@@ -1335,7 +1376,7 @@ class MoE_Energy_F6(_MoEMetricsMixin, nn.Module):
             expert_outputs: list of (N, hidden_size), one per expert.
         """
         N = hidden_states.size(0)
-        beta_r = torch.exp(self.log_beta_r)
+        beta_r = self._get_beta_r()
 
         expert_energies = torch.empty(
             N, self.num_experts, device=hidden_states.device, dtype=hidden_states.dtype
@@ -1413,7 +1454,12 @@ class MoE_Energy_F6(_MoEMetricsMixin, nn.Module):
         )
         z_loss = (torch.logsumexp(logits, dim=-1) ** 2).mean()
 
-        loss = switch_loss + 0.1 * z_loss
+        # When aux_loss_stable is set, drop z_loss entirely. z_loss penalizes
+        # logsumexp magnitude — appropriate for a linear router, but in F5 the
+        # "logits" are -β_r·energies, so penalizing them squashes legitimate
+        # expert specialization and provides the dominant gradient explosion path.
+        z_loss_coef = 0.0 if getattr(self, 'aux_loss_stable', False) else 0.1
+        loss = switch_loss + z_loss_coef * z_loss
         return loss.type_as(logits)
 
     def _get_topk(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1520,9 +1566,12 @@ class MoE_Energy_F6(_MoEMetricsMixin, nn.Module):
         distill_loss = self._compute_distillation_loss(linear_logits, boltzmann_weights)
         add_aux_loss(self.distillation_weight * distill_loss)
 
-        # Use Boltzmann logits for switch/z-loss
-        beta_r = torch.exp(self.log_beta_r)
-        router_logits_for_aux = -beta_r * expert_energies
+        # Use Boltzmann logits for switch/z-loss. When aux_loss_stable is set,
+        # detach expert_energies so aux gradients cannot reach expert weights —
+        # severs the squared-logsumexp explosion path.
+        beta_r = self._get_beta_r()
+        energies_for_aux = expert_energies.detach() if getattr(self, 'aux_loss_stable', False) else expert_energies
+        router_logits_for_aux = -beta_r * energies_for_aux
 
         return moe_output, expert_frequency, router_logits_for_aux
 
@@ -1593,7 +1642,7 @@ class MoE_Energy_F6(_MoEMetricsMixin, nn.Module):
         E^MoE_B(h) = -(1/beta_r) * log sum_e exp(-beta_r * E_e(h))
         """
         x_flat = x.view(-1, self.hidden_size)
-        beta_r = torch.exp(self.log_beta_r)
+        beta_r = self._get_beta_r()
 
         expert_energies = torch.stack(
             [self._expert_energy(x_flat, i) for i in range(self.num_experts)],

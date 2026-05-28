@@ -17,6 +17,7 @@ authors = [
 dependencies = [
     "datasets>=4.4.1",
     "gitpython>=3.1.45",
+    "matplotlib>=3.10.8",
     "multi-storage-client[google-cloud-storage]>=0.36.0",
     "ninja>=1.13.0",
     "numpy>=2.3.5",

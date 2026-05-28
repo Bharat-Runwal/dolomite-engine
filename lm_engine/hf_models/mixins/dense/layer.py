@@ -44,6 +44,7 @@ class Block(nn.Module):
         rope_cos_sin: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -83,7 +84,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
     ) -> torch.Tensor:
-        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention", "energy_attention"]:
+        if self.sequence_mixer_type in ["softmax_attention", "multihead_latent_attention", "energy_attention", "egrad_attention"]:
             hidden_states = self.sequence_mixer(
                 hidden_states,
                 past_key_values=past_key_values,

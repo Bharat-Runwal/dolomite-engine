@@ -14,11 +14,12 @@ from .gru import GRU
 from .mamba2 import Mamba2
 from .multihead_latent_attention import MultiHeadLatentAttention
 from .rnn import RNN
+from .egrad_attention import EGradAttention
 from .energy_attention import EnergyAttention_QK
 from .utils import flash_attention
 
 
-SEQUENCE_MIXER_TYPE = Attention | CausalConvolution | GRU | Mamba2 | MultiHeadLatentAttention | RNN | GatedDeltaNet | EnergyAttention_QK
+SEQUENCE_MIXER_TYPE = Attention | CausalConvolution | GRU | Mamba2 | MultiHeadLatentAttention | RNN | GatedDeltaNet | EnergyAttention_QK | EGradAttention
 
 
 def get_sequence_mixer(
@@ -150,6 +151,29 @@ def get_sequence_mixer(
             use_padding_free_transformer=use_padding_free_transformer,
         )
 
+    elif sequence_mixer_type == "egrad_attention":
+        return EGradAttention(
+            hidden_size=config.hidden_size,
+            num_attention_heads=block.num_attention_heads,
+            num_key_value_heads=block.num_key_value_heads,
+            num_energy_heads=block.num_energy_heads,
+            energy_head_placement=block.energy_head_placement,
+            attention_multiplier=block.attention_multiplier,
+            sliding_window=block.sliding_window,
+            position_embedding_type=block.position_embedding_type,
+            add_bias=block.add_bias,
+            qkv_bias=block.qkv_bias,
+            softmax_dropout=block.softmax_dropout,
+            dropout=block.dropout,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            causal=causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=use_padding_free_transformer,
+        )
+
     elif sequence_mixer_type == "energy_attention":
         return EnergyAttention_QK(
             hidden_size=config.hidden_size,
@@ -188,7 +212,7 @@ def get_sequence_mixer(
             layer_idx=layer_idx,
         )
 
-        if sequence_mixer_type == "softmax_attention":
+        if sequence_mixer_type in ("softmax_attention", "parallel_softmax_attention"):
             return Attention(
                 **sequence_mixer_kwargs,
                 qkv_bias=block.qkv_bias,

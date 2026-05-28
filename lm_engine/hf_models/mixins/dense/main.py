@@ -256,8 +256,14 @@ class CausalLMModelMixin(PreTrainedModelMixin):
             if finished.min() == 1:
                 break
 
-            output: CausalLMOutputWithPast = self(
-                input_ids=next_token, attention_mask=attention_mask, past_key_values=past_key_values
-            )
+            if past_key_values is not None:
+                output: CausalLMOutputWithPast = self(
+                    input_ids=next_token, attention_mask=attention_mask, past_key_values=past_key_values
+                )
+            else:
+                # No KV cache (e.g. iterative models): reprocess the full sequence
+                output: CausalLMOutputWithPast = self(
+                    input_ids=generated_tokens, attention_mask=attention_mask
+                )
 
         return generated_tokens

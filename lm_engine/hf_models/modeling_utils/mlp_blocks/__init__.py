@@ -6,6 +6,8 @@ from ...config import CommonConfig
 from .mlp import MLP, interleave_up_gate_tensor_for_mlp, split_up_gate_tensor_for_mlp, Energy_MLP, Compositional_Energy_MLP
 from .moe import MoE, ParameterizedExperts
 from .moe_energy import MoE_Energy, MoE_Energy_Module, MoE_Energy_F5, MoE_Energy_F6, GaussianBoltzmannMoE, LRDiagonalGaussBoltzmannMoE
+from .boltzmann_moe import BoltzmannMoE_Energy_MLP
+from .topk_energy_moe import TopK_Energy_MoE_MLP
 
 
 
@@ -86,6 +88,8 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             learnable_temperature=block.learnable_temperature,
             distillation_weight=block.distillation_weight,
             use_boltzmann_at_inference=block.use_boltzmann_at_inference,
+            expert_repulsion_lambda=block.expert_repulsion_lambda,
+            aux_loss_stable=block.aux_loss_stable,
         )
     elif mlp_type == "MoE_Energy_F6":
         mlp = MoE_Energy_F6(
@@ -119,6 +123,41 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             kl_distillation=block.kl_distillation,
             distillation_weight=block.distillation_weight,
             use_gmm_at_inference=block.use_gmm_at_inference,
+        )
+    elif mlp_type == "BoltzmannMoE_Energy_MLP":
+        mlp = BoltzmannMoE_Energy_MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            n_experts=block.n_experts,
+            temperature=block.temperature,
+            repulsion_coef=block.repulsion_coef,
+            n_repulsion_pairs=block.n_repulsion_pairs,
+            init_method=config.init_method,
+            activation_function=block.activation_function,
+            dropout=block.dropout,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            add_bias=block.add_bias,
+            layer_idx=layer_idx,
+            top_k=block.top_k,
+            normalized_topk=block.normalized_topk,
+        )
+    elif mlp_type == "TopK_Energy_MoE_MLP":
+        mlp = TopK_Energy_MoE_MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            n_experts=block.n_experts,
+            top_k=block.top_k,
+            load_balance_coef=block.load_balance_coef,
+            activation_function=block.activation_function,
+            add_bias=block.add_bias,
+            dropout=block.dropout,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            layer_idx=layer_idx,
         )
     elif mlp_type == "LRDiagonalGaussBoltzmannMoE":
         mlp = LRDiagonalGaussBoltzmannMoE(
