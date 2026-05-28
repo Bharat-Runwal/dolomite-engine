@@ -1,14 +1,14 @@
-# stdmoe_only_topk2 — matched-active baseline (vanilla switch-routed MoE).
+# s12_stdmoe_only_topk2 — matched-active baseline (vanilla switch-routed MoE).
 #
-# This is the head-to-head control for s8e4_stdmoe_fh1_topk2.
-# Same active params (~389M), same total params (~1097M), same data, same steps.
+# This config exactly reproduces the 1B baseline that fh1 beat on Avg, MMLU,
+# gsm8k_cot, and Wiki PPL at 30k steps / 1.05M tok/step.
+# For the cleaner s8e4-attention ablation, see s8e4_stdmoe_only_topk2.yml.
 #
 # Architecture (12 layers, d=1024, 16 heads x 64 head_dim):
 #   ALL 12 layers : softmax_attention + std MoE  (8 experts x ipe=3200, top-2)
 #   layer_iterations = [1]*12  (no looping)
 #
-# At 30k steps / 1.05M tok/step the fh1 hybrid above wins on Avg, MMLU, gsm8k,
-# and Wiki PPL. This config is the apples-to-apples reference.
+# Active ~389M / Total ~1097M.
 
 datasets:
   - class_name: MegatronDataset
@@ -89,7 +89,7 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/stdmoe_only_topk2
+  save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/s12_stdmoe_only_topk2
   save_interval: 2000
 
 logging_args:
@@ -97,7 +97,7 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: dolomite
-    name: stdmoe_only_topk2
+    name: s12_stdmoe_only_topk2
 
 training_parameters:
   num_training_steps: 30000

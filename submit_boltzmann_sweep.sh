@@ -1,10 +1,11 @@
 #!/bin/bash
-# Submits the two head-to-head configs:
-#   1. s8e4_stdmoe_fh1_topk2  (Boltzmann TopK_Energy_MoE hybrid, no looping)
-#   2. stdmoe_only_topk2      (vanilla switch-routed MoE, matched-active baseline)
+# Submits the three head-to-head configs:
+#   1. s8e4_stdmoe_fh1_topk2     (Boltzmann TopK_Energy_MoE hybrid, no looping)
+#   2. s12_stdmoe_only_topk2     (vanilla MoE, ALL 12 softmax — reproduces 1B baseline)
+#   3. s8e4_stdmoe_only_topk2    (vanilla MoE, s8e4 attention — cleanest ablation)
 #
-# Both ~390M active / ~1.1B total at d=1024, 12 layers, 30k steps.
-# At this scale fh1 wins on Avg, MMLU, gsm8k, Wiki PPL — see README.
+# All three: ~390M active / ~1.1B total, d=1024, 12 layers, 30k steps.
+# fh1 wins on Avg, MMLU, gsm8k, Wiki PPL vs both std-MoE baselines — see README.
 #
 # To scale up to 9B-active, edit the YAMLs:
 #   - hidden_size:          1024 -> 4096   (or whatever target d gives 9B-active)
@@ -44,9 +45,12 @@ submit_variant() {
 submit_variant "s8e4_stdmoe_fh1_topk2" \
   "configs/boltzmann_moe/s8e4_stdmoe_fh1_topk2.yml" 8
 
-submit_variant "stdmoe_only_topk2" \
-  "configs/boltzmann_moe/stdmoe_only_topk2.yml" 8
+submit_variant "s12_stdmoe_only_topk2" \
+  "configs/boltzmann_moe/s12_stdmoe_only_topk2.yml" 8
+
+submit_variant "s8e4_stdmoe_only_topk2" \
+  "configs/boltzmann_moe/s8e4_stdmoe_only_topk2.yml" 8
 
 echo ""
-echo "Both jobs submitted. Watch with: bjobs -w | grep -E 's8e4_stdmoe_fh1_topk2|stdmoe_only_topk2'"
-echo "Logs: ${LOG_DIR}/{s8e4_stdmoe_fh1_topk2,stdmoe_only_topk2}.{out,err}"
+echo "All 3 jobs submitted. Watch with: bjobs -w | grep -E 'stdmoe_fh1_topk2|stdmoe_only_topk2'"
+echo "Logs: ${LOG_DIR}/{s8e4_stdmoe_fh1_topk2,s12_stdmoe_only_topk2,s8e4_stdmoe_only_topk2}.{out,err}"

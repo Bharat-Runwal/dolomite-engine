@@ -1,13 +1,16 @@
 # Boltzmann TopK Energy MoE — head-to-head with vanilla switch-routed MoE
 
-This directory contains two configs designed to be trained head-to-head.
+This directory contains three configs designed to be trained head-to-head.
 
-| Config | Architecture | Active / Total |
-|---|---|---|
-| `s8e4_stdmoe_fh1_topk2.yml` | First-8: softmax + std MoE. Last-4: energy-attention + **fh1** (TopK_Energy_MoE_MLP). No looping. | ~387M / ~1101M |
-| `stdmoe_only_topk2.yml`     | All 12 layers: softmax + std MoE.                                                              | ~389M / ~1097M |
+| Config | Attention | MLP blocks | Active / Total |
+|---|---|---|---|
+| `s8e4_stdmoe_fh1_topk2.yml`    | 8 softmax + 4 energy | 8 std MoE + 4 **fh1** (TopK_Energy_MoE_MLP) | ~387M / ~1101M |
+| `s12_stdmoe_only_topk2.yml`    | 12 softmax           | 12 std MoE (ipe=3200, top-2)                | ~389M / ~1097M |
+| `s8e4_stdmoe_only_topk2.yml`   | 8 softmax + 4 energy | 12 std MoE (ipe=3200, top-2)                | ~389M / ~1097M |
 
-Both are 12 layers, `d=1024`, 16 heads × 64 head_dim, 8 experts top-2, trained 30k steps with 1.05M tok/step.
+All three: 12 layers, `d=1024`, 16 heads × 64 head_dim, 8 experts top-2, no looping, 30k steps × 1.05M tok/step.
+
+Why 3 configs? `s12_stdmoe_only_topk2` reproduces the *exact* baseline that fh1 beat at the 1B run. `s8e4_stdmoe_only_topk2` is the cleaner ablation — it shares attention layout with the fh1 hybrid, so the only difference between it and fh1 is the MLP block type on the last 4 layers. Run all 3 at the new scale to see whether fh1's advantage holds.
 
 ## What is `fh1` (TopK_Energy_MoE_MLP)?
 
@@ -44,37 +47,31 @@ Across 18 logged metrics fh1 wins 12, std-MoE wins 6 (mostly Lambada-style narra
 ## How to submit
 
 ```bash
-# Two-config head-to-head, both on 8 nodes × 8 H100s
+# Three-config head-to-head, each on 8 nodes × 8 H100s
 bash submit_boltzmann_sweep.sh
 ```
 
-Equivalent direct `bsub` for either config:
+Equivalent direct `bsub` for any config (replace `<NAME>` and `<CFG>`):
 
 ```bash
 LOG_DIR=/proj/dmfexp/energy-gpt/logs/boltzmann_sweep
 mkdir -p "$LOG_DIR"
 
-# fh1 hybrid
-bsub -r -q preemptable -G grp_preemptable -M 2000G -hl -n 8 \
-  -J "s8e4_stdmoe_fh1_topk2" \
-  -gpu "num=8/task:mode=exclusive_process" \
-  -oo "${LOG_DIR}/s8e4_stdmoe_fh1_topk2.out" \
-  -eo "${LOG_DIR}/s8e4_stdmoe_fh1_topk2.err" \
-  blaunch bash launch-scripts/pretrain.sh \
-    configs/boltzmann_moe/s8e4_stdmoe_fh1_topk2.yml
+# Pattern: <NAME> = s8e4_stdmoe_fh1_topk2 | s12_stdmoe_only_topk2 | s8e4_stdmoe_only_topk2
+# Pattern: <CFG>  = configs/boltzmann_moe/<NAME>.yml
 
-# matched stdmoe-only baseline
+NAME=s8e4_stdmoe_fh1_topk2
+CFG=configs/boltzmann_moe/${NAME}.yml
 bsub -r -q preemptable -G grp_preemptable -M 2000G -hl -n 8 \
-  -J "stdmoe_only_topk2" \
+  -J "${NAME}" \
   -gpu "num=8/task:mode=exclusive_process" \
-  -oo "${LOG_DIR}/stdmoe_only_topk2.out" \
-  -eo "${LOG_DIR}/stdmoe_only_topk2.err" \
-  blaunch bash launch-scripts/pretrain.sh \
-    configs/boltzmann_moe/stdmoe_only_topk2.yml
+  -oo "${LOG_DIR}/${NAME}.out" \
+  -eo "${LOG_DIR}/${NAME}.err" \
+  blaunch bash launch-scripts/pretrain.sh "${CFG}"
 
 # Watch progress
-bjobs -w | grep -E 's8e4_stdmoe_fh1_topk2|stdmoe_only_topk2'
-tail -f $LOG_DIR/s8e4_stdmoe_fh1_topk2.err
+bjobs -w | grep -E 'stdmoe_fh1_topk2|stdmoe_only_topk2'
+tail -f ${LOG_DIR}/${NAME}.err
 ```
 
 ## Scaling to 9B active
