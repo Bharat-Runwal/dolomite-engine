@@ -1,0 +1,144 @@
+# h1_boltz_moe_580m: BoltzmannMoE scaled to 580M params
+# Architecture: d=1536, 11 GPT + 1 EGPT×6, 8 full-size experts × int=4096
+#
+# Layers 1-11: softmax_attention + MLP (int=6144 = 4×d)    — GPT prefix
+# Layer 12:    energy_attention  + BoltzmannMoE_Energy_MLP (×6 recurrent)
+#                8 experts × 4096 per expert = 32768 total intermediate
+#
+# Training: 130B tokens (~62k steps at 32 GPUs × batch=4 × accum=4 × seq=4096)
+# Eval: automatic at end of each 6h chunk (intermediate + final)
+#
+# Param breakdown (approx):
+#   Embedding:  154M  (100352 × 1536, tied)
+#   GPT layers: 242M  (11 × (4×1536² + 2×1536×6144))
+#   EGPT block: ~63M  (attn+proj + 2×1536×32768)
+#   Total:     ~580M
+#
+# Multi-node: 4 nodes × 8 GPUs = 32 GPUs
+# LR: 1e-3 (scaled down from 2e-3 for larger model width d=1536 vs d=768)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 6]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 96
+    hidden_size: 1536
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 16, num_key_value_heads: 16, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      # Full-size BoltzmannMoE: 8 experts × 4096 per expert = 32768 total
+      - mlp_type: BoltzmannMoE_Energy_MLP
+        intermediate_size: 32768
+        n_experts: 8
+        temperature: 1.0
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        dropout: 0.0
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/h1_boltz_moe_580m_8x4096_d1536
+  save_interval: 6000
+  max_to_keep: 3
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: h1_boltz_moe_580m_8x4096_d1536
+
+training_parameters:
+  num_training_steps: 62000
+  eval_interval: 10000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 1e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 60000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
