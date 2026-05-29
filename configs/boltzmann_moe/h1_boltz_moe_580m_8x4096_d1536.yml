@@ -113,7 +113,7 @@ logging_args:
     name: h1_boltz_moe_580m_8x4096_d1536
 
 training_parameters:
-  num_training_steps: 62000
+  num_training_steps: 124000
   eval_interval: 10000
   micro_batch_size: 4
   gradient_accumulation_steps: 4
@@ -133,7 +133,7 @@ lr_scheduler_args:
   lr_decay_factor: 0.1
   num_warmup_steps: 2000
   num_constant_steps: 0
-  num_decay_steps: 60000
+  num_decay_steps: 122000
 
 mixed_precision_args:
   dtype: bf16
