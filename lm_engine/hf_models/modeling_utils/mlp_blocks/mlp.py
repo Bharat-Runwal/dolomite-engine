@@ -324,6 +324,7 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         self.intermediate_size = intermediate_size
         self.n_experts = n_experts
         self.expert_I = intermediate_size // n_experts
+        self._routing_scale = self.expert_I ** -0.5  # 1/sqrt(expert_I): prevents routing energy growth → spikes
         self.temperature = temperature
         self.repulsion_coef = repulsion_coef
         self.n_repulsion_pairs = n_repulsion_pairs
@@ -362,13 +363,12 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         # First gradient term: φ(W1ᵢh) @ W2ᵢᵀ   shape (..., n_experts, hidden)
         term1 = torch.einsum("...ei,eih->...eh", phi, W2_e)
 
-        # Routing energy: Eᵢ(h) = h · term1ᵢ = φ(W1ᵢh)ᵀ(W2ᵢh)  — positive alignment score.
-        # Using term1 contracted with x rather than -(phi * W2x).sum() for two reasons:
-        #   1. Sign: +φᵀW2h means higher alignment → higher Boltzmann weight (correct routing).
-        #      The negative convention from energy_per_token is for the descent energy, NOT routing.
-        #   2. Cleanliness: avoids contracting the full gradient (term1+term2) with x, which would
-        #      add a spurious term Σᵢ(W1h)ᵢ·φ'(W1h)ᵢ·(W2h)ᵢ that isn't part of the energy.
-        E = torch.einsum("...h,...eh->...e", x, term1)                  # (..., n_experts)
+        # Routing energy: Eᵢ(h) = h · term1ᵢ / sqrt(expert_I)
+        # Scaled like attention (1/sqrt(d_k)) to prevent ||E_i|| from growing as
+        # O(||W||² · expert_I) during training, which causes routing spikes.
+        # Without this scaling, E_i grows unboundedly → softmax saturates → hard
+        # routing shift → loss spikes (observed at steps ~1000-4000).
+        E = torch.einsum("...h,...eh->...e", x, term1) * self._routing_scale  # (..., n_experts)
 
         # Boltzmann routing weights: pᵢ = softmax_i(E / τ)
         p = F.softmax(E / self.temperature, dim=-1)                     # (..., n_experts)
@@ -452,7 +452,8 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         convention (negative = lower energy = more aligned)."""
         W1x = self.W1(x).view(*x.shape[:-1], self.n_experts, self.expert_I)
         W2x = self.W2(x).view(*x.shape[:-1], self.n_experts, self.expert_I)
-        E = (F.gelu(W1x) * W2x).sum(dim=-1)   # +φᵀW2h per expert (..., n_experts)
+        # Apply same 1/sqrt(expert_I) scaling as forward() for consistency
+        E = (F.gelu(W1x) * W2x).sum(dim=-1) * self._routing_scale
         return -torch.logsumexp(E / self.temperature, dim=-1) * self.temperature
 
 
