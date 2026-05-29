@@ -103,6 +103,24 @@ representations, giving the MoE router a meaningful signal.
 - avg=0.484, ppl=39.56 — slightly lower avg but better PPL than h1-topk-moe
 - Registers + MoE: further investigation needed
 - Status: **already trained, eval complete**
+### New H-series: full-size BoltzmannMoE equivalents (2026-05-29)
+
+**h1_boltz_moe_fullsize** — BoltzmannMoE in EGPT block (4 full experts × int=2048, non-iso-param)
+- Direct equivalent of h1_topk: identical architecture, only routing differs
+- FIXES: 1/sqrt(expert_I) routing energy scale (prevents loss spikes), full-size experts
+- **avg=0.501, ppl=36.48, gsm8k=2.05%** ← beats h1_topk on avg accuracy AND PPL
+- Status: **done, eval complete**
+
+**h1_gptmoe_boltz_egpt** — Switch MoE in GPT prefix + BoltzmannMoE in EGPT (full-size)
+- Switch MoE (top-2, 4 experts) on all 6 GPT prefix layers; BoltzmannMoE on EGPT block
+- avg=0.486, ppl=35.52 — lowest PPL of all MoE variants, BoolQ notably low (0.476)
+- Status: **done, eval complete**
+
+**Key finding**: With full-size experts and 1/sqrt(expert_I) routing normalization,
+**Boltzmann energy routing (0.501) ≥ TopK sparse routing (0.499)** at the same scale.
+The energy landscape correctly identifies expert alignment without needing a learned router.
+
+
 
 ---
 
@@ -116,6 +134,8 @@ representations, giving the MoE router a meaningful signal.
 | V1 EGPT d=768 | 143M | 2.7× | 0.481 | 47.7 |
 | h1_topk_egpt_moe_r128 | ~200M | balanced | 0.484 | 39.6 |
 | V58 EGPT recurrent | 113M | 2.7× | 0.459 | 65.7 |
+| **h1_boltz_moe_fullsize** | ~145M | balanced | **0.501** | 36.5 |
+| h1_gptmoe_boltz_egpt | ~145M | balanced | 0.486 | 35.5 |
 | B1 (BoltzMoE best) | 407M | **21.3×** | 0.474 | 51.9 |
 | B4 (best load balance) | 407M | 21.3× | 0.466 | 51.9 |
 
