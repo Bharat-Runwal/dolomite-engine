@@ -101,7 +101,8 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
     n_experts: int = 8
     temperature: float = 1.0
     repulsion_coef: float = 0.0      # 0 = disabled; try 0.01 for stochastic repulsion
-    n_repulsion_pairs: int = 4       # random expert pairs sampled per step
+    n_repulsion_pairs: int = 4
+    top_k: int | None = None    # None = soft (all experts active); int = sparse top-k Boltzmann routing
     activation_function: str = "gelu_pytorch_tanh"
     dropout: float = 0.0
     add_bias: bool = False

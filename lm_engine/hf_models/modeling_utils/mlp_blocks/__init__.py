@@ -83,6 +83,7 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             temperature=block.temperature,
             repulsion_coef=block.repulsion_coef,
             n_repulsion_pairs=block.n_repulsion_pairs,
+            top_k=block.top_k,
             activation_function=block.activation_function,
             add_bias=block.add_bias,
             dropout=block.dropout,
