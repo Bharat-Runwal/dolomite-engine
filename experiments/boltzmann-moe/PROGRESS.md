@@ -116,9 +116,20 @@ representations, giving the MoE router a meaningful signal.
 - avg=0.486, ppl=35.52 — lowest PPL of all MoE variants, BoolQ notably low (0.476)
 - Status: **done, eval complete**
 
+**h1_boltz_topk2** — Sparse Boltzmann routing (top-2 of 4 experts) in EGPT block
+- Same architecture as h1_boltz_fullsize, but with `top_k=2` parameter
+- Energy-based selection (no learned router); truncated softmax (zero non-top-k, no renormalization)
+- avg=0.4856, ppl=36.37, gsm8k=1.97% — **matches soft Boltzmann on PPL** (36.37 vs 36.5)
+- Active params (idealized sparse impl): ~50M vs 68M for soft → 25% theoretical compute saving
+- Note: current impl computes all K experts then masks; saving requires Switch-style dispatch
+- Status: **done, eval complete**
+
 **Key finding**: With full-size experts and 1/sqrt(expert_I) routing normalization,
 **Boltzmann energy routing (0.501) ≥ TopK sparse routing (0.499)** at the same scale.
 The energy landscape correctly identifies expert alignment without needing a learned router.
+Sparse top-2 Boltzmann (h1_boltz_topk2) matches soft Boltzmann on PPL (36.37 vs 36.5)
+and beats the learned-router topk on PPL (39.8) — energy-based selection generalises
+to sparse regimes without any auxiliary router.
 
 
 
@@ -136,6 +147,7 @@ The energy landscape correctly identifies expert alignment without needing a lea
 | V58 EGPT recurrent | 113M | 2.7× | 0.459 | 65.7 |
 | **h1_boltz_moe_fullsize** | ~145M | balanced | **0.501** | 36.5 |
 | h1_gptmoe_boltz_egpt | ~145M | balanced | 0.486 | 35.5 |
+| h1_boltz_topk2 | ~145M | balanced | 0.486 | **36.4** |
 | B1 (BoltzMoE best) | 407M | **21.3×** | 0.474 | 51.9 |
 | B4 (best load balance) | 407M | 21.3× | 0.466 | 51.9 |
 
