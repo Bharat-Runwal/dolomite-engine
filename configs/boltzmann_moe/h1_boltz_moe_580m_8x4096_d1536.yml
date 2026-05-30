@@ -102,7 +102,7 @@ tuning_args:
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/h1_boltz_moe_580m_8x4096_d1536
-  save_interval: 6000
+  save_interval: 2000
   max_to_keep: 3
 
 logging_args:
