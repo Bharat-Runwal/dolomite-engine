@@ -140,5 +140,6 @@ mixed_precision_args:
 
 distributed_args:
   fsdp_algorithm: 2
+  gradient_checkpointing_method: block
   torch_compile: false
   stage: 0
