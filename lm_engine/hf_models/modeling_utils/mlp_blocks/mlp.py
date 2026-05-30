@@ -374,13 +374,15 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
 
         # Boltzmann routing weights (optionally sparse top-k)
         if self.top_k is not None and self.top_k < self.n_experts:
-            # Sparse: zero out all but top-k energy scores, then softmax over selected
-            topk_vals, topk_idx = E.topk(self.top_k, dim=-1)           # (..., top_k)
-            E_sparse = torch.full_like(E, float('-inf'))
-            E_sparse.scatter_(-1, topk_idx, topk_vals)
-            p = F.softmax(E_sparse / self.temperature, dim=-1)         # (..., n_experts), zeros for non-top-k
+            # Sparse: full Boltzmann softmax then TRUNCATE (zero non-top-k, no renorm).
+            # Avoids abrupt weight redistribution at routing boundaries → fewer spikes.
+            p = F.softmax(E / self.temperature, dim=-1)
+            _, topk_idx = E.topk(self.top_k, dim=-1)
+            mask = torch.zeros_like(p, dtype=torch.bool)
+            mask.scatter_(-1, topk_idx, True)
+            p = p * mask                           # sum < 1 intentionally; sparse Boltzmann approx
         else:
-            p = F.softmax(E / self.temperature, dim=-1)                 # (..., n_experts)
+            p = F.softmax(E / self.temperature, dim=-1)
 
         # Second gradient term needs W2(x); independent dropout for regularisation
         W2x = self.dropout(self.W2(x)).view(*leading, self.n_experts, self.expert_I)
