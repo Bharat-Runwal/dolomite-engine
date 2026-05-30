@@ -140,5 +140,5 @@ mixed_precision_args:
 
 distributed_args:
   fsdp_algorithm: 2
-  torch_compile: true
+  torch_compile: false
   stage: 0
