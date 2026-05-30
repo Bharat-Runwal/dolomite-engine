@@ -261,8 +261,15 @@ The architectural imbalance (302M in FFN, only 14M in attention) is the primary 
 ## Key paper and reports
 
 - **Local report**: `experiments/boltzmann-moe/paper/report.pdf` (10 pages)
-- **Overleaf** (NeurIPS 2026 joint paper): `~/Code/energy/energy-GPT-neurips2026/`
-  — nima staging area: `nima/sec/appendices/boltz_moe.tex`
+- **Scatter plot script**: `experiments/boltzmann-moe/paper/make_moe_scatter.py`
+  — generates `paper/figs/moe_scatter_total_params.pdf` and `moe_scatter_active_params.pdf`
+- **NeurIPS 2026 paper** (Overleaf): `~/Code/energy/energy-GPT-neurips2026/`
+  — main file: `nima/paper_v2.tex`
+  — BoltzMoE appendix: `nima/sec/appendices/boltz_moe.tex`
+  — figures: `nima/figs/` (symlink or copy scatter PDFs here for compilation)
+- **Talk slides**: `~/Code/overleaf/energy-GPT-reformulation-2026/talk_v3.tex`
+  — includes MoE results table frame and scatter plot frame (after BoltzMoE 400M frame)
+  — figures path: `figures/` relative to that directory
 - **Analysis scripts**: `experiments/energy-inference/scripts/multi-block-ablation/`
   - `analyze_boltz_moe_routing_20260428.py` — routing collapse curves from training logs
   - `analyze_boltz_expert_specialization_20260429.py` — basic PCA/heatmaps (60 samples)
