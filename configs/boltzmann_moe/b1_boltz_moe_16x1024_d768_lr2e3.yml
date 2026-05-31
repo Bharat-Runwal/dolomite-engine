@@ -120,3 +120,6 @@ distributed_args:
   fsdp_algorithm: 2
   torch_compile: true
   stage: 0
+
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/b1_boltz_moe_16x1024_d768_lr2e3
