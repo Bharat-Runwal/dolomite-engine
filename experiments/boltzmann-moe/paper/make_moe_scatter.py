@@ -138,14 +138,21 @@ def make_scatter(variant="active"):
 
 
 def make_scatter_flops():
-    """x-axis = training FLOPs ≈ 6 × active_params × tokens (in EFLOPs)."""
-    xs = [6.0 * r[2] * r[6] / 1e3 for r in MODELS]  # EFLOPs
+    """x-axis = forward-pass FLOPs per token ≈ 2 × active_params (GFLOPs).
+
+    Per-forward-pass (not per-training-run): two snapshots of the same model
+    at different token counts collapse onto a single x value. This is a
+    model-size / inference-cost axis, distinct from the training-FLOPs
+    interpretation (which would be 6·active·tokens).
+    """
+    # 2 · (active_M · 1e6) FLOPs/token = 2·active_M / 1000 GFLOPs/token.
+    xs = [2.0 * r[2] / 1000.0 for r in MODELS]  # GFLOPs / token (forward)
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 3.6), constrained_layout=True)
     ylabels = ["WikiText PPL", "Avg zero-shot acc", "GSM8k flex-avg (%)"]
     for ax, ykey, ylabel in zip(axes, [4, 3, 5], ylabels):
         _draw_panel(ax, ykey, ylabel, xs)
-        ax.set_xlabel("Training FLOPs (EFLOPs = $10^{18}$)", fontsize=9)
+        ax.set_xlabel("Forward FLOPs / token (GFLOPs)", fontsize=9)
 
     # Extra dashed: h1_boltz_fullsize ↔ h1_boltz_topk2 (sparse routing comparison)
     for ax, ykey in zip(axes, [4, 3, 5]):
