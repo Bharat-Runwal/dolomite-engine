@@ -1,0 +1,146 @@
+# d1_boltz_moe_egpt_12x1_d768: deep PURE-EGPT BoltzMoE with V1-balanced FFN:Attn.
+#
+# Motivation: B-series (16384 intermediate at d=768) had FFN:Attn ≈ 21:1 — that
+# imbalance, not Boltzmann routing per se, is what crippled the B-series. This
+# variant shrinks intermediate to 2048 (= V1 EGPT d=768 size), giving FFN:Attn
+# ≈ 2.7× per block — same as V1 baseline. The MoE then splits that 2048 into
+# K=4 × I_e=512 (iso-param: same total intermediate as V1, just routed).
+#
+# Comparison story:
+#   V1 EGPT d=768           : 12 blocks × Energy_MLP(I=2048)        — non-MoE baseline
+#   d1_boltz_moe (this one) : 12 blocks × BoltzMoE(K=4, I_e=512)    — same params, MoE routed
+#   B1 BoltzMoE             : 12 blocks × BoltzMoE(K=16, I_e=1024)  — fat (FFN:Attn 21×, fails)
+#
+# Tests: does iso-param Boltzmann MoE help once the architectural imbalance is
+# fixed? V1 baseline gets 0.481 avg / 47.7 PPL; if d1 ≈ V1 we conclude MoE adds
+# nothing at this scale; if d1 > V1 we have a clean MoE win at deep EGPT.
+#
+# Total params target: ~143M (matches V1 EGPT d=768).
+# repulsion_coef = 0.1 (best load balance from B4).
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    # All 12 layers are EGPT (energy_attention + BoltzMoE)
+    sequence_mixer_blocks:
+      - &egpt_attn
+        sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+    mlp_blocks:
+      - &boltz_ffn
+        mlp_type: BoltzmannMoE_Energy_MLP
+        intermediate_size: 2048   # total = K × I_e = 4 × 512 (matches V1 size, FFN:Attn ≈ 2.7×)
+        n_experts: 4
+        temperature: 1.0
+        repulsion_coef: 0.1       # best load balance from B4
+        n_repulsion_pairs: 4
+        dropout: 0.0
+        add_bias: false
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+      - *boltz_ffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/d1_boltz_moe_egpt_12x1_d768
+  save_interval: 3000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: d1_boltz_moe_egpt_12x1_d768
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
