@@ -160,7 +160,8 @@ is the gsm8k summary used in the scatter plot.
 | h1_gptmoe_boltz_egpt | 145M | 0.486 | 35.52 | 1.06% | 1.82% | 1.90% | 1.86% |
 | h1_boltz_topk2 (sparse train) | 145M | 0.486 | **36.37** | 0.83% | 1.97% | 1.74% | 1.86% |
 | h1_boltz_full @ top2 eval | 145M | 0.489 | 42.84 | 0.15% | **2.35%** | **2.50%** | 2.43% |
-| **580M @ step 14k (7.34B tok)** | **679M** | **0.514** | **30.39** | 0.83% | 1.90% | **2.88%** | **2.39%** |
+| **580M @ step 14k (7.34B tok)** | **679M** | 0.514 | 30.39 | 0.83% | 1.90% | **2.88%** | **2.39%** |
+| **580M @ step 18k (9.43B tok)** | **679M** | **0.524** | **28.97** | 1.14% | 1.97% | 2.27% | 2.12% |
 
 **Key lesson**: The h1_topk_egpt_moe works because:
 1. The GPT prefix processes input into rich representations first

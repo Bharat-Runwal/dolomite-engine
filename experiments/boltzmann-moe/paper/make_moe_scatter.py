@@ -44,9 +44,10 @@ MODELS = [
     # that does not skip compute, but we plot the idealized 50M to reflect the
     # design intent and FLOPs interpretation.
     ("h1_boltz_topk2",      145,  50, 0.4856, 36.37, 1.86, 7.86, "boltzmann-sparse", "H-series"),
-    # 580M Boltzmann MoE: K=8 experts × I_e=4096, d=1536. Step 14k = 7.34B tokens
-    # (training to 124k = 65B). Already matches V9 GPT on avg & ppl at 11% of budget.
+    # 580M Boltzmann MoE: K=8 experts × I_e=4096, d=1536. Training to 124k = 65B.
+    # Already beats V9 GPT on avg & ppl at <15% of budget.
     ("580M @ 7.3B",         679, 679, 0.5137, 30.4, 2.39, 7.34, "boltzmann",   "H-series"),
+    ("580M @ 9.4B",         679, 679, 0.5238, 28.97, 2.12, 9.43, "boltzmann",   "H-series"),
 ]
 
 # Short display names for labels
@@ -66,6 +67,7 @@ SHORT_NAMES = {
     "h1_gptmoe_boltz":     "h1 gpt+boltz",
     "h1_boltz_topk2":      "h1 boltz-top2",
     "580M @ 7.3B":         "580M @ 7.3B",
+    "580M @ 9.4B":         "580M @ 9.4B",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
