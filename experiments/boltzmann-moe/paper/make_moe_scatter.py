@@ -31,6 +31,7 @@ MODELS = [
     ("V1 EGPT d=768",       143,  66, 0.481, 47.7, 1.97, 7.86, "none",         "baseline"),
     ("V58 EGPT rec 1×24",   113,  10, 0.459, 65.7, 1.93, 7.86, "none",         "baseline"),
     # H-series at d=768, ~145M total params
+    ("h1_egpt (no MoE)",    145,  68, 0.4892, 39.55, 2.20, 7.86, "none",         "H-series"),
     ("h1_boltz iso-param",  145,  68, 0.464, 46.1, 2.43, 7.86, "boltzmann",    "H-series"),
     ("h1_topk_egpt_moe",    145,  65, 0.499, 39.8, 2.01, 7.86, "topk",         "H-series"),
     ("h1_boltz_fullsize",   145,  68, 0.501, 36.5, 2.12, 7.86, "boltzmann",    "H-series"),
@@ -48,6 +49,7 @@ SHORT_NAMES = {
     "V1 EGPT d=768":       "V1 EGPT",
     "V0 GPT d=768":        "V0 GPT-160M",
     "V58 EGPT rec 1×24":   "V58 rec",
+    "h1_egpt (no MoE)":    "h1 EGPT (no MoE)",
     "h1_boltz iso-param":  "h1 boltz-iso",
     "h1_topk_egpt_moe":    "h1 topK",
     "h1_boltz_fullsize":   "h1 boltz-full",
