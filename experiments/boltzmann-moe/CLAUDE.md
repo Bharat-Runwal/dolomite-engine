@@ -143,7 +143,7 @@ resumes. For manual resume, append `load_args` to the config:
 cat >> /tmp/resume_b1.yml <<'YAML'
 
 load_args:
-  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/b1_boltz_moe_16x1024_d768_lr2e3
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/b1_boltz_moe_16x1024_d768_lr2e3
 YAML
 # then submit with /tmp/resume_b1.yml as the config
 ```

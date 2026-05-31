@@ -12,34 +12,41 @@ import matplotlib.patches as mpatches
 import numpy as np
 
 # ── Data ──────────────────────────────────────────────────────────────────────
-# name, total_params_M, active_params_M, avg_acc, wiki_ppl, gsm8k_pct, tokens_B, routing_type, series
+# name, total_params_M, active_params_M, avg_acc, wiki_ppl, gsm8k_flex_avg, tokens_B, routing_type, series
 # active_params = per-token active (non-embedding).
 # BoltzmannMoE: ALL experts compute every step → active = total (no sparsity).
 # TopK sparse:  only top_k/n_experts fraction of FFN is active per token.
 #   h1_topk: only 1 EGPT block sparse (6/7 layers fully dense) → active ≈ total - 3M
 #   C1:      all 12 blocks sparse (top-2/4) → active FFN ≈ 50% of total FFN
+# gsm8k_flex_avg = mean of (gsm8k flexible-extract, gsm8k_cot flexible-extract).
+#   Flex filter accepts both "####" and "the answer is" patterns; strict-match
+#   penalised EGPT-style models heavily for emitting non-#### formats. Avg of two
+#   tasks reduces noise.
 MODELS = [
-    ("V9 GPT d=1024",       354, 251, 0.513, 29.8, 2.9,  7.86, "none",         "baseline"),
-    ("V0 GPT d=768",        162,  85, 0.479, 38.3, 1.7,  7.86, "none",         "baseline"),
-    ("V1-400M EGPT d=1024", 354, 251, 0.494, 38.6, 1.7,  7.86, "none",         "baseline"),
-    ("V1 EGPT d=768",       143,  66, 0.481, 47.7, 1.7,  7.86, "none",         "baseline"),
-    ("V58 EGPT rec 1×24",   113,  10, 0.459, 65.7, 1.7,  7.86, "none",         "baseline"),
-    ("B1 BoltzMoE (no reg)",407, 330, 0.474, 51.9, 1.4,  7.86, "boltzmann",    "B-series"),
-    ("B4 BoltzMoE rep0.1",  407, 330, 0.466, 51.9, 1.7,  7.86, "boltzmann",    "B-series"),
+    ("V9 GPT d=1024",       354, 251, 0.513, 29.8, 2.69, 7.86, "none",         "baseline"),
+    ("V0 GPT d=768",        162,  85, 0.479, 38.3, 2.08, 7.86, "none",         "baseline"),
+    ("V1-400M EGPT d=1024", 354, 251, 0.494, 38.6, 1.93, 7.86, "none",         "baseline"),
+    ("V1 EGPT d=768",       143,  66, 0.481, 47.7, 1.97, 7.86, "none",         "baseline"),
+    ("V58 EGPT rec 1×24",   113,  10, 0.459, 65.7, 1.93, 7.86, "none",         "baseline"),
+    ("B1 BoltzMoE (no reg)",407, 330, 0.474, 51.9, 1.63, 7.86, "boltzmann",    "B-series"),
+    ("B4 BoltzMoE rep0.1",  407, 330, 0.466, 51.9, 1.90, 7.86, "boltzmann",    "B-series"),
     # C1: 12 deep blocks, top-2/4 → active FFN ≈ 50%, so active ≈ 165-77(emb) × 0.65 + 77 ≈ 135M total, active FFN ≈ 55M
-    ("C1 TopK EnergyMoE",   165,  55, 0.474, 47.3, 2.0,  7.86, "topk",         "C-series"),
-    ("h1_boltz iso-param",  145,  68, 0.464, 46.1, 2.4,  7.86, "boltzmann",    "H-series"),
+    ("C1 TopK EnergyMoE",   165,  55, 0.474, 47.3, 1.97, 7.86, "topk",         "C-series"),
+    ("h1_boltz iso-param",  145,  68, 0.464, 46.1, 2.43, 7.86, "boltzmann",    "H-series"),
     # h1_topk: only EGPT FFN sparse (1/7 layers), so active ≈ 68 - 3 = 65M active
-    ("h1_topk_egpt_moe",    145,  65, 0.499, 39.8, 2.2,  7.86, "topk",         "H-series"),
-    ("h1_topk_r128",        145,  65, 0.484, 39.6, 2.3,  7.86, "topk",         "H-series"),
+    ("h1_topk_egpt_moe",    145,  65, 0.499, 39.8, 2.01, 7.86, "topk",         "H-series"),
+    ("h1_topk_r128",        145,  65, 0.484, 39.6, 2.24, 7.86, "topk",         "H-series"),
     # Boltzmann: all experts active → active = total non-embed
-    ("h1_boltz_fullsize",   145,  68, 0.501, 36.5, 2.0,  7.86, "boltzmann",    "H-series"),
-    ("h1_gptmoe_boltz",     145,  68, 0.486, 35.5, 1.8,  7.86, "switch+boltz", "H-series"),
+    ("h1_boltz_fullsize",   145,  68, 0.501, 36.5, 2.12, 7.86, "boltzmann",    "H-series"),
+    ("h1_gptmoe_boltz",     145,  68, 0.486, 35.5, 1.86, 7.86, "switch+boltz", "H-series"),
     # Sparse Boltzmann (top-2 of 4): idealized active params reduced ~25% vs soft
     # (full energy + top-2 gradient half). Realized active = 68M with current impl
     # that does not skip compute, but we plot the idealized 50M to reflect the
     # design intent and FLOPs interpretation.
-    ("h1_boltz_topk2",      145,  50, 0.4856, 36.37, 1.97, 7.86, "boltzmann-sparse", "H-series"),
+    ("h1_boltz_topk2",      145,  50, 0.4856, 36.37, 1.86, 7.86, "boltzmann-sparse", "H-series"),
+    # 580M Boltzmann MoE: K=8 experts × I_e=4096, d=1536. Step 14k = 7.34B tokens
+    # (training to 124k = 65B). Already matches V9 GPT on avg & ppl at 11% of budget.
+    ("580M @ 7.3B",         679, 679, 0.5137, 30.4, 2.39, 7.34, "boltzmann",   "H-series"),
 ]
 
 # Short display names for labels
@@ -58,6 +65,7 @@ SHORT_NAMES = {
     "h1_boltz_fullsize":   "h1 boltz-full",
     "h1_gptmoe_boltz":     "h1 gpt+boltz",
     "h1_boltz_topk2":      "h1 boltz-top2",
+    "580M @ 7.3B":         "580M @ 7.3B",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
@@ -159,7 +167,7 @@ def make_scatter(variant="active"):
         fontsize=10, y=1.02
     )
 
-    ylabels = ["Avg zero-shot acc", "WikiText PPL", "GSM8k (%)"]
+    ylabels = ["Avg zero-shot acc", "WikiText PPL", "GSM8k flex-avg (%)"]
     ykeys   = [3, 4, 5]
 
     for ax, ykey, ylabel in zip(axes, ykeys, ylabels):
@@ -222,7 +230,7 @@ def make_scatter_flops():
         fontsize=10, y=1.02
     )
 
-    ylabels = ["Avg zero-shot acc", "WikiText PPL", "GSM8k (%)"]
+    ylabels = ["Avg zero-shot acc", "WikiText PPL", "GSM8k flex-avg (%)"]
     ykeys   = [3, 4, 5]
 
     for ax, ykey, ylabel in zip(axes, ykeys, ylabels):

@@ -101,7 +101,7 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/h1_boltz_moe_580m_8x4096_d1536
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/h1_boltz_moe_580m_8x4096_d1536
   save_interval: 2000
   max_to_keep: 3
 
@@ -143,3 +143,6 @@ distributed_args:
   gradient_checkpointing_method: block
   torch_compile: false
   stage: 0
+
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/h1_boltz_moe_580m_8x4096_d1536

@@ -137,19 +137,30 @@ to sparse regimes without any auxiliary router.
 
 ## Baseline comparison
 
-| Model | Params | FFN:Attn | Avg acc | WikiPPL |
-|-------|--------|----------|---------|---------|
-| V9 GPT d=1024 | 354M | 2.0× | **0.513** | **29.8** |
-| V1-400M EGPT d=1024 | 354M | 3.0× | 0.494 | 38.6 |
-| **h1_topk_egpt_moe** | ~200M | balanced | **0.499** | 39.8 |
-| V1 EGPT d=768 | 143M | 2.7× | 0.481 | 47.7 |
-| h1_topk_egpt_moe_r128 | ~200M | balanced | 0.484 | 39.6 |
-| V58 EGPT recurrent | 113M | 2.7× | 0.459 | 65.7 |
-| **h1_boltz_moe_fullsize** | ~145M | balanced | **0.501** | 36.5 |
-| h1_gptmoe_boltz_egpt | ~145M | balanced | 0.486 | 35.5 |
-| h1_boltz_topk2 | ~145M | balanced | 0.486 | **36.4** |
-| B1 (BoltzMoE best) | 407M | **21.3×** | 0.474 | 51.9 |
-| B4 (best load balance) | 407M | 21.3× | 0.466 | 51.9 |
+GSM8K columns use lm-evaluation-harness filters: `strict-match` (the ground-truth
+`####` separator only) and `flexible-extract` (also accepts "the answer is …" patterns).
+EGPT-style models often emit answers in non-`####` formats; `flex` is the fairer
+metric. The `flex_avg` column is the mean of `gsm8k flex` and `gsm8k_cot flex` and
+is the gsm8k summary used in the scatter plot.
+
+| Model | Params | Avg acc | WikiPPL | g_strict | g_flex | cot_flex | flex_avg |
+|-------|-------:|--------:|--------:|---------:|-------:|---------:|---------:|
+| V9 GPT d=1024 | 354M | **0.513** | **29.84** | 2.43% | 2.88% | 2.50% | **2.69%** |
+| V0 GPT d=768 | 162M | 0.479 | 38.31 | 1.74% | 2.20% | 1.97% | 2.08% |
+| V1-400M EGPT d=1024 | 354M | 0.494 | 38.61 | 0.68% | 1.67% | 2.20% | 1.93% |
+| V1 EGPT d=768 | 143M | 0.481 | 47.66 | 0.45% | 1.74% | 2.20% | 1.97% |
+| V58 EGPT rec 1×24 | 113M | 0.459 | 65.74 | 0.15% | 1.74% | 2.12% | 1.93% |
+| B1 BoltzMoE (no reg) | 407M | 0.474 | 51.90 | 0.23% | 1.36% | 1.90% | 1.63% |
+| B4 BoltzMoE rep0.1 | 407M | 0.466 | 51.87 | 0.53% | 1.67% | 2.12% | 1.90% |
+| C1 TopK EnergyMoE | 165M | 0.474 | 47.34 | 1.14% | 2.05% | 1.90% | 1.97% |
+| h1_boltz iso-param | 145M | 0.464 | 46.13 | 0.38% | **2.35%** | **2.50%** | 2.43% |
+| h1_topk_egpt_moe | 145M | 0.499 | 39.79 | 0.76% | 2.20% | 1.82% | 2.01% |
+| h1_topk_egpt_moe_r128 | 145M | 0.484 | 39.56 | 0.83% | 2.27% | 2.20% | 2.24% |
+| **h1_boltz_moe_fullsize** | 145M | **0.501** | 36.48 | 1.06% | 2.05% | 2.20% | 2.12% |
+| h1_gptmoe_boltz_egpt | 145M | 0.486 | 35.52 | 1.06% | 1.82% | 1.90% | 1.86% |
+| h1_boltz_topk2 (sparse train) | 145M | 0.486 | **36.37** | 0.83% | 1.97% | 1.74% | 1.86% |
+| h1_boltz_full @ top2 eval | 145M | 0.489 | 42.84 | 0.15% | **2.35%** | **2.50%** | 2.43% |
+| **580M @ step 14k (7.34B tok)** | **679M** | **0.514** | **30.39** | 0.83% | 1.90% | **2.88%** | **2.39%** |
 
 **Key lesson**: The h1_topk_egpt_moe works because:
 1. The GPT prefix processes input into rich representations first

@@ -79,7 +79,7 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/b3_boltz_moe_dropout_wd_16x1024_d768_lr2e3
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/b3_boltz_moe_dropout_wd_16x1024_d768_lr2e3
   save_interval: 5000
   max_to_keep: 2
 

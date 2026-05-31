@@ -5,7 +5,7 @@
 
 set -euo pipefail
 REPO=/proj/dmfexp/nima/Code/dolomite-engine
-B5_CKPT=${REPO}/experiments/energy-inference/results/multi-block-ablation/b5_boltz_moe_rep_strong_dropout_wd_16x1024_d768_lr2e3/unsharded
+B5_CKPT=${REPO}/experiments/boltzmann-moe/results/b5_boltz_moe_rep_strong_dropout_wd_16x1024_d768_lr2e3/unsharded
 OUTPUT=${REPO}/experiments/boltzmann-moe/results/b5_with_surrogate_router
 JOB_NAME=b5_surrogate_router
 

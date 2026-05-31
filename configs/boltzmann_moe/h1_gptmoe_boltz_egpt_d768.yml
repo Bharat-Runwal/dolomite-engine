@@ -95,7 +95,7 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/h1_gptmoe_boltz_egpt_d768
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/h1_gptmoe_boltz_egpt_d768
   save_interval: 3000
   max_to_keep: 2
 
