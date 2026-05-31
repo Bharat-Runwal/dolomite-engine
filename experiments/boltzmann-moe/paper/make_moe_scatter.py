@@ -109,9 +109,9 @@ def _add_compact_legend(fig):
         mpatches.Patch(color=COLORS["topk"],             label="TopK learned-router"),
         mpatches.Patch(color=COLORS["switch+boltz"],     label="Switch+Boltzmann"),
     ]
-    fig.legend(handles=handles, loc="upper center",
-               bbox_to_anchor=(0.5, 1.0), ncol=5, fontsize=8,
-               frameon=False)
+    # Place below subplots; constrained_layout handles the reserved space.
+    fig.legend(handles=handles, loc="outside lower center",
+               ncol=5, fontsize=8, frameon=False)
 
 
 def make_scatter(variant="active"):
