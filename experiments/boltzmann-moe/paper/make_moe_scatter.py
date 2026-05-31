@@ -122,8 +122,8 @@ def make_scatter(variant="active"):
     xs = [r[2] if use_active else r[1] for r in MODELS]
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 3.6), constrained_layout=True)
-    ylabels = ["Avg zero-shot acc", "WikiText PPL", "GSM8k flex-avg (%)"]
-    for ax, ykey, ylabel in zip(axes, [3, 4, 5], ylabels):
+    ylabels = ["WikiText PPL", "Avg zero-shot acc", "GSM8k flex-avg (%)"]
+    for ax, ykey, ylabel in zip(axes, [4, 3, 5], ylabels):
         _draw_panel(ax, ykey, ylabel, xs)
         ax.set_xlabel(xlabel, fontsize=9)
 
@@ -142,13 +142,13 @@ def make_scatter_flops():
     xs = [6.0 * r[2] * r[6] / 1e3 for r in MODELS]  # EFLOPs
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 3.6), constrained_layout=True)
-    ylabels = ["Avg zero-shot acc", "WikiText PPL", "GSM8k flex-avg (%)"]
-    for ax, ykey, ylabel in zip(axes, [3, 4, 5], ylabels):
+    ylabels = ["WikiText PPL", "Avg zero-shot acc", "GSM8k flex-avg (%)"]
+    for ax, ykey, ylabel in zip(axes, [4, 3, 5], ylabels):
         _draw_panel(ax, ykey, ylabel, xs)
         ax.set_xlabel("Training FLOPs (EFLOPs = $10^{18}$)", fontsize=9)
 
     # Extra dashed: h1_boltz_fullsize ↔ h1_boltz_topk2 (sparse routing comparison)
-    for ax, ykey in zip(axes, [3, 4, 5]):
+    for ax, ykey in zip(axes, [4, 3, 5]):
         idx_bz = next(i for i, r in enumerate(MODELS) if r[0] == "h1_boltz_fullsize")
         idx_sp = next(i for i, r in enumerate(MODELS) if r[0] == "h1_boltz_topk2")
         ax.plot([xs[idx_bz], xs[idx_sp]], [MODELS[idx_bz][ykey], MODELS[idx_sp][ykey]],
