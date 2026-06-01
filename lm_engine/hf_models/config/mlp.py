@@ -106,6 +106,16 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
     activation_function: str = "gelu_pytorch_tanh"
     dropout: float = 0.0
     add_bias: bool = False
+    # Gradient-of-φ approximation used when computing the second-half gradient
+    # term2 = W1ᵀ (φ'(W1 h) ⊙ W2 h).
+    #   "sigmoid"    : phi' = sigmoid(√(2/π) · W1 h) × 0.5      (LEGACY default; not the
+    #                  derivative of F.gelu and uniformly half the true GELU' magnitude;
+    #                  partly absorbed by W2's learned scale).
+    #   "tanh_exact" : matched φ = 0.5 W1 h (1 + tanh(c · W1 h)) and exact φ' for that φ
+    #                  (c = √(2/π)). Self-consistent ∂E/∂h, marginally cheaper.
+    # Default = "sigmoid" so existing checkpoints (V1, h1_*, B-series, 580M) load and
+    # produce identical outputs. New runs should set this to "tanh_exact".
+    gelu_grad_method: str = "sigmoid"
 
     def model_post_init(self, __context: Any) -> None:
         assert self.mlp_type == "BoltzmannMoE_Energy_MLP"
@@ -115,6 +125,9 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
             f"n_experts ({self.n_experts})"
         )
         assert self.temperature > 0, "temperature must be positive"
+        assert self.gelu_grad_method in ("sigmoid", "tanh_exact"), (
+            f"gelu_grad_method must be 'sigmoid' or 'tanh_exact', got {self.gelu_grad_method}"
+        )
 
 
 class _TopKEnergyMoEMLPArgs(BaseArgs):

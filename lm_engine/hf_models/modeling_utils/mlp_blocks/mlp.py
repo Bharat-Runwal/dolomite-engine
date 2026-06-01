@@ -306,6 +306,7 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         repulsion_coef: float,
         n_repulsion_pairs: int,
         top_k: int | None = None,
+        gelu_grad_method: str = "sigmoid",
         init_method: str = "normal",
         activation_function: str = "gelu",
         dropout: float = 0.0,
@@ -320,6 +321,9 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         assert intermediate_size % n_experts == 0, (
             f"intermediate_size ({intermediate_size}) must be divisible by n_experts ({n_experts})"
         )
+        assert gelu_grad_method in ("sigmoid", "tanh_exact"), (
+            f"gelu_grad_method must be 'sigmoid' or 'tanh_exact', got {gelu_grad_method}"
+        )
 
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -330,6 +334,13 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         self.top_k = top_k  # None=soft; int=sparse top-k Boltzmann routing
         self.repulsion_coef = repulsion_coef
         self.n_repulsion_pairs = n_repulsion_pairs
+        # "sigmoid"    = legacy φ' = sigmoid(c·x)·0.5 (uniformly half the true GELU' magnitude
+        #                — partly absorbed by W2 scale during training; matches all checkpoints
+        #                trained before 2026-06)
+        # "tanh_exact" = self-consistent φ/φ' pair: φ(x) = 0.5·x·(1+tanh(c·x)), and
+        #                φ'(x) = 0.5·(1+tanh(c·x)) + 0.5·c·x·(1−tanh²(c·x))
+        #                (c = √(2/π)). Strictly correct ∂E/∂h.
+        self.gelu_grad_method = gelu_grad_method
         self.layer_idx = layer_idx
         self._cached_metrics: dict[str, float] | None = None
 
@@ -358,9 +369,22 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         W1_e = self.W1.weight.view(self.n_experts, self.expert_I, self.hidden_size)
         W2_e = self.W2.weight.view(self.n_experts, self.expert_I, self.hidden_size)
 
-        # Activation and its approximate derivative (GELU)
-        phi = F.gelu(W1x)                                               # (..., n_experts, expert_I)
-        phi_prime = torch.sigmoid(self._SIGMOID_SCALE * W1x) * 0.5
+        # Activation φ and its derivative φ'.
+        # Two branches kept for backward compatibility (existing checkpoints trained
+        # under the "sigmoid" path):
+        #   sigmoid    : φ = F.gelu(W1x); φ' ≈ sigmoid(c·W1x)·0.5  (LEGACY default;
+        #                this φ' is uniformly half of the true GELU′ magnitude — not
+        #                a faithful derivative. Kept as default so loaded checkpoints
+        #                produce identical outputs.)
+        #   tanh_exact : matched φ = 0.5·W1x·(1+tanh(c·W1x)) and exact φ' for that φ.
+        #                Self-consistent ∂E/∂h. New runs should opt into this.
+        if self.gelu_grad_method == "tanh_exact":
+            t = torch.tanh(self._SIGMOID_SCALE * W1x)
+            phi = 0.5 * W1x * (1.0 + t)                                  # tanh-approx GELU
+            phi_prime = 0.5 * (1.0 + t) + 0.5 * self._SIGMOID_SCALE * W1x * (1.0 - t * t)
+        else:  # "sigmoid" (legacy)
+            phi = F.gelu(W1x)                                            # (..., n_experts, expert_I)
+            phi_prime = torch.sigmoid(self._SIGMOID_SCALE * W1x) * 0.5
 
         # First gradient term: φ(W1ᵢh) @ W2ᵢᵀ   shape (..., n_experts, hidden)
         term1 = torch.einsum("...ei,eih->...eh", phi, W2_e)

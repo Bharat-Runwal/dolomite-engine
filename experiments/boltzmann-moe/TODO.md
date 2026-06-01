@@ -2,6 +2,45 @@
 
 ## After Mon 2026-06-01 talk
 
+### A/B test: tanh_exact φ' (HIGH PRIORITY, cheap)
+
+The legacy code uses `φ' ≈ sigmoid(c·x) · 0.5` paired with `φ = F.gelu(x)` —
+but this `φ'` is uniformly **half** the true `gelu'(x)`, and is not actually
+the derivative of `F.gelu`. Term2 in `∂E/∂h` is therefore systematically
+under-magnitude; weight scales partially absorb this during training, but
+it's still a non-faithful gradient.
+
+**Fix landed (gated, default = old)**: `BoltzmannMoE_Energy_MLP` now takes
+`gelu_grad_method ∈ {"sigmoid", "tanh_exact"}` (default `"sigmoid"` for
+backward compat). Setting `tanh_exact` switches both φ and φ' to the
+self-consistent tanh-approx-GELU pair:
+  φ(x) = 0.5 · x · (1 + tanh(c·x))
+  φ'(x) = 0.5 · (1 + tanh(c·x)) + 0.5 · c · x · (1 − tanh²(c·x))
+with c = √(2/π). One extra elementwise mul vs current.
+
+**A/B plan** (run two h1_boltz_fullsize variants from scratch, 30k steps,
+4 GPUs preemptable — ~6 h each):
+  1. h1_boltz_fullsize_sigmoid (control; current default)
+  2. h1_boltz_fullsize_tanhexact (treatment; `gelu_grad_method: tanh_exact`)
+Otherwise identical configs. Compare avg / WikiPPL / GSM8k flex-avg.
+
+Hypothesis: if phi' magnitude was being absorbed by W2 scale, we expect
+small net effect on quality (≤ ±0.3pp avg). If the *shape* matters
+(GELU' has a peak around x≈0.6 that sigmoid·0.5 misses), expect a
+meaningful improvement on representation quality. Either way, **the
+correct gradient should be the new default once we have data**.
+
+If tanh_exact ≥ sigmoid: switch default to `tanh_exact` for new training,
+keep `sigmoid` available for legacy checkpoint reproducibility.
+
+Test (already run): `experiments/boltzmann-moe/tests/test_gelu_grad_method.py`
+verifies (1) backward-compat (sigmoid path bit-identical to legacy),
+(2) tanh_exact φ' matches autograd, (3) the two paths produce different
+outputs on the same weights. Run via bsub when iterating on the model.
+
+---
+
+
 ### MoE hyperparam search (queued for later)
 Goals: find the best Boltzmann MoE config at h1 scale (145M, d=768, K=4, K=8, K=16)
 **without** consuming so many GPUs at once that we get deprioritized in the queue.
