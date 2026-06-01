@@ -19,6 +19,19 @@ experiments/energy-inference/results/**
 !experiments/energy-inference/results/**/*.pdf
 !experiments/energy-inference/results/**/harness_*.json
 
+# Boltz-MoE results dir (same rule as energy-inference results above)
+experiments/boltzmann-moe/results/**
+!experiments/boltzmann-moe/results/**/
+!experiments/boltzmann-moe/results/**/*.pdf
+!experiments/boltzmann-moe/results/**/harness_*.json
+
+# Boltz-MoE runtime artifacts (torchrun temp dirs, watchdog runtime state, ...)
+experiments/boltzmann-moe/tmp*/
+experiments/boltzmann-moe/torchelastic_*/
+experiments/boltzmann-moe/torchinductor_*/
+experiments/boltzmann-moe/scripts/watchdog/watchdog.log
+experiments/boltzmann-moe/scripts/watchdog/watchdog_state.txt
+
 # LaTeX build artifacts
 *.aux
 *.out
