@@ -202,3 +202,112 @@ print("Saved fig_ld_gsm8k_vs_tokens.pdf")
 plt.close()
 
 print(f"\nAll figures saved to {NIMA}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Figure 4: 4-panel combined — loss, velocity, grad norm, GSM8K (all vs tokens)
+# ════════════════════════════════════════════════════════════════════════════
+import re as _re
+
+def load_gnorms(glob_pattern):
+    gnorms = {}
+    for f in LOGS.glob(glob_pattern):
+        for m in _re.finditer(
+            r'step = (\d+), train-loss = [0-9.]+, train-lm_loss = [0-9.]+, train-grad_norm = ([0-9.]+)',
+            f.read_text(errors='replace')):
+            s, g = int(m.group(1)), float(m.group(2))
+            if s not in gnorms: gnorms[s] = g
+    return gnorms
+
+raw_gn = {
+    'V9 GPT':    load_gnorms('scale_v9_gpt_24x1_d1024_126b_*.stderr'),
+    'R3 Hybrid': load_gnorms('scale_r3_11gpt_1egpt6x_d1280_63b_*.stderr'),
+    'H3 Hybrid': load_gnorms('scale_h3_8gpt_4egpt_d1280_63b_*.stderr'),
+}
+
+# Add R3 @60k final result
+GSM_KNOWN[('R3 Hybrid', 31.5)] = 1.29
+
+fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+(ax_loss, ax_vel), (ax_gn, ax_gsm) = axes
+
+PLATEAU_KW = dict(alpha=0.15, color='#1976D2')
+VLINE_KW   = dict(color='#333', lw=1.5, ls=':', alpha=0.8)
+
+for name, losses in raw.items():
+    if not losses: continue
+    st = STYLES[name]
+    xs, ys = smooth(None, losses, window_tok_b=0.3)
+    if len(xs) < 10: continue
+    ax_loss.plot(xs, ys, c=st['c'], ls=st['ls'], lw=st['lw'], label=st['label'], alpha=0.9)
+
+ax_loss.set_xscale('log'); ax_loss.set_yscale('log')
+ax_loss.axvspan(to_tokens(10000), to_tokens(26000), **PLATEAU_KW)
+ax_loss.axvline(to_tokens(26000), **VLINE_KW)
+ax_loss.set_xlabel('Tokens (B)', fontsize=10); ax_loss.set_ylabel('Loss', fontsize=10)
+ax_loss.set_title('Training loss (log-log)', fontsize=10, fontweight='bold')
+ax_loss.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x,_: f'{x:.0f}'))
+ax_loss.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y,_: f'{y:.2f}'))
+ax_loss.grid(True, alpha=0.2, which='both'); ax_loss.legend(fontsize=8)
+
+for name, losses in raw.items():
+    if not losses: continue
+    st = STYLES[name]
+    xs, ys = smooth(None, losses, window_tok_b=0.5)
+    if len(xs) < 30: continue
+    vel = log_velocity(xs, ys, window=30)
+    vel_s = uniform_filter1d(vel, size=40, mode='nearest')
+    mask = np.isfinite(vel_s) & (xs > 1.0)
+    ax_vel.plot(xs[mask], vel_s[mask], c=st['c'], ls=st['ls'], lw=st['lw'], alpha=0.9)
+
+ax_vel.axhline(-0.05, color='#333', lw=1.8, ls='--', alpha=0.8, label='slope=−0.05')
+ax_vel.axvspan(to_tokens(10000), to_tokens(26000), **PLATEAU_KW, label='Plateau')
+ax_vel.axvline(to_tokens(26000), **VLINE_KW)
+ax_vel.set_xscale('log'); ax_vel.set_ylim(-0.22, 0.02)
+ax_vel.set_xlabel('Tokens (B)', fontsize=10)
+ax_vel.set_ylabel(r'$d\log L/d\log N$', fontsize=10)
+ax_vel.set_title('Log-log velocity', fontsize=10, fontweight='bold')
+ax_vel.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x,_: f'{x:.0f}'))
+ax_vel.grid(True, alpha=0.2); ax_vel.legend(fontsize=8)
+
+for name, gnorms in raw_gn.items():
+    if not gnorms: continue
+    st = STYLES[name]
+    pts = sorted((to_tokens(s), g) for s,g in gnorms.items() if s > 0)
+    xs2 = np.array([p[0] for p in pts])
+    ys2 = np.array([p[1] for p in pts])
+    ys2_s = uniform_filter1d(ys2, size=max(3,len(ys2)//80), mode='nearest')
+    ax_gn.plot(xs2, ys2_s, c=st['c'], ls=st['ls'], lw=st['lw'], label=st['label'], alpha=0.9)
+
+ax_gn.axvspan(to_tokens(10000), to_tokens(26000), **PLATEAU_KW)
+ax_gn.axvline(to_tokens(26000), **VLINE_KW)
+ax_gn.set_xscale('log')
+ax_gn.set_xlabel('Tokens (B)', fontsize=10); ax_gn.set_ylabel('Gradient norm', fontsize=10)
+ax_gn.set_title('Gradient norm vs tokens', fontsize=10, fontweight='bold')
+ax_gn.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x,_: f'{x:.0f}'))
+ax_gn.grid(True, alpha=0.2); ax_gn.legend(fontsize=8)
+
+for name, st in STYLES.items():
+    pts = sorted((tok, gsm) for (n,tok),gsm in GSM_KNOWN.items() if n == name)
+    if len(pts) < 1: continue
+    xs3 = [p[0] for p in pts]; ys3 = [p[1] for p in pts]
+    ax_gsm.plot(xs3, ys3, c=st['c'], ls=st['ls'], lw=1.8, marker='o', ms=7,
+                markerfacecolor='white', markeredgewidth=2, label=st['label'], alpha=0.9)
+    for x,y in zip(xs3,ys3):
+        ax_gsm.annotate(f'{y:.2f}%', (x,y), textcoords='offset points',
+                        xytext=(3,5), fontsize=7, color=st['c'])
+
+ax_gsm.axvspan(to_tokens(10000), to_tokens(26000), **PLATEAU_KW, label='Plateau')
+ax_gsm.set_xscale('log')
+ax_gsm.set_xlabel('Tokens (B)', fontsize=10); ax_gsm.set_ylabel('GSM8K (%)', fontsize=10)
+ax_gsm.set_title('GSM8K vs tokens (log-log x)', fontsize=10, fontweight='bold')
+ax_gsm.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x,_: f'{x:.0f}'))
+ax_gsm.grid(True, alpha=0.2); ax_gsm.legend(fontsize=8)
+
+fig.suptitle('Training dynamics: loss descent, velocity, gradient norm, and GSM8K vs tokens\n'
+             'Blue band = plateau phase (~5–14B tokens)',
+             fontsize=11, fontweight='bold', y=1.01)
+plt.tight_layout()
+plt.savefig(NIMA/'fig_ld_combined.pdf', bbox_inches='tight', dpi=150)
+print("Saved fig_ld_combined.pdf")
+plt.close()
