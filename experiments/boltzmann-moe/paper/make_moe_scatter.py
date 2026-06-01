@@ -38,6 +38,9 @@ MODELS = [
     ("h1_gptmoe_boltz",     145,  68, 0.486, 35.5, 1.86, 7.86, "switch+boltz", "H-series"),
     # Sparse top-2 of 4: idealized active params reduced ~25% vs soft.
     ("h1_boltz_topk2",      145,  50, 0.4856, 36.37, 1.86, 7.86, "boltzmann-sparse", "H-series"),
+    # B4 rerun under current code: deep iso-param BoltzMoE 16x1024, FFN-heavy but
+    # competitive after the 1/sqrt(I_e) routing-scale fix.
+    ("B4 rerun",            407, 330, 0.4935, 38.04, 2.20, 7.86, "boltzmann",    "B-series"),
     # 580M Boltzmann MoE (K=8 × I_e=4096, d=1536) — training to 65B.
     ("580M @ 7.3B",         679, 679, 0.5137, 30.4, 2.39, 7.34, "boltzmann",   "H-series"),
     ("580M @ 9.4B",         679, 679, 0.5238, 28.97, 2.12, 9.43, "boltzmann",   "H-series"),
@@ -55,6 +58,7 @@ SHORT_NAMES = {
     "h1_boltz_fullsize":   "h1 boltz-full",
     "h1_gptmoe_boltz":     "h1 gpt+boltz",
     "h1_boltz_topk2":      "h1 boltz-top2",
+    "B4 rerun":            "B4 rerun",
     "580M @ 7.3B":         "580M @ 7.3B",
     "580M @ 9.4B":         "580M @ 9.4B",
 }
@@ -67,8 +71,8 @@ COLORS = {
     "topk":             "#e07b20",
     "switch+boltz":     "#8e44ad",
 }
-SERIES_MARKERS = {"baseline": "o", "H-series": "*"}
-SERIES_SIZES   = {"baseline": 70,  "H-series": 130}
+SERIES_MARKERS = {"baseline": "o", "H-series": "*", "B-series": "s"}
+SERIES_SIZES   = {"baseline": 70,  "H-series": 130, "B-series": 80}
 
 
 def _get_color(routing, series):
