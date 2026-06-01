@@ -48,10 +48,11 @@ def make(method: str) -> BoltzmannMoE_Energy_MLP:
 
 m_sig  = make("sigmoid")
 m_tanh = make("tanh_exact")
-# Force both modules to share weights so the only difference is the flag.
+m_erf  = make("erf_exact")
+# Force all modules to share weights so the only difference is the flag.
 with torch.no_grad():
-    m_tanh.W1.weight.copy_(m_sig.W1.weight)
-    m_tanh.W2.weight.copy_(m_sig.W2.weight)
+    m_tanh.W1.weight.copy_(m_sig.W1.weight); m_tanh.W2.weight.copy_(m_sig.W2.weight)
+    m_erf.W1.weight.copy_(m_sig.W1.weight);  m_erf.W2.weight.copy_(m_sig.W2.weight)
 
 x = torch.randn(N, D, device=device, dtype=dtype) * 0.5
 
@@ -80,7 +81,7 @@ diff_bc = (legacy - via_flag).abs().max().item()
 print(f"[test 1] backward-compat (sigmoid path matches legacy): max abs diff = {diff_bc:.2e}")
 assert diff_bc < 1e-6, f"Backward-compat broken: {diff_bc}"
 
-# ── Test 2: tanh_exact φ' = d/dx φ via autograd ──────────────────────────────
+# ── Test 2a: tanh_exact φ' = d/dx (tanh-approx GELU) via autograd ────────────
 y = torch.randn(N, D, device=device, dtype=dtype, requires_grad=True)
 c = (2.0 / math.pi) ** 0.5
 t = torch.tanh(c * y)
@@ -88,17 +89,40 @@ phi_y = 0.5 * y * (1.0 + t)             # the tanh-approx GELU
 analytic_phi_prime = 0.5 * (1.0 + t) + 0.5 * c * y * (1.0 - t * t)
 autograd_phi_prime = torch.autograd.grad(phi_y.sum(), y, create_graph=False)[0]
 diff_ag = (analytic_phi_prime - autograd_phi_prime).abs().max().item()
-print(f"[test 2] tanh_exact φ' matches autograd: max abs diff = {diff_ag:.2e}")
+print(f"[test 2a] tanh_exact φ' matches autograd: max abs diff = {diff_ag:.2e}")
 assert diff_ag < 1e-6, f"tanh_exact φ' is not the true derivative: {diff_ag}"
 
-# ── Test 3: the two flag values produce DIFFERENT outputs ─────────────────────
+# ── Test 2b: erf_exact φ' = d/dx F.gelu via autograd ─────────────────────────
+y = torch.randn(N, D, device=device, dtype=dtype, requires_grad=True)
+inv_sqrt_2 = 0.7071067811865476
+inv_sqrt_2pi = 0.3989422804014327
+phi_y_erf = F.gelu(y)                      # exact GELU (PyTorch default = erf-based)
+analytic_phi_prime_erf = 0.5 * (1.0 + torch.erf(y * inv_sqrt_2)) \
+                       + y * torch.exp(-0.5 * y * y) * inv_sqrt_2pi
+autograd_phi_prime_erf = torch.autograd.grad(phi_y_erf.sum(), y, create_graph=False)[0]
+diff_ag_erf = (analytic_phi_prime_erf - autograd_phi_prime_erf).abs().max().item()
+print(f"[test 2b] erf_exact φ' matches autograd of F.gelu: max abs diff = {diff_ag_erf:.2e}")
+assert diff_ag_erf < 1e-5, f"erf_exact φ' is not the true derivative of F.gelu: {diff_ag_erf}"
+
+# ── Test 3: all three flag values produce DIFFERENT outputs ──────────────────
 with torch.no_grad():
     out_sig  = m_sig(x)
     out_tanh = m_tanh(x)
-diff_modes = (out_sig - out_tanh).abs().max().item()
-rel_modes  = diff_modes / (out_sig.abs().max().item() + 1e-9)
-print(f"[test 3] sigmoid ≠ tanh_exact: max abs diff = {diff_modes:.2e}  (rel {rel_modes:.2e})")
-assert diff_modes > 1e-3, "Flag has no observable effect — wiring broken"
+    out_erf  = m_erf(x)
+ref = out_sig.abs().max().item() + 1e-9
+diff_st = (out_sig - out_tanh).abs().max().item();  rel_st = diff_st / ref
+diff_se = (out_sig - out_erf).abs().max().item();   rel_se = diff_se / ref
+diff_te = (out_tanh - out_erf).abs().max().item();  rel_te = diff_te / ref
+print(f"[test 3] sigmoid vs tanh_exact:  max abs diff = {diff_st:.2e}  (rel {rel_st:.2e})")
+print(f"[test 3] sigmoid vs erf_exact:   max abs diff = {diff_se:.2e}  (rel {rel_se:.2e})")
+print(f"[test 3] tanh_exact vs erf_exact: max abs diff = {diff_te:.2e}  (rel {rel_te:.2e})")
+assert diff_st > 1e-3, "sigmoid vs tanh_exact: no observable effect"
+assert diff_se > 1e-3, "sigmoid vs erf_exact: no observable effect"
+# tanh_exact and erf_exact use F.gelu vs tanh-approx GELU, which differ by <1%
+# at small random weights — they're SUPPOSED to be very close. Just sanity-check
+# they aren't byte-identical (would mean the branch isn't actually taken).
+assert diff_te > 0, "tanh_exact vs erf_exact: byte-identical (branch not selected?)"
+print(f"[test 3] tanh_exact ≈ erf_exact at random init (diff {rel_te:.2e}): expected — F.gelu ≈ tanh-approx GELU at small x")
 
 # ── Test 4: gradient check — does training produce a valid gradient under tanh_exact? ──
 m_tanh.train()

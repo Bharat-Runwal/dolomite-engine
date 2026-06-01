@@ -321,8 +321,9 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         assert intermediate_size % n_experts == 0, (
             f"intermediate_size ({intermediate_size}) must be divisible by n_experts ({n_experts})"
         )
-        assert gelu_grad_method in ("sigmoid", "tanh_exact"), (
-            f"gelu_grad_method must be 'sigmoid' or 'tanh_exact', got {gelu_grad_method}"
+        assert gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact"), (
+            f"gelu_grad_method must be one of 'sigmoid' / 'tanh_exact' / 'erf_exact', "
+            f"got {gelu_grad_method}"
         )
 
         self.hidden_size = hidden_size
@@ -369,16 +370,32 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         W1_e = self.W1.weight.view(self.n_experts, self.expert_I, self.hidden_size)
         W2_e = self.W2.weight.view(self.n_experts, self.expert_I, self.hidden_size)
 
-        # Activation φ and its derivative φ'.
-        # Two branches kept for backward compatibility (existing checkpoints trained
-        # under the "sigmoid" path):
-        #   sigmoid    : φ = F.gelu(W1x); φ' ≈ sigmoid(c·W1x)·0.5  (LEGACY default;
-        #                this φ' is uniformly half of the true GELU′ magnitude — not
-        #                a faithful derivative. Kept as default so loaded checkpoints
-        #                produce identical outputs.)
-        #   tanh_exact : matched φ = 0.5·W1x·(1+tanh(c·W1x)) and exact φ' for that φ.
-        #                Self-consistent ∂E/∂h. New runs should opt into this.
-        if self.gelu_grad_method == "tanh_exact":
+        # Activation φ and its derivative φ'. Three branches:
+        #
+        #   sigmoid    : φ = F.gelu(W1x);  φ' ≈ sigmoid(c·W1x)·0.5
+        #                LEGACY default. φ' is uniformly half of the true gelu'
+        #                magnitude and is not a faithful derivative of F.gelu.
+        #                Kept as default so all pre-2026-06 checkpoints reproduce
+        #                bit-identically.
+        #
+        #   erf_exact  : φ = F.gelu(W1x);  φ' = analytic d/dx F.gelu(x)
+        #                = 0.5·(1 + erf(x/√2)) + x·exp(−x²/2)/√(2π)
+        #                Same φ shape as legacy (so the energy landscape is
+        #                identical to sigmoid), but the gradient term2 is the
+        #                true derivative — isolates the magnitude-of-φ' question
+        #                from any φ-shape change.
+        #
+        #   tanh_exact : φ = 0.5·W1x·(1+tanh(c·W1x));
+        #                φ' = 0.5·(1+tanh(c·W1x)) + 0.5·c·W1x·(1−tanh²(c·W1x))
+        #                Self-consistent matched pair using tanh-approx GELU
+        #                (φ shape ≠ F.gelu). Tested at h1 scale; lost −2.2pp avg.
+        if self.gelu_grad_method == "erf_exact":
+            phi = F.gelu(W1x)
+            inv_sqrt_2 = 0.7071067811865476           # 1/√2
+            inv_sqrt_2pi = 0.3989422804014327         # 1/√(2π)
+            phi_prime = 0.5 * (1.0 + torch.erf(W1x * inv_sqrt_2)) \
+                      + W1x * torch.exp(-0.5 * W1x * W1x) * inv_sqrt_2pi
+        elif self.gelu_grad_method == "tanh_exact":
             t = torch.tanh(self._SIGMOID_SCALE * W1x)
             phi = 0.5 * W1x * (1.0 + t)                                  # tanh-approx GELU
             phi_prime = 0.5 * (1.0 + t) + 0.5 * self._SIGMOID_SCALE * W1x * (1.0 - t * t)

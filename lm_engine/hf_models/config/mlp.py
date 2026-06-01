@@ -111,10 +111,14 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
     #   "sigmoid"    : phi' = sigmoid(√(2/π) · W1 h) × 0.5      (LEGACY default; not the
     #                  derivative of F.gelu and uniformly half the true GELU' magnitude;
     #                  partly absorbed by W2's learned scale).
+    #   "erf_exact"  : phi  = F.gelu(W1 h) (unchanged), phi' = analytic d/dx F.gelu(x)
+    #                  = 0.5·(1 + erf(x/√2)) + x·exp(-x²/2)/√(2π). Cleanest A/B
+    #                  vs sigmoid: only the φ' magnitude/shape changes, φ identical.
     #   "tanh_exact" : matched φ = 0.5 W1 h (1 + tanh(c · W1 h)) and exact φ' for that φ
-    #                  (c = √(2/π)). Self-consistent ∂E/∂h, marginally cheaper.
+    #                  (c = √(2/π)). Self-consistent ∂E/∂h. Tested at h1 scale;
+    #                  lost −2.2pp avg vs sigmoid (negative result).
     # Default = "sigmoid" so existing checkpoints (V1, h1_*, B-series, 580M) load and
-    # produce identical outputs. New runs should set this to "tanh_exact".
+    # produce identical outputs.
     gelu_grad_method: str = "sigmoid"
 
     def model_post_init(self, __context: Any) -> None:
@@ -125,8 +129,9 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
             f"n_experts ({self.n_experts})"
         )
         assert self.temperature > 0, "temperature must be positive"
-        assert self.gelu_grad_method in ("sigmoid", "tanh_exact"), (
-            f"gelu_grad_method must be 'sigmoid' or 'tanh_exact', got {self.gelu_grad_method}"
+        assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact"), (
+            f"gelu_grad_method must be one of 'sigmoid' / 'tanh_exact' / 'erf_exact', "
+            f"got {self.gelu_grad_method}"
         )
 
 
