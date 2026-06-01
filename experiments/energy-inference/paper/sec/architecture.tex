@@ -94,6 +94,19 @@ $\propto \sum_k n_k \times (4d^2 + 3d \cdot d_{\mathrm{int}})$.
 
 \subsection{Energy Descent Output (EDesc, V28, V32)}
 
+\textcolor{red}{\textbf{[CODE FIX NEEDED]}\;
+The intent of EDesc is ``true-gradient descent'': energy heads should use
+$W_{Q,h}^\top [A_h K_h]_t$ as their output (as EGPT and EGrad do), then subtract
+the combined output.
+However, the current implementation uses \texttt{sequence\_mixer\_type: mixed\_head\_energy\_descent},
+which calls \texttt{MixedHeadAttention.forward()} — the same forward pass as EMixH —
+routing all heads through the \emph{shared} $W_O$ projection instead of $W_{Q,h}^\top$.
+As a result, V28/V32 EDesc energy heads do \textbf{not} compute the true energy gradient.
+To fix: replace the energy-head forward with \texttt{EnergyGradMixedHeadAttention} and set
+\texttt{energy\_proj\_type: identity} so the combined output is subtracted
+(as in Eq.~\ref{eq:edesc_update}).
+Until fixed, EDesc results are equivalent to a subtractive EMixH, not true-gradient descent.}
+
 EDesc uses the mixed-head output (Eq.~\ref{eq:mixed_update}) as a gradient direction
 and applies a \emph{subtractive} update, with no separate projection matrix
 (\texttt{energy\_proj\_type: identity}):
