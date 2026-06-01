@@ -246,7 +246,18 @@ def load_checkpoint_for_training(
 
     iteration = args.load_args.iteration
     if iteration is None:
-        iteration = json.load(open(_get_latest_checkpointed_iterations_path(args.load_args.load_path), "r"))[
+        iter_path = _get_latest_checkpointed_iterations_path(args.load_args.load_path)
+        if not os.path.exists(iter_path):
+            # First fresh-start training run: load_args.load_path is set (so the
+            # config can resume cleanly on later restarts) but no checkpoint
+            # exists yet. Treat as "nothing to load" instead of crashing.
+            log_rank_0(
+                logging.INFO,
+                f"No checkpoint at {args.load_args.load_path} (file missing: {iter_path}); "
+                f"starting fresh from iteration 0",
+            )
+            return 0, {}, None
+        iteration = json.load(open(iter_path, "r"))[
             "latest_checkpointed_iteration"
         ]
 
