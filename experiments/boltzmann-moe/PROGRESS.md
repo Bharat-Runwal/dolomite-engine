@@ -168,6 +168,17 @@ is the gsm8k summary used in the scatter plot.
 | **580M @ step 14k (7.34B tok)** | **679M** | 0.514 | 30.39 | 0.83% | 1.90% | **2.88%** | **2.39%** |
 | **580M @ step 18k (9.43B tok)** | **679M** | 0.524 | 28.97 | 1.14% | 1.97% | 2.27% | 2.12% |
 | **580M @ step 30k (15.73B tok)** | **679M** | **0.537** | **26.84** | 1.67% | 1.67% | 2.12% | 1.90% |
+| h1_boltz_fullsize_tanhexact (A/B fail) | 145M | 0.479 | 39.90 | 0.53% | 1.97% | 2.12% | 2.05% |
+
+### gelu_grad_method A/B test (2026-06-01) — negative result
+
+Hypothesized that the legacy `phi' = sigmoid(c·x)·0.5` (half-magnitude approx)
+was a bug worth fixing. Trained `h1_boltz_fullsize_tanhexact` with
+`gelu_grad_method: tanh_exact` (matched φ = 0.5x(1+tanh(c·x)) and its analytic
+derivative). At 30k steps it lost **−2.20pp avg / +3.42 PPL** vs the sigmoid
+baseline. Default kept at `sigmoid`. Two confounded changes in tanh_exact (φ
+shape AND φ' magnitude); follow-up A/B with `erf_exact` (keep F.gelu shape,
+fix only φ' magnitude) queued in TODO.md.
 
 **Key lesson**: The h1_topk_egpt_moe works because:
 1. The GPT prefix processes input into rich representations first

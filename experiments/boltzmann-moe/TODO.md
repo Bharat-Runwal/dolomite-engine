@@ -2,6 +2,30 @@
 
 ## After Mon 2026-06-01 talk
 
+### A/B test: tanh_exact φ' (DONE — surprising negative result, follow-up needed)
+
+**Result (2026-06-01)**: `tanh_exact` lost decisively to `sigmoid` at h1_boltz_fullsize scale, 30k steps, 7.86B tokens:
+
+| | sigmoid (control) | tanh_exact (treatment) | Δ |
+|---|---:|---:|---:|
+| Avg | 50.10 | 47.90 | **−2.20pp** |
+| WikiPPL | 36.48 | 39.90 | **+3.42** |
+| flex-avg | 2.12 | 2.05 | −0.07 |
+
+The fix was supposed to make φ' a faithful derivative of φ. Instead the model trained a worse representation. Two confounded changes:
+  (a) φ shape switched from `F.gelu` (exact erf-based) to tanh-approx GELU
+  (b) φ' magnitude doubled (legacy was uniformly half the true gelu')
+
+**Default unchanged: keep `gelu_grad_method: sigmoid`.**
+
+**Next A/B (cheap, isolates hypothesis (b))**: keep `phi = F.gelu` and compute `phi' = 0.5·(1 + erf(x/√2)) + x·exp(−x²/2)/√(2π)` (analytic exact derivative of `F.gelu`). One extra erf+exp vs current; still sub-millisecond per layer at our scale. Add a third `gelu_grad_method` value: `"erf_exact"`. Run h1_boltz_fullsize_erfexact and compare to both sigmoid and tanh_exact.
+
+Hypothesis to test: if `erf_exact` beats `tanh_exact` and matches `sigmoid`, the issue is the φ-shape change (F.gelu shape matters). If `erf_exact` ≈ `tanh_exact` (both worse than sigmoid), the legacy half-magnitude φ' was acting as beneficial gradient damping and we shouldn't "fix" it.
+
+Old plan below preserved for reference:
+
+---
+
 ### A/B test: tanh_exact φ' (HIGH PRIORITY, cheap)
 
 The legacy code uses `φ' ≈ sigmoid(c·x) · 0.5` paired with `φ = F.gelu(x)` —
