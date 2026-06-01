@@ -64,6 +64,15 @@ STYLES = {
     ("410m_recgpt",   "WOV"):  dict(color="#1a5276", ls="--", marker="s", lw=2.0),
     ("v71_egpt_dual", "J"):    dict(color="#e67e22", ls="-",  marker="^", lw=1.5),
     ("v71_egpt_dual", "PiJ"):  dict(color="#d35400", ls="--", marker="v", lw=1.5),
+    # Update-rule ablation (d=768, 1.3B tok)
+    ("v1_egpt_12x1", "J"):    dict(color="#e74c3c", ls="-",  marker="o", lw=2.0),
+    ("v1_egpt_12x1", "PiJ"):  dict(color="#c0392b", ls="--", marker="s", lw=2.0),
+    ("v54_par_gpt",  "J"):    dict(color="#2980b9", ls="-",  marker="o", lw=2.0),
+    ("v54_par_gpt",  "PiJ"):  dict(color="#1a5276", ls="--", marker="s", lw=2.0),
+    ("v12_seq_gpt",  "J"):    dict(color="#27ae60", ls="-",  marker="^", lw=2.0),
+    ("v12_seq_gpt",  "WOV"):  dict(color="#1e8449", ls="--", marker="v", lw=2.0),
+    ("v56_egpt_1x12","J"):    dict(color="#e67e22", ls="-",  marker="D", lw=2.0),
+    ("v56_egpt_1x12","PiJ"):  dict(color="#d35400", ls="--", marker="D", lw=2.0),
     # Token-length study
     ("r2_step30k",   "J"):    dict(color="#8e44ad", ls="-",  marker="o", lw=2.0),
     ("r2_step30k",   "PiJ"):  dict(color="#6c3483", ls="--", marker="s", lw=2.0),

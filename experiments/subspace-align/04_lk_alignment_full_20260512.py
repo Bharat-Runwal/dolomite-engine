@@ -55,6 +55,15 @@ MODELS = {
     # H1 base for reference (no Rayleigh, 7.86B tokens)
     "h1_base":     (BASE/"h1_6gpt_1egpt6x_d768/unsharded", True,
                     "H1 noRay@7.86Btok",      "6GPT+1×6, d=768, 7.86B tok"),
+    # Update-rule ablation: all d=768, 1.31B tokens, 12 total iterations
+    "v1_egpt_12x1":  (BASE/"v1_12x1_d768_lr2e3/unsharded", True,
+                      "EGPT 12×1",            "12 EGPT blocks×1iter, d=768, 1.3Btok"),
+    "v54_par_gpt":   (BASE/"v54_parallel_gpt_12x1_d768_lr2e3/unsharded", False,
+                      "ParGPT 12×1",          "12 ParGPT blocks×1iter, d=768, 1.3Btok"),
+    "v12_seq_gpt":   (BASE/"v12_gpt_6x2_d768_lr2e3/unsharded", False,
+                      "SeqGPT 6×2",           "6 SeqGPT blocks×2iter, d=768, 1.3Btok"),
+    "v56_egpt_1x12": (BASE/"v56_egpt_1x12_d768_lr2e3/unsharded", True,
+                      "EGPT 1×12",            "1 EGPT block×12iter, d=768, 1.3Btok"),
 }
 
 K_VALUES = [512, 128, 32]
