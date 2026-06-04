@@ -26,6 +26,8 @@ import matplotlib.patches as mpatches
 # was unfair to EGPT-style models that emit non-#### formats.
 MODELS = [
     ("V9 GPT d=1024",       354, 251, 0.513, 29.8, 2.69, 7.86, "none",         "baseline"),
+    # Same architecture as V9 GPT, scaled to 126B tokens (16× longer training).
+    ("scale_v9 GPT @ 126B", 354, 251, 0.5413, 26.17, 1.82, 126.0, "none",       "baseline"),
     ("V0 GPT d=768",        162,  85, 0.479, 38.3, 2.08, 7.86, "none",         "baseline"),
     ("V1-400M EGPT d=1024", 354, 251, 0.494, 38.6, 1.93, 7.86, "none",         "baseline"),
     ("V1 EGPT d=768",       143,  66, 0.481, 47.7, 1.97, 7.86, "none",         "baseline"),
@@ -55,6 +57,7 @@ MODELS = [
 
 SHORT_NAMES = {
     "V9 GPT d=1024":       "V9 GPT",
+    "scale_v9 GPT @ 126B": "scale_v9 GPT @126B",
     "V1-400M EGPT d=1024": "V1-400M EGPT",
     "V1 EGPT d=768":       "V1 EGPT",
     "V0 GPT d=768":        "V0 GPT-160M",
