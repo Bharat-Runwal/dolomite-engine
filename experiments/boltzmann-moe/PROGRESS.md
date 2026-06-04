@@ -169,16 +169,49 @@ is the gsm8k summary used in the scatter plot.
 | **580M @ step 18k (9.43B tok)** | **679M** | 0.524 | 28.97 | 1.14% | 1.97% | 2.27% | 2.12% |
 | **580M @ step 30k (15.73B tok)** | **679M** | **0.537** | **26.84** | 1.67% | 1.67% | 2.12% | 1.90% |
 | h1_boltz_fullsize_tanhexact (A/B fail) | 145M | 0.479 | 39.90 | 0.53% | 1.97% | 2.12% | 2.05% |
+| h1_boltz_fullsize_erfexact (A/B fail) | 145M | 0.488 | 39.45 | 0.45% | 1.59% | 1.74% | 1.67% |
+| **h1_boltz_fullsize_tanhexact + rep=0** | 145M | **0.495** | 39.42 | 0.38% | 1.59% | 2.27% | 1.93% |
+| h2_6gpt_2egpt6x_boltz (2 EGPT blocks) | 155M | 0.487 | 37.71 | 0.15% | 1.90% | 1.59% | 1.74% |
 
-### gelu_grad_method A/B test (2026-06-01) — negative result
+### gelu_grad_method A/B test (2026-06-01..02) — phi' magnitude is the issue, not phi shape
 
 Hypothesized that the legacy `phi' = sigmoid(c·x)·0.5` (half-magnitude approx)
-was a bug worth fixing. Trained `h1_boltz_fullsize_tanhexact` with
-`gelu_grad_method: tanh_exact` (matched φ = 0.5x(1+tanh(c·x)) and its analytic
-derivative). At 30k steps it lost **−2.20pp avg / +3.42 PPL** vs the sigmoid
-baseline. Default kept at `sigmoid`. Two confounded changes in tanh_exact (φ
-shape AND φ' magnitude); follow-up A/B with `erf_exact` (keep F.gelu shape,
-fix only φ' magnitude) queued in TODO.md.
+was a bug worth fixing. Trained 4 variants of h1_boltz_fullsize at 30k steps,
+7.86B tokens. Headline: the legacy half-magnitude phi' is empirically better
+than the "correct" full-magnitude derivative when paired with strong repulsion.
+
+| variant | gelu_grad | rep λ | avg | PPL | flex-avg |
+|---|---|---:|---:|---:|---:|
+| sigmoid (control, legacy) | sigmoid·0.5 | 0.1 | **50.10** | **36.48** | 2.12 |
+| tanh_exact + rep=0 | tanh + analytic | **0.0** | **49.52** | 39.42 | 1.93 |
+| erf_exact | F.gelu + analytic | 0.1 | 48.77 | 39.45 | 1.67 |
+| tanh_exact | tanh + analytic | 0.1 | 47.90 | 39.90 | 2.05 |
+
+Findings:
+1. **erf_exact ≈ tanh_exact** (48.77 vs 47.90) — F.gelu and tanh-approx GELU
+   give functionally equivalent results (test confirmed they differ <0.03% rel
+   at random init). So the issue is the **doubled phi' magnitude**, not the
+   phi shape change.
+2. **tanh_exact + rep=0 recovers most of the gap** (49.52 vs 50.10 baseline,
+   only −0.58pp) — confirming the **term2-cancellation hypothesis**: with strong
+   repulsion forcing experts to anti-correlate AND full-magnitude phi', term2
+   contributions from different experts partially cancel when summed. Without
+   repulsion, less cancellation pressure.
+3. The "legacy half-magnitude phi' + strong repulsion" combination falls into
+   a sweet spot of effective gradient + low cancellation that the strict
+   "correct" gradient overshoots.
+
+Default unchanged (`sigmoid`). For new BoltzMoE runs, the recommended
+combination is either (a) keep legacy sigmoid + strong repulsion (current
+default), or (b) use erf_exact/tanh_exact with rep=0 or weak rep (≤0.01).
+
+### h2 (2 EGPT blocks × 6 iters) vs h1 (1 EGPT × 6) — diminishing returns
+
+h2_6gpt_2egpt6x_boltz_d768 (155M, 18 effective layers via two distinct EGPT
+blocks each iterated 6× — vs h1's one block × 6 = 12 effective) trained 30k
+steps. Result: avg **48.71** / PPL **37.71** / flex-avg **1.74**, **worse** than
+h1_boltz_fullsize (50.10 / 36.48 / 2.12). Adding a second unique EGPT block
+doesn't help at this scale; the simpler h1 architecture is preferred.
 
 **Key lesson**: The h1_topk_egpt_moe works because:
 1. The GPT prefix processes input into rich representations first

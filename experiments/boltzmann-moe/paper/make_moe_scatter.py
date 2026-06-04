@@ -41,6 +41,9 @@ MODELS = [
     # B4 rerun under current code: deep iso-param BoltzMoE 16x1024, FFN-heavy but
     # competitive after the 1/sqrt(I_e) routing-scale fix.
     ("B4 rerun",            407, 330, 0.4935, 38.04, 2.20, 7.86, "boltzmann",    "B-series"),
+    # h2: 6 GPT + 2 distinct EGPT blocks × 6 iters each (18 effective layers).
+    # Adds a second unique EGPT block to h1's pattern; lost to h1_boltz_fullsize.
+    ("h2_6gpt_2egpt6x",     155,  78, 0.4871, 37.71, 1.74, 7.86, "boltzmann",    "H-series"),
     # 580M Boltzmann MoE (K=8 × I_e=4096, d=1536) — training to 65B.
     ("580M @ 7.3B",         679, 679, 0.5137, 30.4, 2.39, 7.34, "boltzmann",   "H-series"),
     ("580M @ 9.4B",         679, 679, 0.5238, 28.97, 2.12, 9.43, "boltzmann",   "H-series"),
@@ -60,6 +63,7 @@ SHORT_NAMES = {
     "h1_gptmoe_boltz":     "h1 gpt+boltz",
     "h1_boltz_topk2":      "h1 boltz-top2",
     "B4 rerun":            "B4 rerun",
+    "h2_6gpt_2egpt6x":     "h2 (2 EGPT)",
     "580M @ 7.3B":         "580M @ 7.3B",
     "580M @ 9.4B":         "580M @ 9.4B",
     "580M @ 15.7B":        "580M @ 15.7B",
