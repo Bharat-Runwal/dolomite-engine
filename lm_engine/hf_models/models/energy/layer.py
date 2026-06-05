@@ -70,6 +70,37 @@ class PortHamiltonianProjection(nn.Module):
         return torch.matmul(self.L, self.L.T)
 
 
+class PSDAntisymmetricProjection(nn.Module):
+    """Π = S Sᵀ + (A - Aᵀ), full-rank S by default.
+
+    Energy descent guarantee under update h := h - Π ∇E:
+        Ė = -∇Eᵀ Π ∇E = -‖Sᵀ ∇E‖² ≤ 0.
+    The antisymmetric (A - Aᵀ) part rotates within iso-E contours and
+    contributes 0 to Ė. Used in the descent forward path:  h := h - proj(grad_E).
+
+    Single projection: one Π acts on the combined attn + scale_ff·ffwd
+    gradient (no split between attn / ffn streams).
+    """
+
+    def __init__(self, hidden_size: int, rank: int | None = None):
+        super().__init__()
+        self.rank = rank or hidden_size  # full rank by default
+        # Init at scale 1/sqrt(d) so SSᵀ ≈ I in expectation
+        self.S = nn.Parameter(torch.randn(hidden_size, self.rank) * (hidden_size ** -0.5))
+        self.A = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.01)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Π = SSᵀ + (A - Aᵀ);  return x @ Πᵀ  ≡  (Π @ xᵀ)ᵀ
+        Pi = torch.matmul(self.S, self.S.T) + (self.A - self.A.T)
+        return torch.matmul(x, Pi.T)
+
+    def get_S_part(self) -> torch.Tensor:
+        return torch.matmul(self.S, self.S.T)
+
+    def get_A_part(self) -> torch.Tensor:
+        return self.A - self.A.T
+
+
 class LowRankAntisymmetricProjection(nn.Module):
     """V3: Low-rank explicit rotation J = U V^T - V U^T with rank k << hidden_size.
 
@@ -558,6 +589,14 @@ class EnergyBlock(nn.Module):
             elif proj_type == "port_hamiltonian":
                 # V2: Rotation + dissipation via (J - R)
                 self.proj = PortHamiltonianProjection(hidden_size)
+            elif proj_type == "psd_anti":
+                # EGPT-RL: Π = SSᵀ + (A - Aᵀ), single projection on combined
+                # gradient. Symmetric part is PSD by construction → strict
+                # energy descent guarantee. Full-rank S unless energy_proj_rank
+                # is set explicitly.
+                rank_cfg = getattr(config, 'energy_proj_rank', None)
+                rank = rank_cfg if (rank_cfg is not None and rank_cfg > 0) else hidden_size
+                self.proj = PSDAntisymmetricProjection(hidden_size, rank=rank)
             elif proj_type == "low_rank_antisymmetric":
                 # V3: Low-rank antisymmetric J = U V^T - V U^T
                 rank = getattr(config, 'energy_proj_rank', 32)
@@ -757,7 +796,7 @@ class EnergyBlock(nn.Module):
             elif self.proj_type in ["antisymmetric", "port_hamiltonian", "low_rank_antisymmetric", "low_rank_port_hamiltonian"]:
                 grad_E = attn_out + self.scale_ff * ffwd_out
                 hidden_states = hidden_states + self.proj(grad_E)
-            # Descent projections (unconstrained, pos_scalar, identity): h := h - proj(grad_E)
+            # Descent projections (unconstrained, pos_scalar, identity, psd_anti): h := h - proj(grad_E)
             else:
                 grad_E = attn_out + self.scale_ff * ffwd_out
                 if self.apply_reileigh:
