@@ -16,6 +16,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+try:
+    from adjustText import adjust_text
+    _HAS_ADJUST_TEXT = True
+except ImportError:
+    _HAS_ADJUST_TEXT = False
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 # name, total_params_M, active_params_M, avg_acc, wiki_ppl, gsm8k_flex_avg,
@@ -95,17 +100,37 @@ def _get_color(routing, series):
     return COLORS["baseline"] if series == "baseline" else COLORS.get(routing, "#555555")
 
 
+def _wrap_label(s: str, max_len: int = 14) -> str:
+    """Break long labels onto two lines at a sensible separator (space, '+', '@')."""
+    if len(s) <= max_len:
+        return s
+    # Prefer to split at " @", " +", or last space before max_len
+    for sep in (" @ ", " + ", " "):
+        idx = s.rfind(sep, 0, max_len + 1)
+        if idx > 0:
+            return s[:idx].rstrip() + "\n" + s[idx + len(sep) - 1:].lstrip(" ")
+    return s
+
+
 def _draw_panel(ax, ykey, ylabel, xs):
     """Draw one scatter panel. xs = list of x-values (one per MODELS row)."""
+    texts = []
     for row, x in zip(MODELS, xs):
         name, _, _, _, _, _, _, routing, series = row
         y = row[ykey]
         c = _get_color(routing, series)
         ax.scatter(x, y, c=c, marker=SERIES_MARKERS[series], s=SERIES_SIZES[series],
                    edgecolors="white", linewidths=0.6, zorder=3)
-        ax.annotate(SHORT_NAMES[name], (x, y),
-                    textcoords="offset points", xytext=(5, 3),
-                    fontsize=7, color=c, zorder=4)
+        label = _wrap_label(SHORT_NAMES[name])
+        if _HAS_ADJUST_TEXT:
+            # adjust_text needs Text objects (not Annotation), placed at the data point.
+            t = ax.text(x, y, label, fontsize=6.5, color=c, zorder=4,
+                        ha="left", va="bottom")
+            texts.append(t)
+        else:
+            ax.annotate(label, (x, y),
+                        textcoords="offset points", xytext=(5, 3),
+                        fontsize=6.5, color=c, zorder=4)
 
     # Routing comparison: dashed line h1_topk ↔ h1_boltz_fullsize
     idx_tk  = next(i for i, r in enumerate(MODELS) if r[0] == "h1_topk_egpt_moe")
@@ -121,6 +146,20 @@ def _draw_panel(ax, ykey, ylabel, xs):
 
     ax.grid(True, alpha=0.25, linewidth=0.5)
     ax.tick_params(labelsize=8)
+
+    # Apply repulsion. Must be after axes limits are set, so the algorithm
+    # knows which directions are "free."
+    if _HAS_ADJUST_TEXT and texts:
+        adjust_text(
+            texts,
+            ax=ax,
+            arrowprops=dict(arrowstyle="-", color="#888888", lw=0.4, alpha=0.6),
+            expand_text=(1.05, 1.15),
+            expand_points=(1.2, 1.4),
+            force_text=(0.4, 0.6),
+            force_points=(0.3, 0.4),
+            only_move={"text": "xy", "points": "xy"},
+        )
 
 
 def _add_compact_legend(fig):
