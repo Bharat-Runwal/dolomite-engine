@@ -60,15 +60,16 @@ Layers 9-12  EGPT (4 distinct blocks, no recursion)
 | **580M @ step 76k** (current best) | 39.8B | **55.93** | **22.41** | 25.30 | 2.39 | new champion |
 | **580M @ step 30k** (pre-bug, clean) | 15.7B | 53.66 | 26.84 | 25.42 | 1.90 | trustworthy snapshot |
 | **scale_h3_boltz @ step 104k** | 54.5B | 55.63 | 22.67 | 25.03 | 2.39 | iso-params no-recursion sibling |
+| **scale_h3_boltz @ step 120k** | 62.9B | **56.94** | **21.89** | 26.11 | 1.74 | latest, +1.3pp avg over 104k |
 
 Both substantially beat baselines:
-- **scale_v9 GPT** 354M @ 126B: avg 54.1 / PPL 26.2
+- **scale_v9 GPT** 354M @ 100.7B: avg 54.1 / PPL 26.2
 - **scale_r3** 11gpt+1egpt6x (no MoE) 620M @ 63B: avg 54.6 / PPL 24.2
 - **scale_h3** 8gpt+4egpt (no MoE) 620M @ 63B: avg 54.2 / PPL 25.0
 
-580M @ 39.8B beats scale_v9 @ 126B by **+1.8pp avg, −3.8 PPL** at ⅓ the tokens.
+580M @ 39.8B beats scale_v9 @ 100.7B by **+1.8pp avg, −3.8 PPL** at ⅓ the tokens.
 
-## Where Boltz-MoE wins (vs scale_v9 GPT 354M @ 126B)
+## Where Boltz-MoE wins (vs scale_v9 GPT 354M @ 100.7B)
 
 | Task | scale_v9 | 580M @ 76k | Δ | family |
 |---|---:|---:|---:|---|

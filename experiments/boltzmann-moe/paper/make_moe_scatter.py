@@ -27,7 +27,7 @@ import matplotlib.patches as mpatches
 MODELS = [
     ("V9 GPT d=1024",       354, 251, 0.513, 29.8, 2.69, 7.86, "none",         "baseline"),
     # Same architecture as V9 GPT, scaled to 126B tokens (16× longer training).
-    ("scale_v9 GPT @ 126B", 354, 251, 0.5413, 26.17, 1.82, 126.0, "none",       "baseline"),
+    ("scale_v9 GPT @ 100.7B", 354, 251, 0.5413, 26.17, 1.82, 100.7, "none",     "baseline"),
     ("V0 GPT d=768",        162,  85, 0.479, 38.3, 2.08, 7.86, "none",         "baseline"),
     ("V1-400M EGPT d=1024", 354, 251, 0.494, 38.6, 1.93, 7.86, "none",         "baseline"),
     ("V1 EGPT d=768",       143,  66, 0.481, 47.7, 1.97, 7.86, "none",         "baseline"),
@@ -53,11 +53,12 @@ MODELS = [
     ("580M @ 39.8B",        679, 679, 0.5593, 22.41, 2.39, 39.83, "boltzmann", "H-series"),
     # scale_h3_boltz: 8gpt+4egpt no-recursion, d=1280, ~620M, BoltzMoE in EGPT.
     ("scale_h3_boltz @ 54.5B", 620, 620, 0.5563, 22.67, 2.39, 54.53, "boltzmann", "H-series"),
+    ("scale_h3_boltz @ 62.9B", 620, 620, 0.5694, 21.89, 1.74, 62.91, "boltzmann", "H-series"),
 ]
 
 SHORT_NAMES = {
     "V9 GPT d=1024":       "V9 GPT",
-    "scale_v9 GPT @ 126B": "scale_v9 GPT @126B",
+    "scale_v9 GPT @ 100.7B": "scale_v9 GPT @100B",
     "V1-400M EGPT d=1024": "V1-400M EGPT",
     "V1 EGPT d=768":       "V1 EGPT",
     "V0 GPT d=768":        "V0 GPT-160M",
@@ -74,7 +75,8 @@ SHORT_NAMES = {
     "580M @ 9.4B":         "580M @ 9.4B",
     "580M @ 15.7B":        "580M @ 15.7B",
     "580M @ 39.8B":        "580M @ 39.8B",
-    "scale_h3_boltz @ 54.5B": "scale_h3_boltz",
+    "scale_h3_boltz @ 54.5B": "scale_h3_boltz @54B",
+    "scale_h3_boltz @ 62.9B": "scale_h3_boltz @63B",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
