@@ -92,7 +92,7 @@ tuning_args:
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/scale_gptmoe_12moe_K4I2048_d1280
-  save_interval: 2000
+  save_interval: 1000
   max_to_keep: 3
 
 logging_args:

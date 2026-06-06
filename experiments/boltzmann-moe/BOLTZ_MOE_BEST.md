@@ -57,11 +57,32 @@ Layers 9-12  EGPT (4 distinct blocks, no recursion)
 
 | Run | Tokens | Avg | WikiPPL | MMLU | GSM8k flex-avg | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| **580M @ step 102k** (current best) | 53.5B | **58.01** | **20.23** | 26.09 | 2.31 | dominant — beats every model in our table |
+| **580M @ step 110k** | 57.7B | 57.59 | **19.70** | 26.17 | 1.86 | new WikiPPL low; avg flat (boolq fluctuated 60→55) |
+| **580M @ step 102k** | 53.5B | **58.14** | 20.23 | 26.09 | 2.31 | best avg in 580M progression |
 | 580M @ step 76k | 39.8B | 55.93 | 22.41 | 25.30 | 2.39 | prior champion |
 | 580M @ step 30k (pre-bug, clean) | 15.7B | 53.66 | 26.84 | 25.42 | 1.90 | trustworthy clean snapshot |
 | **scale_h3_boltz @ step 120k** | 62.9B | **56.94** | **21.89** | 26.11 | 1.74 | iso-params no-recursion sibling |
 | scale_h3_boltz @ step 104k | 54.5B | 55.63 | 22.67 | 25.03 | 2.39 | prior |
+
+### Pure-GPT + Switch MoE comparison set (in-progress, ~12B tokens each)
+
+Matched-arch ablation vs `scale_h3_boltz`: same d=1280, 12 layers, but pure GPT
+attention everywhere and MoE in the FFN slot using either Switch-style learned
+top-1 or our Boltzmann-style top-K. Goal is to isolate the contribution of the
+energy-attention layers separately from the routing scheme.
+
+| Run | Config | Tokens | Avg | WikiPPL | MMLU | GSM8k flex-avg | Notes |
+|---|---|---:|---:|---:|---:|---:|---|
+| `scale_gptmoe_8gpt_4switchmoe_d1280` @ 24k | 8 GPT + 4 Switch-MoE FFN | 12.6B | 50.81 | 30.48 | 23.27 | 2.46 | classical Switch top-1 |
+| `scale_gptmoe_12moe_K4I2048_d1280` @ 26k | 12 GPT + Boltz-MoE FFN K=4 I=2048 | 13.6B | **53.57** | **30.68** | **26.08** | 2.35 | leads at iso-tokens |
+| `scale_gptmoe_12moe_K4I4096_d1280` @ 14k | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 7.3B | 52.99 | 31.30 | 23.12 | 2.01 | larger experts; half the tokens, ≈ matches I=2048 |
+
+These are early snapshots (target 65B tokens at step ≈124k). Currently
+`12moe_K4I2048` leads at iso-token, suggesting Boltzmann routing > Switch top-1
+when controlling for FFN capacity. `12moe_K4I4096` shows the strongest per-token
+trajectory (matches I=2048 at half the tokens). Compare against
+`scale_h3_boltz` (8gpt + 4 energy-attn) — the gap will say whether
+energy-attention itself adds capacity or just the routing does.
 
 Both substantially beat baselines:
 - **scale_v9 GPT** 354M @ 100.7B: avg 54.1 / PPL 26.2
