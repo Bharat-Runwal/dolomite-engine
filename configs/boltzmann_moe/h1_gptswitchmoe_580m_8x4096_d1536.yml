@@ -1,0 +1,158 @@
+# h1_gptswitchmoe_580m_8x4096_d1536: structural counterpart of h1_boltz_moe_580m.
+#
+# Same architecture template as the 580M Boltz model EXCEPT:
+#   (1) energy_attention → softmax_attention in the recurrent layer
+#   (2) BoltzmannMoE_Energy_MLP → standard Switch MoE (learned router, top-2)
+#
+# Goal: isolate what the energy-attention + Boltzmann-routing combination adds
+# beyond the structural choices of "11 GPT + 1 recurrent (×6) MoE layer at the end".
+# If this matches 580M Boltz on avg/PPL → the gain is from structure (recursion +
+# late-stage MoE), not from energy-attention. If it lags → energy-attention is
+# the load-bearing piece.
+#
+# Architecture:
+#   layers 1..11 : softmax_attention + standard SwiGLU MLP (intermediate=6144)  — GPT prefix
+#   layer 12    : softmax_attention + Switch MoE (K=8 experts × I=4096, top-2)
+#                 iterated 6× via layer_iterations
+#
+# Param count (approx storage; matches 580M for the prefix, slightly higher for MoE
+# because Switch-MoE experts are SwiGLU = 3 matrices vs Boltz-MoE's 2):
+#   Embedding:  154M  (100352 × 1536, tied)
+#   GPT layers: 415M  (11 × (4d² + 3·d·6144))            — same as 580M
+#   Recurrent:  ~160M (4d² + Switch K=8 × 3·d·4096 + small router)
+#   Total:      ~730M  (vs 580M Boltz: 679M)
+#
+# Multi-node: 4 nodes × 8 GPUs = 32 GPUs (matches 580M)
+# LR: 1e-3 (matches 580M)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 6]   # last layer × 6 (matches 580M)
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 96
+    hidden_size: 1536
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      # All 12 layers softmax_attention (pure-GPT — no energy_attention anywhere)
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 16, num_key_value_heads: 16, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+    mlp_blocks:
+      # Layers 1..11: standard SwiGLU MLP (matches 580M GPT prefix exactly)
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 6144, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      # Layer 12 (recurrent ×6): Switch-style TopK MoE.
+      # K=8 experts (matches 580M Boltz K=8) × I=4096 per expert (matches 580M I_e=4096),
+      # top-2 active per token → ~25% sparsity over the K=8 expert set.
+      - mlp_type: MoE
+        activation_function: swiglu
+        intermediate_size: 4096            # per-expert (dolomite convention)
+        num_experts: 8
+        num_experts_per_tok: 2
+        normalized_topk: true
+        shared_intermediate_size: null
+        use_interleaved_weights: false
+        shared_expert_gating: false
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/h1_gptswitchmoe_580m_8x4096_d1536
+  save_interval: 1000
+  max_to_keep: 3
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: h1_gptswitchmoe_580m_8x4096_d1536
+
+training_parameters:
+  num_training_steps: 124000
+  eval_interval: 10000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 1e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 122000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: false
+  stage: 0
+
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/h1_gptswitchmoe_580m_8x4096_d1536
