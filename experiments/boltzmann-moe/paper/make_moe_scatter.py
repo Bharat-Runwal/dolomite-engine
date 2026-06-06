@@ -58,17 +58,20 @@ MODELS = [
     ("580M @ 39.8B",        679, 679, 0.5593, 22.41, 2.39, 39.83, "boltzmann", "H-series"),
     ("580M @ 53.5B",        679, 679, 0.5801, 20.23, 2.31, 53.48, "boltzmann", "H-series"),
     ("580M @ 57.7B",        679, 679, 0.5759, 19.70, 1.86, 57.67, "boltzmann", "H-series"),
+    ("580M @ 61.9B",        679, 679, 0.5781, 19.48, 2.12, 61.87, "boltzmann", "H-series"),
     # scale_h3_boltz: 8gpt+4egpt no-recursion, d=1280, ~620M, BoltzMoE in EGPT.
     ("scale_h3_boltz @ 54.5B", 620, 620, 0.5563, 22.67, 2.39, 54.53, "boltzmann", "H-series"),
     ("scale_h3_boltz @ 62.9B", 620, 620, 0.5694, 21.89, 1.74, 62.91, "boltzmann", "H-series"),
-    # Pure-GPT + MoE comparison set (d=1280, in-progress, ~12B tokens). Numbers
-    # (total / active M) are model.numel() / model_wrapper.calculate_num_parameters().
+    # Pure-GPT + MoE comparison set (d=1280, in-progress). Numbers (total /
+    # active M) are model.numel() / model_wrapper.calculate_num_parameters().
     # Switch top-1 of 4 routes ~78% active (8gpt+4sw); the 12-layer K=4 MoEs
-    # report ~68% (I=2048) and ~61% (I=4096) of total weights as "active" via
-    # the harness's MoE-aware accounting.
+    # report ~68% (I=2048) and ~61% (I=4096) of total as "active".
     ("8gpt+4sw @ 12.6B",    585, 459, 0.5081, 30.48, 2.46, 12.58, "switch+boltz", "H-series"),
+    ("8gpt+4sw @ 31.5B",    585, 459, 0.5474, 26.23, 2.50, 31.46, "switch+boltz", "H-series"),
     ("12moe-I2k @ 13.6B",   585, 396, 0.5357, 30.68, 2.35, 13.63, "boltzmann",    "H-series"),
+    ("12moe-I2k @ 34.1B",   585, 396, 0.5401, 26.39, 2.35, 34.08, "boltzmann",    "H-series"),
     ("12moe-I4k @ 7.3B",    962, 585, 0.5299, 31.30, 2.01,  7.34, "boltzmann",    "H-series"),
+    ("12moe-I4k @ 23.6B",   962, 585, 0.5436, 26.35, 2.24, 23.59, "boltzmann",    "H-series"),
 ]
 
 SHORT_NAMES = {
@@ -92,11 +95,15 @@ SHORT_NAMES = {
     "580M @ 39.8B":        "580M @ 39.8B",
     "580M @ 53.5B":        "580M @ 53.5B",
     "580M @ 57.7B":        "580M @ 57.7B",
+    "580M @ 61.9B":        "580M @ 61.9B",
     "scale_h3_boltz @ 54.5B": "scale_h3_boltz @54B",
     "scale_h3_boltz @ 62.9B": "scale_h3_boltz @63B",
     "8gpt+4sw @ 12.6B":    "8gpt+4sw @13B",
+    "8gpt+4sw @ 31.5B":    "8gpt+4sw @31B",
     "12moe-I2k @ 13.6B":   "12moe-I2k @14B",
+    "12moe-I2k @ 34.1B":   "12moe-I2k @34B",
     "12moe-I4k @ 7.3B":    "12moe-I4k @7B",
+    "12moe-I4k @ 23.6B":   "12moe-I4k @24B",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
