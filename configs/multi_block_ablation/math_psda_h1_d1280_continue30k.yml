@@ -98,7 +98,7 @@ model_args:
 tuning_args:
   tuning_method: pretraining
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_d1280_60k_4gpu
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_d1280_continue30k
   save_interval: 2000
   max_to_keep: 3
 logging_args:
@@ -106,7 +106,7 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: EGPT-RL
-    name: math_psda_h1_d1280_60k_4gpu
+    name: math_psda_h1_d1280_continue30k
 training_parameters:
   num_training_steps: 60000
   eval_interval: 10000
@@ -135,3 +135,11 @@ distributed_args:
   fsdp_algorithm: 2
   torch_compile: true
   stage: 0
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_6gpt_1egpt6x_d1280
+  load_optimizer: false
+  load_lr_scheduler: false
+  load_starting_iteration: false
+  load_dataloader_state: false
+  load_experiments_tracker_state: false
+  load_rng_state: false

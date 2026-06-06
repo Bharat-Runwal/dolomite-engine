@@ -85,8 +85,15 @@ class PSDAntisymmetricProjection(nn.Module):
     def __init__(self, hidden_size: int, rank: int | None = None):
         super().__init__()
         self.rank = rank or hidden_size  # full rank by default
-        # Init at scale 1/sqrt(d) so SSᵀ ≈ I in expectation
-        self.S = nn.Parameter(torch.randn(hidden_size, self.rank) * (hidden_size ** -0.5))
+        # Init scale 0.5 / sqrt(d) so SSᵀ has eigenvalues spanning [0, ~1] via
+        # Marchenko-Pastur (eigenvalue range = [0, 4σ²d]; with σ² = 0.25/d this
+        # gives [0, 1]). This matches the operator norm of nn.Linear's default
+        # Kaiming init (≈ 2/sqrt(3) ≈ 1.15), so PSDA's update magnitude at init
+        # matches the dual_unconstrained baseline. Without this rescale the
+        # original 1/sqrt(d) init gives ‖SSᵀ‖_op ≈ 4, making PSDA's per-step
+        # update ~4× more aggressive at peak LR — caused the 5k–10k step
+        # instability observed at d=1280, lr=2e-3.
+        self.S = nn.Parameter(torch.randn(hidden_size, self.rank) * (0.5 * hidden_size ** -0.5))
         self.A = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.01)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
