@@ -38,6 +38,14 @@ model_args:
     - 1
     - 1
     - 6
+    iter_dropout_range_per_block:
+    - 0
+    - 0
+    - 0
+    - 0
+    - 0
+    - 0
+    - 3
     initializer_range: 0.02
     layer_norm_epsilon: 1.0e-05
     normalization_function: rmsnorm
