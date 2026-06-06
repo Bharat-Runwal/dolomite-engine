@@ -143,3 +143,4 @@ load_args:
   load_dataloader_state: false
   load_experiments_tracker_state: false
   load_rng_state: false
+  resume_learning_rate: false
