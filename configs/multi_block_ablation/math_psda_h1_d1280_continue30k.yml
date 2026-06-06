@@ -108,7 +108,7 @@ logging_args:
     project: EGPT-RL
     name: math_psda_h1_d1280_continue30k
 training_parameters:
-  num_training_steps: 60000
+  num_training_steps: 30000
   eval_interval: 10000
   micro_batch_size: 4
   gradient_accumulation_steps: 4
@@ -117,7 +117,7 @@ training_parameters:
 optimizer_args:
   class_name: TorchAdamW
   class_args:
-    lr: 0.002
+    lr: 0.0002
     weight_decay: 0.1
     betas:
     - 0.9
@@ -126,9 +126,9 @@ optimizer_args:
 lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
-  num_warmup_steps: 2000
+  num_warmup_steps: 200
   num_constant_steps: 0
-  num_decay_steps: 58000
+  num_decay_steps: 29800
 mixed_precision_args:
   dtype: bf16
 distributed_args:

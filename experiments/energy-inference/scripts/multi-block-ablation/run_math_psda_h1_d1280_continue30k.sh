@@ -24,7 +24,7 @@ bsub \
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 REPO=${REPO}; BASE_CONFIG=${BASE_CONFIG}; SAVE_PATH=${SAVE_PATH}
-SCRIPT_PATH=${SCRIPT_PATH}; JOB_NAME=${JOB_NAME}; NUM_TRAINING_STEPS=60000
+SCRIPT_PATH=${SCRIPT_PATH}; JOB_NAME=${JOB_NAME}; NUM_TRAINING_STEPS=30000
 LATEST_JSON="\${SAVE_PATH}/latest_checkpointed_iteration.json"
 if [ -f "\${LATEST_JSON}" ]; then
     # Continuation has already started; resume from OUR save_path with full
