@@ -82,7 +82,8 @@ class PSDAntisymmetricProjection(nn.Module):
     gradient (no split between attn / ffn streams).
     """
 
-    def __init__(self, hidden_size: int, rank: int | None = None):
+    def __init__(self, hidden_size: int, rank: int | None = None,
+                 antisym_rank: int | None = None):
         super().__init__()
         self.rank = rank or hidden_size  # full rank by default
         # Init scale 0.5 / sqrt(d) so SSᵀ has eigenvalues spanning [0, ~1] via
@@ -94,18 +95,39 @@ class PSDAntisymmetricProjection(nn.Module):
         # update ~4× more aggressive at peak LR — caused the 5k–10k step
         # instability observed at d=1280, lr=2e-3.
         self.S = nn.Parameter(torch.randn(hidden_size, self.rank) * (0.5 * hidden_size ** -0.5))
-        self.A = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.01)
+
+        # Antisymmetric component A - Aᵀ.
+        # Default (antisym_rank=None or >= hidden_size): full d×d A matrix.
+        # Low-rank (antisym_rank=k < d): A = U Vᵀ with U, V ∈ R^{d×k}, so
+        # A - Aᵀ = U Vᵀ - V Uᵀ is a rank-2k antisymmetric matrix.
+        # Motivated by the d=1280 finding (paper §4.6) that the unconstrained
+        # full-rank A-Aᵀ has too much nullspace to shuffle hidden states
+        # without an LM cost, diluting the energy↔correctness ordering.
+        self.antisym_rank = antisym_rank
+        if antisym_rank is None or antisym_rank >= hidden_size:
+            self.A = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.01)
+            self._lowrank_antisym = False
+        else:
+            self.U_a = nn.Parameter(torch.randn(hidden_size, antisym_rank) * 1e-3)
+            self.V_a = nn.Parameter(torch.randn(hidden_size, antisym_rank) * 1e-3)
+            self._lowrank_antisym = True
+
+    def _antisym(self) -> torch.Tensor:
+        if self._lowrank_antisym:
+            UV = torch.matmul(self.U_a, self.V_a.T)
+            return UV - UV.T
+        return self.A - self.A.T
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Π = SSᵀ + (A - Aᵀ);  return x @ Πᵀ  ≡  (Π @ xᵀ)ᵀ
-        Pi = torch.matmul(self.S, self.S.T) + (self.A - self.A.T)
+        Pi = torch.matmul(self.S, self.S.T) + self._antisym()
         return torch.matmul(x, Pi.T)
 
     def get_S_part(self) -> torch.Tensor:
         return torch.matmul(self.S, self.S.T)
 
     def get_A_part(self) -> torch.Tensor:
-        return self.A - self.A.T
+        return self._antisym()
 
 
 class LowRankAntisymmetricProjection(nn.Module):
@@ -600,10 +622,16 @@ class EnergyBlock(nn.Module):
                 # EGPT-RL: Π = SSᵀ + (A - Aᵀ), single projection on combined
                 # gradient. Symmetric part is PSD by construction → strict
                 # energy descent guarantee. Full-rank S unless energy_proj_rank
-                # is set explicitly.
+                # is set explicitly. Optional energy_antisym_rank constrains the
+                # antisymmetric A - Aᵀ to rank 2k (rank-k U, V) for the d=1280
+                # follow-up testing whether limiting nullspace shuffling
+                # restores the energy↔correctness ordering (paper §4.6).
                 rank_cfg = getattr(config, 'energy_proj_rank', None)
                 rank = rank_cfg if (rank_cfg is not None and rank_cfg > 0) else hidden_size
-                self.proj = PSDAntisymmetricProjection(hidden_size, rank=rank)
+                antisym_rank = getattr(config, 'energy_antisym_rank', None)
+                self.proj = PSDAntisymmetricProjection(
+                    hidden_size, rank=rank, antisym_rank=antisym_rank,
+                )
             elif proj_type == "low_rank_antisymmetric":
                 # V3: Low-rank antisymmetric J = U V^T - V U^T
                 rank = getattr(config, 'energy_proj_rank', 32)
