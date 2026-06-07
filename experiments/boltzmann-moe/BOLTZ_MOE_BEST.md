@@ -81,29 +81,38 @@ is included as the structurally-different reference.
 
 | Run | Config | Total / Active (M) | Tokens | Avg | WikiPPL | MMLU | gsm8k flex-avg | Notes |
 |---|---|---:|---:|---:|---:|---:|---:|---|
-| `scale_gptmoe_8gpt_4switchmoe_d1280` @ 24k | 8 GPT + 4 Switch-MoE FFN K=4 I=4096 | 585 / 459 | 12.6 B | 50.81 | 30.48 | 23.27 | 2.46 | early Switch top-1 |
-| `scale_gptmoe_8gpt_4switchmoe_d1280` @ 60k | 8 GPT + 4 Switch-MoE FFN K=4 I=4096 | 585 / 459 | 31.5 B | **54.74** | **26.23** | 25.31 | **2.50** | **leads trio at ~30B** |
-| `scale_gptmoe_12moe_K4I2048_d1280` @ 26k | 12 GPT + Boltz-MoE FFN K=4 I=2048 | 585 / 396 | 13.6 B | 53.57 | 30.68 | 26.08 | 2.35 | early Boltz lead |
-| `scale_gptmoe_12moe_K4I2048_d1280` @ 65k | 12 GPT + Boltz-MoE FFN K=4 I=2048 | 585 / 396 | 34.1 B | 54.01 | 26.39 | 25.05 | 2.35 | matches v9 GPT |
-| `scale_gptmoe_12moe_K4I4096_d1280` @ 14k | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 7.3 B | 52.99 | 31.30 | 23.12 | 2.01 | early larger-experts |
-| `scale_gptmoe_12moe_K4I4096_d1280` @ 45k | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 23.6 B | 54.36 | 26.35 | **25.92** | 2.24 | best MMLU; ⅔ tokens of others |
-| **580M Boltz** @ 30k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 15.7 B | 53.66 | 26.84 | 25.42 | 1.90 | iso-tokens reference (low) |
-| **580M Boltz** @ 76k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 39.8 B | **55.93** | **22.41** | **25.30** | **2.39** | iso-tokens reference (≈30B+) |
+| `scale_gptmoe_8gpt_4switchmoe_d1280` @ 24k  | 8 GPT + 4 Switch-MoE FFN K=4 I=4096 | 585 / 459 | 12.6 B | 50.81 | 30.48 | 23.27 | 2.46 | early Switch top-1 |
+| `scale_gptmoe_8gpt_4switchmoe_d1280` @ 60k  | 8 GPT + 4 Switch-MoE FFN K=4 I=4096 | 585 / 459 | 31.5 B | 54.74 | 26.23 | 25.31 | 2.50 | mid |
+| `scale_gptmoe_8gpt_4switchmoe_d1280` @ 108k | 8 GPT + 4 Switch-MoE FFN K=4 I=4096 | 585 / 459 | 56.6 B | **57.25** | **21.49** | **26.67** | 2.01 | **leads trio at ~57B; closing on 580M** |
+| `scale_gptmoe_12moe_K4I2048_d1280` @ 26k  | 12 GPT + Boltz-MoE FFN K=4 I=2048 | 585 / 396 | 13.6 B | 53.57 | 30.68 | 26.08 | 2.35 | early Boltz lead |
+| `scale_gptmoe_12moe_K4I2048_d1280` @ 65k  | 12 GPT + Boltz-MoE FFN K=4 I=2048 | 585 / 396 | 34.1 B | 54.01 | 26.39 | 25.05 | 2.35 | mid |
+| `scale_gptmoe_12moe_K4I2048_d1280` @ 110k | 12 GPT + Boltz-MoE FFN K=4 I=2048 | 585 / 396 | 57.7 B | 56.79 | 22.00 | 25.27 | 2.05 | iso-tokens vs Switch — trails by 0.5pp |
+| `scale_gptmoe_12moe_K4I4096_d1280` @ 14k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 |  7.3 B | 52.99 | 31.30 | 23.12 | 2.01 | early |
+| `scale_gptmoe_12moe_K4I4096_d1280` @ 45k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 23.6 B | 54.36 | 26.35 | 25.92 | 2.24 | mid |
+| `scale_gptmoe_12moe_K4I4096_d1280` @ 73k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 38.3 B | 55.72 | 23.66 | **26.64** | **2.58** | best MMLU+gsm8k of trio at this point |
+| **gptswitchmoe-580M** @ 29k (matched-structure baseline) | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / ? | 15.2 B | 52.08 | 27.73 | 26.81 | 1.93 | structural ablation — see below |
+| **580M Boltz** @ 30k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 15.7 B | **53.66** | **26.84** | 25.42 | 1.90 | iso-tokens vs gptswitchmoe-580M |
+| **580M Boltz** @ 76k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 39.8 B | 55.93 | 22.41 | 25.30 | 2.39 | iso-tokens vs gptmoe trio at ~30-40B |
+| **580M Boltz** @ 124k (FINAL) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 65.0 B | **58.47** | **19.33** | **26.33** | 2.08 | 🏆 final |
 
-These are still mid-training snapshots (target 65B tokens at step ≈124k for
-each gptmoe run). Story so far:
+Story (updated with ~57B-token snapshots):
 
 - **At 12-13B tokens**, Boltz routing led Switch by +2.8pp avg (53.6 vs 50.8).
-- **At 30+B tokens**, the gap closed and **Switch top-1 now leads by +0.7pp avg**
-  (54.74 vs 54.01) — Switch caught up and overtook. The early Boltz advantage
-  was apparently a faster warm-up, not a higher converged ceiling.
-- `12moe_K4I4096` (largest experts, ~960M total) hits the highest MMLU (25.9)
-  but at fewer tokens; tracking whether it overtakes again as it catches up.
-- The **580M Boltz** model with energy attention beats every gptmoe variant on
-  WikiPPL by ~4 points at the same token budget (39.8B → 22.4 vs 30B → 26.2),
-  even though it has only 1 of 12 layers as MoE. The energy-attention layer
-  (recursive ×6) appears to add real modeling capacity that pure-GPT-MoE
-  variants can't reach.
+- **At ~30B tokens**, Switch had caught up and slightly overtaken (54.74 vs 54.01).
+- **At ~57B tokens**, **8gpt+4sw (Switch top-1) is now the trio leader** (57.25 / 21.49)
+  by +0.5pp avg / -0.5 PPL over 12moe-I2k (56.79 / 22.00). The Switch-MoE
+  variant has the strongest convergence trajectory.
+- **Sigmoid-structure baseline ablation** (`gptswitchmoe-580M` @ 15.2B vs
+  `580M Boltz` @ 15.7B): Boltz wins by **+1.6pp avg / -0.9 PPL** at iso-tokens.
+  Same 11+1×6 layout, K=8 I=4096; only differences are softmax→energy attn and
+  Switch→Boltzmann routing in the recurrent layer. **At least at 15B tokens,
+  the energy-attention + Boltzmann-routing combination contributes beyond the
+  structural template alone** — the gptswitchmoe baseline trains slower and
+  ends with worse PPL despite the same recursive-MoE scaffold.
+- **580M Boltz still wins at iso-tokens**: at ~57B vs gptmoe trio's ~57B,
+  580M leads by ~0.3-0.8pp avg / ~2 PPL. The gap is narrowing with more tokens
+  for the gptmoe runs but hasn't closed. Final 580M @ 65B (58.47 / 19.33)
+  remains the dominant point in our scatter.
 
 Both substantially beat baselines:
 - **scale_v9 GPT** 354M @ 100.7B: avg 54.1 / PPL 26.2

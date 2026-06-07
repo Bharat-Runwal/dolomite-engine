@@ -69,10 +69,18 @@ MODELS = [
     # report ~68% (I=2048) and ~61% (I=4096) of total as "active".
     ("8gpt+4sw @ 12.6B",    585, 459, 0.5081, 30.48, 2.46, 12.58, "switch+boltz", "H-series"),
     ("8gpt+4sw @ 31.5B",    585, 459, 0.5474, 26.23, 2.50, 31.46, "switch+boltz", "H-series"),
+    ("8gpt+4sw @ 56.6B",    585, 459, 0.5725, 21.49, 2.01, 56.62, "switch+boltz", "H-series"),
     ("12moe-I2k @ 13.6B",   585, 396, 0.5357, 30.68, 2.35, 13.63, "boltzmann",    "H-series"),
     ("12moe-I2k @ 34.1B",   585, 396, 0.5401, 26.39, 2.35, 34.08, "boltzmann",    "H-series"),
+    ("12moe-I2k @ 57.7B",   585, 396, 0.5679, 22.00, 2.05, 57.67, "boltzmann",    "H-series"),
     ("12moe-I4k @ 7.3B",    962, 585, 0.5299, 31.30, 2.01,  7.34, "boltzmann",    "H-series"),
     ("12moe-I4k @ 23.6B",   962, 585, 0.5436, 26.35, 2.24, 23.59, "boltzmann",    "H-series"),
+    ("12moe-I4k @ 38.3B",   962, 585, 0.5572, 23.66, 2.58, 38.27, "boltzmann",    "H-series"),
+    # Matched-structure baseline: same 11+1×6 layout as 580M Boltz, but uses
+    # softmax_attention + Switch-MoE in the recurrent block instead of
+    # energy_attention + BoltzmannMoE. Tests whether the 580M Boltz advantage
+    # comes from the structural template or from energy-attn + Boltz routing.
+    ("gptswitchmoe-580M @ 15.2B", 730, 730, 0.5208, 27.73, 1.93, 15.21, "switch+boltz", "H-series"),
 ]
 
 SHORT_NAMES = {
@@ -102,10 +110,14 @@ SHORT_NAMES = {
     "scale_h3_boltz @ 62.9B": "scale_h3_boltz @63B",
     "8gpt+4sw @ 12.6B":    "8gpt+4sw @13B",
     "8gpt+4sw @ 31.5B":    "8gpt+4sw @31B",
+    "8gpt+4sw @ 56.6B":    "8gpt+4sw @57B",
     "12moe-I2k @ 13.6B":   "12moe-I2k @14B",
     "12moe-I2k @ 34.1B":   "12moe-I2k @34B",
+    "12moe-I2k @ 57.7B":   "12moe-I2k @58B",
     "12moe-I4k @ 7.3B":    "12moe-I4k @7B",
     "12moe-I4k @ 23.6B":   "12moe-I4k @24B",
+    "12moe-I4k @ 38.3B":   "12moe-I4k @38B",
+    "gptswitchmoe-580M @ 15.2B": "gptswitch-580M @15B",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
