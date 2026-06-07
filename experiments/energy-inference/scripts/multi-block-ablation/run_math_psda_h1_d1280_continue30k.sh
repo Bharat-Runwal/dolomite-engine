@@ -31,7 +31,7 @@ if [ -f "\${LATEST_JSON}" ]; then
     # optimizer/LR/dataloader state. Generate a temp config that overrides the
     # base yaml's load_args block.
     TMPCONFIG="/tmp/\${JOB_NAME}_\${LSB_JOBID}.yml"
-    grep -v "^load_args:\|^  load_path:\|^  load_optimizer:\|^  load_lr_scheduler:\|^  load_starting_iteration:\|^  load_dataloader_state:\|^  load_experiments_tracker_state:\|^  load_rng_state:" "\${BASE_CONFIG}" > "\${TMPCONFIG}"
+    grep -v "^load_args:\|^  load_path:\|^  load_optimizer:\|^  load_lr_scheduler:\|^  load_starting_iteration:\|^  load_dataloader_state:\|^  load_experiments_tracker_state:\|^  load_rng_state:|^  resume_learning_rate:" "\${BASE_CONFIG}" > "\${TMPCONFIG}"
     printf "load_args:\n  load_path: %s\n" "\${SAVE_PATH}" >> "\${TMPCONFIG}"
     RUN_CONFIG="\${TMPCONFIG}"
 else
