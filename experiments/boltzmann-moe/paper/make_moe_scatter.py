@@ -59,6 +59,7 @@ MODELS = [
     ("580M @ 53.5B",        679, 679, 0.5801, 20.23, 2.31, 53.48, "boltzmann", "H-series"),
     ("580M @ 57.7B",        679, 679, 0.5759, 19.70, 1.86, 57.67, "boltzmann", "H-series"),
     ("580M @ 61.9B",        679, 679, 0.5781, 19.48, 2.12, 61.87, "boltzmann", "H-series"),
+    ("580M @ 65.0B (FINAL)", 679, 679, 0.5847, 19.33, 2.08, 65.01, "boltzmann", "H-series"),
     # scale_h3_boltz: 8gpt+4egpt no-recursion, d=1280, ~620M, BoltzMoE in EGPT.
     ("scale_h3_boltz @ 54.5B", 620, 620, 0.5563, 22.67, 2.39, 54.53, "boltzmann", "H-series"),
     ("scale_h3_boltz @ 62.9B", 620, 620, 0.5694, 21.89, 1.74, 62.91, "boltzmann", "H-series"),
@@ -96,6 +97,7 @@ SHORT_NAMES = {
     "580M @ 53.5B":        "580M @ 53.5B",
     "580M @ 57.7B":        "580M @ 57.7B",
     "580M @ 61.9B":        "580M @ 61.9B",
+    "580M @ 65.0B (FINAL)": "580M @ 65B (final)",
     "scale_h3_boltz @ 54.5B": "scale_h3_boltz @54B",
     "scale_h3_boltz @ 62.9B": "scale_h3_boltz @63B",
     "8gpt+4sw @ 12.6B":    "8gpt+4sw @13B",

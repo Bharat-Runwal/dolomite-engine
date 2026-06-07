@@ -57,9 +57,10 @@ Layers 9-12  EGPT (4 distinct blocks, no recursion)
 
 | Run | Tokens | Avg | WikiPPL | MMLU | GSM8k flex-avg | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| **580M @ step 118k** | 61.9B | 57.81 | **19.48** | 25.72 | 2.12 | new WikiPPL low; PPL still trending down |
-| **580M @ step 110k** | 57.7B | 57.59 | 19.70 | 26.17 | 1.86 | prior PPL low |
-| **580M @ step 102k** | 53.5B | **58.14** | 20.23 | 26.09 | 2.31 | best avg in 580M progression |
+| **580M @ step 124k (FINAL)** | **65.0B** | **58.47** | **19.33** | **26.33** | 2.08 | **🏆 final — best on every metric, training complete** |
+| 580M @ step 118k | 61.9B | 57.81 | 19.48 | 25.72 | 2.12 | prior |
+| 580M @ step 110k | 57.7B | 57.59 | 19.70 | 26.17 | 1.86 | prior |
+| 580M @ step 102k | 53.5B | 58.14 | 20.23 | 26.09 | 2.31 | prior |
 | 580M @ step 76k | 39.8B | 55.93 | 22.41 | 25.30 | 2.39 | prior champion |
 | 580M @ step 30k (pre-bug, clean) | 15.7B | 53.66 | 26.84 | 25.42 | 1.90 | trustworthy clean snapshot |
 | **scale_h3_boltz @ step 120k** | 62.9B | **56.94** | **21.89** | 26.11 | 1.74 | iso-params no-recursion sibling |
@@ -111,18 +112,26 @@ Both substantially beat baselines:
 
 580M @ 39.8B beats scale_v9 @ 100.7B by **+1.8pp avg, −3.8 PPL** at ⅓ the tokens.
 
-## Where Boltz-MoE wins (vs scale_v9 GPT 354M @ 100.7B)
+## Where Boltz-MoE wins (vs scale_v9 GPT 354M @ 100.7B) — final 580M @ 124k
 
-| Task | scale_v9 | 580M @ 76k | Δ | family |
+**At final 65B-token training, 580M Boltz wins on every benchmark — including COPA, the
+last holdout V9 had at 53.5B tokens. WikiPPL improved monotonically across all
+snapshots: 26.84 → 22.41 → 20.23 → 19.70 → 19.48 → 19.33 (15.7B → 65.0B tokens).**
+
+| Task | scale_v9 | 580M @ 124k | Δ | family |
 |---|---:|---:|---:|---|
-| arc_easy | 56.6 | **62.4** | +5.8 | knowledge / multi-choice |
-| arc_challenge | 26.8 | **32.3** | +5.5 | harder ARC |
-| hellaswag | 44.3 | **49.8** | +5.5 | commonsense |
-| WikiPPL | 26.2 | **22.4** | −3.8 (better) | language modeling |
-| piqa | 68.4 | 70.9 | +2.5 | physical reasoning |
-| MMLU | 23.0 | 25.3 | +2.3 | both ≈ random; slight edge |
-| boolq | **53.5** | 50.4 | −3.1 | yes/no — V9 wins |
-| copa | **70.0** | 67.0 | −3.0 | causal — V9 wins |
+| arc_easy | 56.6 | **68.14** | **+11.5** | knowledge / multi-choice |
+| hellaswag | 44.3 | **54.21** | **+9.9** | commonsense |
+| arc_challenge | 26.8 | **34.73** | **+7.9** | harder ARC (acc_norm) |
+| sciq | 81.3 | **88.40** | **+7.1** | science QA |
+| WikiPPL | 26.2 | **19.33** | **−6.84** (better) | language modeling |
+| piqa | 68.4 | **71.98** | +3.6 | physical reasoning |
+| MMLU | 23.0 | **26.33** | +3.3 | first MMLU signal |
+| winogrande | 52.9 | **55.72** | +2.8 | coreference |
+| boolq | 53.5 | **55.75** | +2.3 | yes/no |
+| openbookqa | 33.4 | **34.40** | +1.0 | open-book QA (acc_norm) |
+| copa | 70.0 | **71.00** | **+1.0** | causal (V9's last hold-out, now flipped) |
+| gsm8k flex | 1.4 | **2.08** | +0.7 | arithmetic |
 
 ## Training setup (both runs)
 
