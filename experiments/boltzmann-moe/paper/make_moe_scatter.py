@@ -302,9 +302,13 @@ MODELS_SIMPLE = [
     ("scale_h3 EGPT",           620, 620, 0.542,  25.00, 2.50,  63.00, "egpt_no_moe"),
     ("scale_r3 EGPT-rec",       620, 620, 0.546,  24.20, 3.26,  63.00, "egpt_no_moe"),
 
-    # Boltz-MoE (orange) — 145M, 407M, 620M, 679M.
+    # Boltz-MoE (orange) — 145M, 620M, 679M.
+    # NB: B-series points (407M, 12 deep EGPT-MoE blocks) excluded from the
+    # simplified plot — those land at avg ~49 / PPL ~38 due to a 21:1 FFN:Attn
+    # imbalance in the all-MoE arch, not the Boltz routing itself. The
+    # canonical Boltz-MoE line is the hybrid (GPT prefix + late MoE) at
+    # h1 145M → scale_h3 620M → 580M 679M.
     ("h1 Boltz-MoE",            145,  68, 0.501,  36.50, 2.12,   7.86, "boltz_moe"),
-    ("B4 Boltz-MoE",            407, 330, 0.4935, 38.04, 2.20,   7.86, "boltz_moe"),
     ("scale_h3 Boltz-MoE",      620, 620, 0.5694, 21.89, 1.74,  62.91, "boltz_moe"),
     ("580M Boltz-MoE",          679, 679, 0.5847, 19.33, 2.08,  65.01, "boltz_moe"),
 
