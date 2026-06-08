@@ -30,7 +30,7 @@ bash ${REPO}/scripts/common/pretrain.sh "\${RUN_CONFIG}"
 [ -f "/tmp/\${JOB_NAME}_\${LSB_JOBID}.yml" ] && rm -f "/tmp/\${JOB_NAME}_\${LSB_JOBID}.yml"
 if [ -f "\${LATEST_JSON}" ]; then
     LATEST_ITER=\$(python3 -c "import json; print(json.load(open('\${LATEST_JSON}'))['latest_checkpointed_iteration'])")
-    if [ "\${LATEST_ITER}" -lt "\${NUM_TRAINING_STEPS}" ]; then
+    if false; then
         bash "\${SCRIPT_PATH}"
     else
         UNSHARDED="\${SAVE_PATH}/unsharded"
