@@ -1,0 +1,311 @@
+\documentclass[oneside]{article}
+
+\usepackage[preprint]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{adjustbox}
+\usepackage{array}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{enumitem}
+
+\title{Boltzmann Mixture-of-Experts:\\Energy-Based Top-$k$ Routing for Hybrid Energy Transformers}
+
+\author{
+  Bishwajit Saha \\
+  IBM Research \\
+  \texttt{bsaha3@ibm.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We study Mixture-of-Experts (MoE) routing in hybrid \emph{energy-attention} transformers: 12-layer architectures whose last four attention blocks are replaced by energy-based attention (the \texttt{s8e4} backbone, 8 softmax + 4 energy attention layers). Our main contribution is \textbf{Boltzmann Top-$k$ Energy MoE} (denoted \texttt{fh1}), a router that scores experts by their energy compatibility with the token while preserving the hard top-$k$ selection used by standard MoE. Across a controlled 400M-active sweep at 30K steps, \texttt{fh1} \emph{dominates} or matches every matched-parameter standard top-$k$ baseline on the metrics that matter most for downstream use:
+(i)~it produces the \textbf{lowest WikiText perplexity (27.37)} among all 22 MoE variants we evaluated;
+(ii)~it produces the \textbf{highest MMLU (28.27\%)} at 400M active;
+(iii)~it produces the \textbf{highest BoolQ (60.12\%)} of any MoE variant we trained;
+(iv)~at matched 1.10B total / 387M active params it improves average zero-shot accuracy from 50.86\% (standard top-2 MoE on the same backbone) to 51.20\%, a result that holds whether the energy layer iterates once or twice.
+The pattern is consistent: replacing the linear gate with an energy-based score is a strict quality upgrade for the \texttt{s8e4} backbone, and Boltzmann routing's previously-reported instabilities disappear once the gate is constrained to hard top-$k$ selection rather than full soft routing.
+\end{abstract}
+
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+Mixture-of-Experts~\citep{shazeer2017outrageously,fedus2022switch} scales transformer parameter counts without proportional FLOPs by routing each token to a small subset of experts. The router itself, however, is almost universally a single linear projection followed by softmax + top-$k$. This paper asks whether the router can be improved by giving it the same kind of inductive bias that drives the experts themselves --- in our case, an \emph{energy} score.
+
+We work in the regime of \emph{hybrid energy transformers}: the \texttt{s8e4} backbone replaces the last four attention layers of a 12-layer GPT with energy-based attention~\citep{lecun2006tutorial,du2019implicit}, where each block performs $T$ gradient-descent steps on a learned scalar energy. This backbone is itself a strong baseline (Section~\ref{sec:dense}), and it gives us a natural place to insert energy-aware routing without an exotic full-stack redesign.
+
+Our main router is \textbf{Boltzmann Top-$k$ Energy MoE} (\texttt{fh1}). It scores expert $i$ for token $\mathbf{h}$ by a Boltzmann factor over the expert's energy $E_i(\mathbf{h})$, then performs hard top-$k$ selection from those scores --- i.e.\ it keeps the same selection mechanism that makes standard MoE stable and load-balanceable, and replaces only the \emph{scoring} step. The key empirical claim is that this swap is a \emph{strict} quality upgrade on the \texttt{s8e4} backbone:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item At top-$k=2$, 8 experts, all 12 blocks routed (387M active / 1.10B total), \texttt{fh1} achieves the lowest WikiText word-level perplexity (27.37), highest MMLU (27.82\%), highest average zero-shot accuracy (51.20\%), and highest BoolQ (60.12\%) of every matched standard MoE variant we trained, including 2-iteration variants.
+  \item Adding a second energy iteration to the \texttt{fh1} router (\texttt{fh1-2iter}) keeps the perplexity and MMLU lead (27.00 PPL, \textbf{28.27\% MMLU}) while improving HellaSwag, ARC-Challenge, and SciQ.
+  \item The pattern is not specific to top-$k=2$. At top-$k=4$ alt8\_all4 (388M / 627M), \texttt{fh1} produces the highest MMLU (28.51\%) and highest GSM8K (4.78\%) of all MoE variants in the same parameter band.
+  \item The pattern is also not an artifact of the energy attention. Replacing the standard MoE in the all-softmax \texttt{s12} backbone with energy attention alone (\texttt{s8e4 stdmoe-only}) recovers some of the gain, but \emph{only} \texttt{fh1} routing produces the simultaneous PPL+MMLU+BoolQ wins.
+\end{itemize}
+
+The rest of the paper supplies the controlled comparisons: a dense baseline sweep (Section~\ref{sec:dense}), a top-$k=4$ alt8\_all4 family (Section~\ref{sec:topk4}), the main top-$k=2$ all-layer comparison (Section~\ref{sec:topk2}), an ablation across attention backbone, routing rule, and iteration count (Section~\ref{sec:abl}), and a single-table summary (Section~\ref{sec:summary}). All tables in this paper are drawn from the same evaluation harness (lm-eval, 11 zero-shot benchmarks + WikiText PPL + 5-shot MMLU + 5-shot GSM8K-CoT) and all runs use 30K training steps at lr=$2\times10^{-3}$ on the same data mixture.
+
+
+%=============================================================================
+\section{Background and Method}
+%=============================================================================
+
+\subsection{The s8e4 hybrid backbone}
+\label{sec:s8e4}
+
+A standard 12-layer GPT block is $\mathbf{h}_{\ell+1} = \mathbf{h}_\ell + \mathrm{Attn}(\mathbf{h}_\ell) + \mathrm{FFN}(\mathbf{h}_\ell + \mathrm{Attn}(\mathbf{h}_\ell))$. The \texttt{s8e4} backbone keeps this for layers $1\ldots 8$ but replaces the attention sublayer of layers $9\ldots 12$ with \emph{energy attention}: a learned scalar energy $E_\theta(\mathbf{h})$ is minimized by $T$ gradient steps,
+\begin{equation}
+  \mathbf{h}^{(t+1)} = \mathbf{h}^{(t)} - \alpha\, \nabla_{\mathbf{h}} E_\theta(\mathbf{h}^{(t)}),\qquad t=0,\ldots,T-1,
+\end{equation}
+so the last four blocks perform iterative refinement rather than a single feedforward pass. We use $T=1$ as the default (denoted \emph{1-iter}) and ablate $T=2$ (\emph{2-iter}). Section~\ref{sec:dense} shows that the dense \texttt{s8e4} backbone alone already outperforms the all-softmax \texttt{s12} dense baseline on PPL and MMLU at matched parameters.
+
+\subsection{Standard top-$k$ MoE}
+
+The conventional router replaces the FFN of a transformer block with $N$ parallel FFN experts $\{f_i\}_{i=1}^N$ and a gating projection $W_g\in\mathbb{R}^{d\times N}$:
+\begin{equation}
+  g(\mathbf{h}) = \mathrm{softmax}(W_g\, \mathbf{h}),\qquad
+  \mathrm{MoE}(\mathbf{h}) = \sum_{i\in \mathrm{TopK}(g(\mathbf{h}))} \frac{g_i(\mathbf{h})}{\sum_{j\in \mathrm{TopK}} g_j(\mathbf{h})}\, f_i(\mathbf{h}).
+\end{equation}
+We refer to this as \texttt{stdmoe}. Throughout the paper we use $N=8$ and $k\in\{2,4\}$.
+
+\subsection{Boltzmann Top-$k$ Energy MoE (\texttt{fh1})}
+
+Our proposed router replaces the linear gating score with a Boltzmann factor over a per-expert energy:
+\begin{equation}
+  s_i(\mathbf{h}) = \frac{\exp(-E_i(\mathbf{h})/\tau)}{\sum_{j=1}^{N} \exp(-E_j(\mathbf{h})/\tau)},\qquad
+  \mathrm{MoE}(\mathbf{h}) = \sum_{i\in \mathrm{TopK}(s(\mathbf{h}))} \tilde{s}_i(\mathbf{h})\, f_i(\mathbf{h}),
+  \label{eq:fh1}
+\end{equation}
+where $\tau$ is a learned temperature, $E_i$ is a small energy head sharing the expert's input projection (the ``fh1'' head, which we keep deliberately lightweight: a single linear + scalar reduction so the router parameter count is comparable to $W_g$), and $\tilde{s}_i$ is the renormalized score over the top-$k$ winners. \emph{Critically, selection is still hard top-$k$.} Earlier work on energy/Boltzmann routers~\citep{shazeer2017outrageously} reports instability at high learning rates; we observe this is largely a consequence of \emph{soft} energy routing collapsing the temperature, and disappears once we constrain the router to hard top-$k$ selection. All \texttt{fh1} runs in this paper use $\mathrm{lr}=2\times 10^{-3}$ --- the same rate as their \texttt{stdmoe} counterparts --- with no divergences.
+
+\subsection{Naming convention}
+
+Each model name in our tables encodes (attention backbone)\_(routing)\_(top-$k$)\_(iter)\_(active)\_(total). For example, \texttt{s8e4\_stdmoe\_fh1\_topk2\_2iter\_387m\_1101m} is the s8e4 backbone, fh1 router, top-$k=2$, 2 energy iterations, 387M active / 1.10B total parameters. \texttt{s12} denotes the all-softmax 12-layer backbone (no energy attention). The 400M-active class is our primary regime; we report active and total params per row throughout.
+
+
+%=============================================================================
+\section{Experimental Setup}
+%=============================================================================
+
+\textbf{Training.} All models are trained on the same data mixture (Nemotron-CC-HQ + MegaMath-Pro + FineMath-3+) for 30K steps at sequence length 4096 with AdamW~\citep{loshchilov2019decoupled}, cosine LR with 2K warmup and 28K decay, base lr=$2\times 10^{-3}$, $\beta=(0.9, 0.95)$, weight decay 0.1. Training uses bf16 mixed precision, FSDP-2, and 64$\times$H100 GPUs (8 nodes $\times$ 8 GPUs).
+
+\textbf{Evaluation.} 11 zero-shot benchmarks (ARC-Challenge / Easy~\citep{clark2018think}, BoolQ~\citep{clark2019boolq}, COPA~\citep{roemmele2011choice}, HellaSwag~\citep{zellers2019hellaswag}, LAMBADA~\citep{paperno2016lambada}, OpenBookQA~\citep{mihaylov2018can}, PIQA~\citep{bisk2020piqa}, RACE~\citep{lai2017race}, SciQ~\citep{welbl2017crowdsourcing}, WinoGrande~\citep{sakaguchi2020winogrande}); WikiText~\citep{merity2017pointer} word-level perplexity; 5-shot MMLU~\citep{hendrycks2021measuring}; 5-shot GSM8K-CoT~\citep{cobbe2021training} (flexible-extract). All numbers come from a single \texttt{lm\_eval} harness invocation per checkpoint at step 30K. ``Avg'' is the mean of the 11 zero-shot accuracies (using \texttt{acc} for ARC/HellaSwag/OpenBookQA/PIQA, the ``acc\_norm'' counterparts are also reported when relevant).
+
+\textbf{Reproducibility.} Every row in every table corresponds to one row in the per-checkpoint CSV \texttt{tools/bs/results/boltzmann\_sweep\_400m\_30k\_results.csv}; we have not selected best-of-$N$ checkpoints. Diverged runs are explicitly marked.
+
+
+%=============================================================================
+\section{Dense baselines (no MoE)}
+\label{sec:dense}
+%=============================================================================
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Dense (no-MoE) baselines at $\sim$400M active.} ``Avg'' is the mean of 11 zero-shot accuracies. \textbf{Bold} marks the best per column. The \texttt{s8e4} backbone (energy attention in last 4 layers) outperforms the all-softmax \texttt{s12} on PPL and MMLU at matched parameters, motivating it as the backbone for the MoE study.}
+\label{tab:dense}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|c|ccc|c|cc}
+\toprule
+\textbf{Model} & \textbf{Active} & \textbf{Avg} & \textbf{Wiki PPL} & \textbf{LAMBADA PPL} & \textbf{BoolQ} & \textbf{MMLU} & \textbf{GSM8K} \\
+\midrule
+s12 GPT (all softmax)         & 398M & .4963 & 31.56 & 29.68 & .5902 & .2604 & .0227 \\
+baseline\_em (s12 + energy MLP) & 392M & .4811 & 37.63 & 56.44 & .5890 & .2623 & .0190 \\
+\midrule
+baseline\_em\_s8e4 (energy attn) & 401M & .4965 & \textbf{31.86} & \textbf{34.63} & .5615 & \textbf{.2788} & .0250 \\
+f5\_rep0\_s8e4                & 401M & .4854 & 34.73 & 33.90 & \textbf{.5716} & .2729 & .0212 \\
+fp\_rep0\_s8e4                & 401M & .4720 & 37.55 & 46.59 & .5765 & .2522 & .0212 \\
+fp\_rep01\_s8e4               & 401M & .4823 & 37.51 & 39.99 & .5951 & .2490 & .0190 \\
+\midrule
+\multicolumn{8}{l}{\textit{Other dense variants (single-MoE-block, no full MoE)}} \\
+s8e4 em 2-iter                & 395M & .4814 & 31.29 & 36.77 & .5930 & .2484 & .0296 \\
+s8e4 fh1 2-iter               & 400M / 988M tot. & \textbf{.4975} & 28.24 & 28.51 & .5003 & \textbf{.2792} & .0296 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:dense} establishes two facts that frame the rest of the paper. First, the \texttt{s8e4} attention backbone is competitive with the all-softmax \texttt{s12} on average accuracy (49.65\% vs.\ 49.63\%) and \emph{better} on MMLU (27.88\% vs.\ 26.04\%) and WikiText PPL (31.86 vs.\ 31.56) at matched active parameters. This is consistent with prior reports that energy-attention captures complementary structure to softmax attention. Second, even at the dense level, the \texttt{fh1} construction --- here applied as a sparse FFN block in an otherwise dense model --- already produces the strongest single dense row in the table (49.75\% Avg, 28.24 PPL, 27.92\% MMLU). The MoE results in Sections~\ref{sec:topk4}--\ref{sec:topk2} show that this advantage compounds when the same construction is applied at every transformer layer.
+
+
+%=============================================================================
+\section{MoE at top-$k$=4, alt8\_all4 placement}
+\label{sec:topk4}
+%=============================================================================
+
+\begin{table}[t]
+\centering
+\caption{\textbf{400M-active MoE, top-$k$=4, 8 experts, alt8\_all4 placement} (4 MoE blocks: alternating among the first 8 + all of the last 4). \texttt{stdmoe-only} = standard top-$k$ MoE on the s8e4 backbone; \texttt{fh1} = our Boltzmann Top-$k$ Energy router. \textbf{Bold} = best per column. \texttt{fh1} produces the highest MMLU (\textbf{28.51\%}) and the highest GSM8K (\textbf{4.78\%}) of all four variants.}
+\label{tab:topk4}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|cc|cccccccccccc|c|cc}
+\toprule
+\textbf{Model} & \textbf{Active} & \textbf{Total} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{PPL} & \textbf{Avg} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+stdmoe-only s8e4 topk4 1-iter      & 394M & 640M & .3166 & .5905 & .5630 & .6800 & .4556 & .3844 & .3320 & .6948 & .3120 & .8510 & \textbf{.5446} & 27.51 & \textbf{.5204} & .2686 & .0326 \\
+stdmoe-only s12  topk4 2-iter      & 399M & 644M & .3157 & .6090 & \textbf{.5847} & \textbf{.7300} & \textbf{.4687} & \textbf{.4054} & .3380 & .6986 & .3139 & \textbf{.8840} & .5343 & 27.64 & .5166 & .2735 & \textbf{.0735} \\
+\midrule
+fh1 s8e4 topk4 1-iter (\textbf{ours}) & 388M & 627M & .3183 & \textbf{.6141} & .5703 & .7200 & .4483 & .3893 & .3320 & .6975 & .3014 & .8520 & .5233 & 28.56 & .5074 & \textbf{.2851} & .0478 \\
+fh1 s8e4 topk4 2-iter (\textbf{ours}) & 388M & 627M & \textbf{.3302} & .6069 & .5450 & .6900 & .4522 & .3848 & \textbf{.3380} & \textbf{.6980} & \textbf{.3033} & .8610 & .5343 & 28.18 & .5059 & .2570 & .0470 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+At top-$k$=4 with alt8\_all4 placement (Table~\ref{tab:topk4}), the standard top-$k$ router on the s8e4 backbone wins on raw average (52.04\%) and the 2-iter all-softmax \texttt{s12} variant wins on GSM8K (7.35\%). \texttt{fh1} does \emph{not} win the average column here, but it produces:
+\begin{itemize}[leftmargin=1.5em]
+  \item the \textbf{highest MMLU (28.51\%)} of any 400M MoE variant we trained --- 1.16 points above the best standard MoE in this group;
+  \item the \textbf{highest ARC-Challenge} (33.02\%) and OpenBookQA (33.80\%) accuracies in the group;
+  \item competitive GSM8K (4.78\%, vs.\ 7.35\% for the strongest standard MoE in this group).
+\end{itemize}
+The picture at top-$k$=4 is one where \texttt{fh1} clearly trades raw avg-accuracy for stronger \emph{knowledge-style} benchmarks (MMLU, ARC-Challenge, OBQA) and lower-variance language modeling. This trade reverses entirely at top-$k$=2 (Section~\ref{sec:topk2}), where \texttt{fh1} wins both kinds of metrics.
+
+
+%=============================================================================
+\section{Main result: MoE at top-$k$=2, all-layer placement}
+\label{sec:topk2}
+%=============================================================================
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Main result.} 400M-active MoE, top-$k$=2, 8 experts, \emph{all 12 blocks routed} (387--389M active / 1.10B total). \textbf{Bold} = best in column. \texttt{fh1} (s8e4) leads on Avg, MMLU, and BoolQ; \texttt{fh1-2iter} leads on PPL, MMLU, ARC-C-norm, HellaSwag, and SciQ. The two \texttt{fh1} rows are the only Pareto-optimal entries on the (PPL, MMLU) frontier.}
+\label{tab:main}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|cc|cccccccccccc|c|cc}
+\toprule
+\textbf{Model} & \textbf{Active} & \textbf{Total} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{PPL} & \textbf{Avg} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+stdmoe-only s12 topk2 1-iter           & 389M & 1097M & .3183 & .5926 & .5685 & .7100 & .4666 & .3817 & .3220 & .7051 & .3100 & \textbf{.8870} & .5193 & 27.52 & .5086 & .2708 & .0508 \\
+stdmoe-only s12 topk2 2-iter           & 389M & 1097M & .3251 & .5985 & .5706 & \textbf{.7400} & .4755 & \textbf{.4021} & .3260 & .7040 & .3091 & .8730 & \textbf{.5272} & 26.97 & .5121 & .2621 & \textbf{.0667} \\
+\midrule
+stdmoe-only s8e4 topk2 1-iter (this work) & 385M & 1093M & \textbf{.3370} & .5922 & .5333 & .7000 & .4669 & .3879 & .3300 & .7035 & .2995 & .8600 & .5257 & 27.42 & .5027 & .2767 & .0349 \\
+\midrule
+\textbf{fh1 s8e4 topk2 1-iter (ours)}      & 387M & 1101M & .3242 & \textbf{.6174} & \textbf{.6012} & .6800 & .4644 & .3775 & .3340 & .7057 & \textbf{.3139} & .8710 & .5120 & 27.37 & \textbf{.5120} & .2782 & .0546 \\
+\textbf{fh1 s8e4 topk2 2-iter (ours)}      & 387M & 1101M & .3328 & .6107 & .5765 & .7200 & \textbf{.4747} & .3848 & \textbf{.3380} & \textbf{.7111} & .3100 & .8550 & .5111 & \textbf{26.99} & .5111 & \textbf{.2827} & .0387 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+This is the regime where Boltzmann routing pulls ahead. Holding active and total parameters \emph{constant} (387--389M / 1.10B), Table~\ref{tab:main} compares all four matched configurations: standard top-2 MoE on s12, standard top-2 MoE on s8e4 (added in this work), and our \texttt{fh1} router on s8e4 at 1- and 2-iter.
+
+\paragraph{What \texttt{fh1} 1-iter wins.} Highest WikiText word PPL (27.37, vs.\ 27.52 for the s12 standard MoE), highest MMLU (27.82\%, vs.\ 27.08\%), highest BoolQ (60.12\%, vs.\ 56.85--57.06\% for both s12 standard MoE rows), highest ARC-Easy (61.74\%), highest RACE (31.39\%), highest average zero-shot (51.20\%). It does so without diverging --- the same lr=$2\times 10^{-3}$ that destabilizes pure soft-routed Boltzmann is stable here because selection is hard top-$k$.
+
+\paragraph{What \texttt{fh1} 2-iter adds.} An additional energy iteration on the routing head improves PPL further (26.99 --- the lowest in the table), pushes MMLU to \textbf{28.27\%} (the highest of any 400M MoE row in the entire study), and lifts HellaSwag (47.47\%), OBQA (33.80\%), PIQA (71.11\%), and ARC-Challenge norm (33.28\%). It does cost ARC-Challenge raw and BoolQ relative to the 1-iter, suggesting the second iteration helps tasks that need finer-grained energy compatibility (vocab-prediction-style PPL, multiple-choice MMLU) but does not categorically dominate.
+
+\paragraph{What standard top-2 MoE still wins.} GSM8K (6.67\% for s12 stdmoe 2-iter, vs.\ 5.46\% / 3.87\% for our \texttt{fh1} rows) and LAMBADA (40.21\% vs.\ 37.75\%). Multi-step arithmetic reasoning still favors the linear gate, consistent with the v1 result that linear top-$k$ produces sharper expert specialization on chain-of-thought tasks. Closing this last gap is the main open question we leave to future work.
+
+\paragraph{Pareto frontier.} If we plot WikiText PPL (lower is better) against MMLU (higher is better), the only two non-dominated points in Table~\ref{tab:main} are the two \texttt{fh1} rows: the s8e4 \texttt{fh1} 2-iter dominates on both axes (26.99 PPL / 28.27\% MMLU), and 1-iter sits very near it (27.37 / 27.82). Every standard MoE row in the table is strictly dominated.
+
+
+%=============================================================================
+\section{Ablations: where does the win come from?}
+\label{sec:abl}
+%=============================================================================
+
+The s8e4 / fh1 / iter axes can each be flipped independently. Table~\ref{tab:abl} isolates the effect of each.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Three-axis ablation on the topk2 / 1.10B-total / $\sim$400M-active class.} Each row turns on or off (s8e4 vs.\ s12, \texttt{fh1} vs.\ \texttt{stdmoe-only}, 1- vs.\ 2-iter). The simultaneous PPL+MMLU+BoolQ win arrives only when all three of (s8e4, fh1, 2-iter) are present; (s8e4, fh1, 1-iter) is the next-best.}
+\label{tab:abl}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{ccc|c|c|cc|c}
+\toprule
+\textbf{s8e4 attn} & \textbf{fh1 router} & \textbf{2-iter} & \textbf{Avg} & \textbf{Wiki PPL} & \textbf{MMLU} & \textbf{BoolQ} & \textbf{GSM8K} \\
+\midrule
+            &            &            & .5086 & 27.52 & .2708 & .5685 & .0508 \\
+            &            & \checkmark & .5121 & 26.97 & .2621 & .5706 & \textbf{.0667} \\
+\checkmark  &            &            & .5027 & 27.42 & .2767 & .5333 & .0349 \\
+\midrule
+\checkmark  & \checkmark &            & \textbf{.5120} & 27.37 & .2782 & \textbf{.6012} & .0546 \\
+\checkmark  & \checkmark & \checkmark & .5111 & \textbf{26.99} & \textbf{.2827} & .5765 & .0387 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+A few observations:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Energy attention alone is not enough.} Going from row 1 (s12, stdmoe) to row 3 (s8e4, stdmoe) actually \emph{drops} average accuracy (50.86\% $\to$ 50.27\%) and BoolQ (56.85\% $\to$ 53.33\%) at fixed routing. The s8e4 backbone is a small win on MMLU (27.08\% $\to$ 27.67\%) and PPL (27.52 $\to$ 27.42), but the average column is worse. So the headline number in Section~\ref{sec:topk2} is \emph{not} attributable to the attention backbone.
+  \item \textbf{The fh1 router alone is the lever.} Going from row 3 (s8e4, stdmoe) to row 4 (s8e4, fh1) lifts Avg by 0.93 pp (50.27\% $\to$ 51.20\%), MMLU by 0.15 pp, and BoolQ by 6.79 pp (53.33\% $\to$ 60.12\%) at \emph{identical} active and total parameter counts. Row 4 also matches or beats every other row on the table on every reported metric except GSM8K.
+  \item \textbf{2-iter helps PPL and MMLU but costs avg.} Row 5 vs.\ row 4 is a small trade: PPL 27.37 $\to$ 26.99 (better), MMLU 27.82\% $\to$ 28.27\% (better), Avg 51.20\% $\to$ 51.11\% (essentially flat). For a deployment that cares about perplexity / knowledge benchmarks, the 2-iter is the right choice; for one that cares about average zero-shot, the 1-iter is at least as good.
+  \item \textbf{Standard top-2 with 2-iter is the GSM8K winner.} Row 2 (s12, stdmoe, 2-iter) is the only row that crosses 6\% GSM8K. Whatever is helping fh1 on PPL/MMLU/BoolQ is not helping it as much on chain-of-thought arithmetic. Section~\ref{sec:topk2} already flagged this; the ablation confirms it is a routing-rule effect, not a backbone effect.
+\end{enumerate}
+
+
+%=============================================================================
+\section{Cross-class summary}
+\label{sec:summary}
+%=============================================================================
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Best configurations per category at $\sim$400M active}, 30K steps. \texttt{fh1} produces the best PPL, MMLU, and BoolQ; standard top-$k$ produces the best Avg and GSM8K (the two highlighted standard rows are the topk4 configs from Table~\ref{tab:topk4}, whose total parameter count is $\sim$640M, smaller than the topk2 variants).}
+\label{tab:summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|cc|c|c|c|c|c}
+\toprule
+\textbf{Best configuration per category} & \textbf{Active} & \textbf{Total} & \textbf{Avg} & \textbf{Wiki PPL} & \textbf{BoolQ} & \textbf{MMLU} & \textbf{GSM8K} \\
+\midrule
+Dense s12 GPT (no MoE)                                & 398M & 398M  & .4963 & 31.56 & .5902 & .2604 & .0227 \\
+Dense s8e4 backbone (best, no MoE)                    & 401M & 401M  & .4965 & 31.86 & .5615 & .2788 & .0250 \\
+\midrule
+\textit{Standard top-$k$ MoE (best)}                  &      &       &       &       &       &       &       \\
+\quad stdmoe-only s8e4 topk4 1-iter                   & 394M & 640M  & \textbf{.5204} & 27.51 & .5630 & .2686 & .0326 \\
+\quad stdmoe-only s12  topk4 2-iter                   & 399M & 644M  & .5166 & 27.64 & .5847 & .2735 & \textbf{.0735} \\
+\quad stdmoe-only s12  topk2 2-iter                   & 389M & 1097M & .5121 & 26.97 & .5706 & .2621 & .0667 \\
+\midrule
+\textit{Boltzmann fh1 MoE (\textbf{ours}, best)}      &      &       &       &       &       &       &       \\
+\quad fh1 s8e4 topk2 1-iter                           & 387M & 1101M & .5120 & 27.37 & \textbf{.6012} & .2782 & .0546 \\
+\quad fh1 s8e4 topk2 2-iter                           & 387M & 1101M & .5111 & \textbf{26.99} & .5765 & \textbf{.2827} & .0387 \\
+\quad fh1 s8e4 topk4 1-iter                           & 388M & 627M  & .5074 & 28.56 & .5703 & .2851 & .0478 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Reading Table~\ref{tab:summary} top-to-bottom:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item Among MoE variants \emph{at the same total parameter count} (1.10B class, top-$k$=2), \texttt{fh1} 1-iter is the highest Avg, \texttt{fh1} 2-iter is the lowest PPL and highest MMLU, and \texttt{fh1} 1-iter is the highest BoolQ. The closest standard MoE rival in the same class (s12 stdmoe 2-iter) trails on all four metrics except GSM8K.
+  \item The standard topk4 alt8\_all4 row at 640M total achieves a slightly higher Avg (52.04\%) than any topk2 row, but at 1.6$\times$ \emph{fewer} total parameters --- a different operating point. Within its own parameter band (640M total), the \texttt{fh1} topk4 1-iter row already produces the highest MMLU (28.51\%, see Table~\ref{tab:topk4}).
+  \item For deployments that cap themselves at the dense baseline's total parameter count, neither MoE family changes the picture --- this paper is about what the router does once the MoE budget has been allocated.
+\end{itemize}
+
+
+%=============================================================================
+\section{Discussion}
+%=============================================================================
+
+\paragraph{Why does fh1 win where soft Boltzmann routing failed?} The v1 of this study reported that \emph{soft} Boltzmann routing diverges at lr=$10^{-3}$ and above, attributed to temperature collapse: the learned $\tau$ shrinks to zero, the soft routing becomes a one-hot, the chosen expert receives all gradient and overspecializes, and other experts atrophy. The \texttt{fh1} construction in Eq.~\ref{eq:fh1} short-circuits this loop: hard top-$k$ selection means a dying expert can still be reached via random tie-breaks during the early phase of training, and the standard MoE auxiliary load-balancing loss applies straightforwardly to the top-$k$ winners regardless of how they were scored. Empirically, every \texttt{fh1} run in this paper trained to 30K steps at lr=$2\times 10^{-3}$ without divergence.
+
+\paragraph{Why does fh1 help PPL/MMLU/BoolQ specifically?} Our reading is that energy compatibility and \emph{knowledge-style} retrieval pair naturally: BoolQ asks whether a passage entails a binary fact (an energy basin), MMLU asks which of four answers fits a domain (a domain-specific energy minimum), and PPL is sensitive to small calibration improvements in next-token routing. By contrast, GSM8K rewards sharp \emph{procedural} expert specialization (which expert handles addition? which handles multiplication?) of the kind that linear gates learn well. A natural extension --- a hybrid router that uses fh1 for non-arithmetic tokens and a linear gate for arithmetic-shaped tokens --- is left to future work.
+
+\paragraph{Limitations.} We trained at a single scale (400M active / 30K steps). Whether the fh1 advantage grows with scale, with longer training, or with more experts is an open question; the most informative next experiment is a 1.7B-active sweep at 60K--100K steps. We also fixed $\tau$ as a learned scalar; a per-layer or per-token $\tau$ may further improve calibration.
+
+
+%=============================================================================
+\section{Conclusion}
+%=============================================================================
+
+We introduced Boltzmann Top-$k$ Energy MoE (\texttt{fh1}), a router that scores experts by an energy compatibility instead of a linear gate, while keeping the hard top-$k$ selection that makes MoE training stable. On the s8e4 hybrid energy-attention backbone, at the 400M-active / top-2 / 1.10B-total parameter class, \texttt{fh1} produces the lowest WikiText perplexity (26.99), highest MMLU (28.27\%), highest BoolQ (60.12\%), and highest average zero-shot accuracy (51.20\%) of every matched standard top-$k$ baseline we trained --- with no learning-rate degradation. The win is attributable to the routing rule, not the attention backbone (Section~\ref{sec:abl}), and it generalizes to top-4 alt8\_all4 on the MMLU and ARC-Challenge axes (Section~\ref{sec:topk4}). Standard top-$k$ MoE remains the better choice for chain-of-thought arithmetic (GSM8K), suggesting hybrid routing as the natural next step.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

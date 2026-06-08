@@ -1,0 +1,222 @@
+%% ════════════════════════════════════════════════════════════════════
+%% moe_bs.tex  —  STANDALONE 2-slide Beamer deck
+%%
+%% Slide 1: BoltzMoE 400M @ 30k — full sweep (original groupings preserved)
+%% Slide 2: BoltzMoE 400M @ 30k — router & KL ablations on top of fh1
+%%
+%% Source: tools/bs/results/boltzmann_sweep_400m_30k_results.csv
+%% Visual language: Carbon Design System
+%% Compile:  pdflatex moe_bs.tex
+%% ════════════════════════════════════════════════════════════════════
+\documentclass[aspectratio=169,10pt]{beamer}
+\usefonttheme[onlymath]{serif}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{sourcesanspro}
+\usepackage{inconsolata}
+\usepackage{booktabs,graphicx,xcolor,amsmath,bm,amssymb,multirow,array}
+\usepackage{colortbl}
+\usepackage{tikz}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+
+%% ── Carbon palette ─────────────────────────────────────────────────
+\definecolor{cBlue60}{HTML}{0F62FE}
+\definecolor{cBlue10}{HTML}{EDF5FF}
+\definecolor{cGray100}{HTML}{161616}
+\definecolor{cGray70}{HTML}{525252}
+\definecolor{cGray30}{HTML}{C6C6C6}
+\definecolor{cGray20}{HTML}{E0E0E0}
+\definecolor{cGray10}{HTML}{F4F4F4}
+\definecolor{cWhite}{HTML}{FFFFFF}
+\definecolor{cYellow30}{HTML}{F1C21B}
+\definecolor{cMagenta60}{HTML}{D02670}
+\definecolor{cGreen50}{HTML}{42BE65}
+\colorlet{cAccent}{cBlue60}
+\colorlet{cTextMain}{cGray100}
+\colorlet{cTextSec}{cGray70}
+
+%% ── Beamer theme ───────────────────────────────────────────────────
+\usetheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{normal text}{fg=cTextMain,bg=cWhite}
+\setbeamercolor{structure}{fg=cAccent}
+\setbeamerfont{frametitle}{family=\sffamily,size=\large,series=\bfseries}
+\setbeamerfont{normal text}{family=\sffamily}
+
+\setbeamertemplate{frametitle}{%
+  \nointerlineskip%
+  \begin{beamercolorbox}[wd=\paperwidth,ht=2.6ex,dp=1.0ex]{}%
+    \hspace*{1.2em}%
+    {\color{cTextMain}\sffamily\bfseries\large\insertframetitle}%
+    \hfill%
+    {\color{cAccent}\rule[-0.6ex]{2.6em}{2.6pt}}\hspace*{1.2em}%
+  \end{beamercolorbox}%
+  \nointerlineskip%
+  {\color{cGray20}\rule{\paperwidth}{0.4pt}}%
+}
+
+\setbeamertemplate{footline}{%
+  \leavevmode%
+  \hbox{%
+    \begin{beamercolorbox}[wd=\paperwidth,ht=1.8ex,dp=0.6ex]{}%
+      \hspace*{1.2em}%
+      {\color{cAccent}\rule[-0.3ex]{0.5pt}{1.0ex}}\hspace*{1.0ex}%
+      {\color{cGray70}\sffamily\tiny Energy-Based Transformers}%
+      \hspace*{0.6em}%
+      {\color{cGray30}\sffamily\tiny $\cdot$ IBM Research}%
+      \hfill%
+      {\color{cGray70}\sffamily\tiny \insertframenumber\,/\,\inserttotalframenumber}%
+      \hspace*{1.2em}%
+    \end{beamercolorbox}%
+  }%
+}
+
+%% ── tcolorbox styles (compact) ─────────────────────────────────────
+\newtcolorbox{accenttile}[1][]{enhanced,colback=cBlue10,colframe=cBlue60,boxrule=0.5pt,
+  leftrule=2.5pt,arc=0pt,outer arc=0pt,boxsep=0pt,left=6pt,right=6pt,top=2pt,bottom=2pt,
+  colupper=cTextMain,fontupper=\sffamily\scriptsize,#1}
+\newtcolorbox{egpttile}[1][]{enhanced,colback=cMagenta60!10,colframe=cMagenta60,boxrule=0.5pt,
+  leftrule=2.5pt,arc=0pt,outer arc=0pt,boxsep=0pt,left=6pt,right=6pt,top=2pt,bottom=2pt,
+  colupper=cTextMain,fontupper=\sffamily\scriptsize,#1}
+\newtcolorbox{wintile}[1][]{enhanced,colback=cGreen50!10,colframe=cGreen50,boxrule=0.5pt,
+  leftrule=2.5pt,arc=0pt,outer arc=0pt,boxsep=0pt,left=6pt,right=6pt,top=2pt,bottom=2pt,
+  colupper=cTextMain,fontupper=\sffamily\scriptsize,#1}
+
+\begin{document}
+
+%% ════════════════════════════════════════════════════════════════════
+%% Slide 1 — full sweep (original groupings + new top-2 fh1 winner)
+%% ════════════════════════════════════════════════════════════════════
+\begin{frame}{BoltzMoE 400M-active, $d{=}1024$, 31.5\,B tokens (30k steps): full sweep}
+\vspace{-8pt}
+\begin{center}\fontsize{6.6}{8.0}\selectfont
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.92}
+\begin{tabular}{@{}llcrrrrrr@{}}
+\toprule
+\textbf{Variant} & \textbf{Type} & \textbf{Router} &
+\textbf{Active} & \textbf{Total} &
+\textbf{WT-PPL}$\downarrow$ &
+\textbf{Avg}$\uparrow$ & \textbf{MMLU}$\uparrow$ & \textbf{GSM8K}$\uparrow$ \\
+\midrule
+\rowcolor{cGray10}
+\multicolumn{9}{l}{\textit{\color{cTextSec}All-energy-attention}} \\
+\texttt{baseline\_em}        & EFFN         & ---          & 392\,M & 392\,M           & 56.4 & 48.1 & 26.2 & 1.90 \\
+\texttt{f5\_rep0}            & f5 (dense, 16/16) & Boltz$+$KL    & 392\,M & 392\,M           & 64.5 & 44.3 & 26.6 & 2.20 \\
+\midrule
+\rowcolor{cGray10}
+\multicolumn{9}{l}{\textit{\color{cTextSec}s8e4 (8 std-attn $+$ 4 energy-attn)}} \\
+\texttt{s12\_gpt}                      & GPT (12 std)        & ---          & 398\,M & 398\,M             & 31.6 & 49.6 & 26.0 & 2.27 \\
+\texttt{baseline\_em\_s8e4}            & MLP $+$ EFFN (last-4) & ---          & 401\,M & 401\,M             & 31.9 & 49.7 & 27.9 & 2.50 \\
+\texttt{f5\_rep0\_s8e4}                & MLP $+$ f5 (dense, last-4) & Boltz$+$KL (last-4) & 401\,M & 401\,M             & 33.9 & 48.5 & 27.3 & 2.12 \\
+\midrule
+\rowcolor{cGray10}
+\multicolumn{9}{l}{\textit{\color{cTextSec}Standard TopK-MoE (s8e4, top-4)}} \\
+\texttt{stdmoe\_only\_s8e4}            & TopK-MoE            & linear top-4 & 394\,M & 640\,M     & 27.5 & 52.0 & 26.9 & 3.26 \\
+\texttt{stdmoe\_em\_s8e4}              & MoE $+$ EFFN (last-4) & linear top-4 (first-8)         & 395\,M & 446\,M     & 31.0 & 50.1 & 26.2 & 2.12 \\
+\texttt{stdmoe\_f5\_s8e4}              & MoE $+$ f5 (last-4)   & top-4 (first-8) $+$ Boltz$+$KL & 394\,M & 640\,M     & 32.2 & 50.4 & 26.4 & 2.20 \\
+\midrule
+\rowcolor{cGray10}
+\multicolumn{9}{l}{\textit{\color{cTextSec}Standard TopK-MoE (s8e4, \textbf{top-2}) --- iso-everything head-to-head}} \\
+\texttt{s12\_stdmoe\_only\_topk2}       & std MoE (s12)         & linear top-2 & 389\,M & 1097\,M    & 27.5          & 50.9          & 27.1          & 5.08 \\
+\texttt{s8e4\_stdmoe\_only\_topk2}      & std MoE (s8e4)        & linear top-2 & 385\,M & 1093\,M    & 27.4          & 50.3          & 27.7          & 3.49 \\
+\rowcolor{cGreen50!12}
+\texttt{s8e4\_stdmoe\_fh1\_topk2}       & \textbf{fh1 (energy-grad)} & linear top-2 & \textbf{387\,M} & \textbf{1101\,M} & \textbf{27.4} & \textbf{51.2} & \textbf{27.8} & \textbf{5.46} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{-2pt}
+\begin{egpttile}
+\textbf{fh1 wins the iso-everything top-2 head-to-head.}
+\texttt{s8e4\_stdmoe\_fh1\_topk2} (387\,M active / 1101\,M total) beats both
+vanilla-MoE baselines (\texttt{s12\_stdmoe\_only\_topk2}, \texttt{s8e4\_stdmoe\_only\_topk2}).
+Same router, same params --- only the expert function changed.
+\end{egpttile}
+
+\vspace{1pt}
+{\sffamily\tiny\color{cTextSec}\hfill
+All runs LR $2{\times}10^{-3}$, 30k steps. \;
+\texttt{s8e4} = 8 std-attn + 4 energy-attn blocks. \;
+WT = Wikitext word-PPL.\hfill\hfill}
+\end{frame}
+
+
+%% ════════════════════════════════════════════════════════════════════
+%% Slide 2 — focused router & KL ablation on top of fh1
+%% ════════════════════════════════════════════════════════════════════
+\begin{frame}{fh1 head-to-head ($d{=}1024$, 31.5\,B tokens): the win is in the experts, not the router}
+\vspace{-6pt}
+
+\begin{center}\scriptsize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{0.95}
+\begin{tabular}{@{}llcrrrrrr@{}}
+\toprule
+\textbf{Variant} & \textbf{Router} & \textbf{Experts} &
+\textbf{Active} & \textbf{Total} &
+\textbf{WT-PPL}$\downarrow$ &
+\textbf{Avg}$\uparrow$ & \textbf{MMLU}$\uparrow$ & \textbf{GSM8K}$\uparrow$ \\
+\midrule
+\rowcolor{cGray10}
+\multicolumn{9}{l}{\textit{\color{cTextSec}Vanilla-MoE baselines}} \\
+\texttt{s12\_stdmoe\_only\_topk2}       & linear top-k & swiglu MLP        & 389\,M & 1097\,M & 27.5 & 50.9 & 27.1          & 5.08 \\
+\texttt{s8e4\_stdmoe\_only\_topk2}      & linear top-k & swiglu MLP        & 385\,M & 1093\,M & 27.4 & 50.3 & 27.7          & 3.49 \\
+\midrule
+\rowcolor{cGray10}
+\multicolumn{9}{l}{\textit{\color{cTextSec}\textbf{fh1} --- energy-grad experts, linear router}} \\
+\rowcolor{cGreen50!15}
+\texttt{s8e4\_stdmoe\_fh1\_topk2}       & linear top-k & energy-grad ($\partial E/\partial x$) & \textbf{387\,M} & \textbf{1101\,M} & \textbf{27.4} & \textbf{51.2} & \textbf{27.8} & \textbf{5.46} \\
+\midrule
+\rowcolor{cGray10}
+\multicolumn{9}{l}{\textit{\color{cTextSec}Boltzmann router}} \\
+\texttt{s8e4\_stdmoe\_boltzfh1\_sqrtd\_topk2} & Boltzmann (fixed $\sqrt{1/d}$, no KL) & energy-grad        & 387\,M & 1101\,M & 28.1 & 50.8 & 26.1 & 2.65 \\
+\texttt{s8e4\_stdmoe\_boltzfh1\_topk2}  & Boltzmann (learnable $T$, no KL) & energy-grad        & 387\,M & 1101\,M & 29.9 & 48.9 & 26.5 & 3.03 \\
+\texttt{s8e4\_stdmoe\_f5nokl\_topk2}    & Boltzmann (no KL)            & energy-grad (f5)   & 387\,M & 1101\,M & 29.8 & 49.7 & 28.6 & 2.43 \\
+\texttt{s8e4\_stdmoe\_f5kl\_topk2}      & Boltzmann $\to$ linear (KL)  & energy-grad (f5)   & 387\,M & 1101\,M & 29.8 & 49.5 & 26.0 & 2.73 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{-2pt}
+\begin{columns}[T,onlytextwidth]
+\column{0.50\textwidth}
+\begin{wintile}
+\textbf{Why fh1 matters.}
+At iso-everything, swapping the 3-matrix \texttt{swiglu} expert for the
+2-matrix energy gradient $\partial E_e/\partial x$ wins on every headline
+metric. The gain is inductive bias, not capacity or routing.
+\end{wintile}
+
+\column{0.50\textwidth}
+\begin{accenttile}
+\textbf{Boltzmann routing still trails fh1.}
+All Boltzmann-router variants lose to fh1 on WT-PPL and GSM8K.
+\textbf{Fixed $\sqrt{1/d}$ scaling helps most}: Avg $48.9{\to}50.8$,
+WT-PPL $29.9{\to}28.1$ vs.\ learnable $T$ --- and edges past the std-MoE
+baseline on Avg, though fh1 (51.2) is still ahead.
+\end{accenttile}
+
+\end{columns}
+
+\vspace{2pt}
+\begin{egpttile}
+\textbf{Takeaway.}
+Energy-based MoE wins because of energy-based \emph{experts}, not energy-based routing.
+\textbf{Next:} confirm at 1\,B-active scale (run in flight).
+\end{egpttile}
+
+\vspace{1pt}
+{\sffamily\tiny\color{cTextSec}\hfill
+All runs: 12 layers, $d{=}1024$, 16 heads, top-2 of 8 experts, ipe per-expert$=$9536,
+LR $2{\times}10^{-3}$, 2k warmup, cosine to 0.1, 30k steps $\times$ 1.05M tokens
+$=$ 31.5\,B tokens. \;
+Avg $=$ mean of 11 acc-style metrics. \;
+\hfill\hfill}
+
+\end{frame}
+
+\end{document}

@@ -24,14 +24,17 @@ model_args:
     model_type: energy
     normalization_function: rmsnorm
     position_embedding_type: rope
-    hidden_size: 1024
-    num_layers: 4
+    hidden_size: 1584
+    num_layers: 8
     init_method: normal
     tie_word_embeddings: true
 
     rope_dim: 128
-    # 4 blocks: shallow-deep-deep-shallow
-    layer_iterations: [4, 14, 14, 4]
+    # Base config — overridden by sweep script for each variant
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1]
+    iter_dropout_range: 0
+    iter_step_scales: false
+    proj_mode: unconstrained
 
     bos_token_id: 100257
     eos_token_id: 100257
@@ -40,35 +43,43 @@ model_args:
     max_position_embeddings: 4096
 
     sequence_mixer_blocks:
-      - {sequence_mixer_type: energy_attention, num_attention_heads: 8, num_key_value_heads: 8, add_bias: false, attention_multiplier: 0.08838}
-      - {sequence_mixer_type: energy_attention, num_attention_heads: 8, num_key_value_heads: 8, add_bias: false, attention_multiplier: 0.08838}
-      - {sequence_mixer_type: energy_attention, num_attention_heads: 8, num_key_value_heads: 8, add_bias: false, attention_multiplier: 0.08838}
-      - {sequence_mixer_type: energy_attention, num_attention_heads: 8, num_key_value_heads: 8, add_bias: false, attention_multiplier: 0.08838}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
+      - {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.08704}
     mlp_blocks:
-      - {mlp_type: Energy_MLP, intermediate_size: 8192, add_bias: false}
-      - {mlp_type: Energy_MLP, intermediate_size: 8192, add_bias: false}
-      - {mlp_type: Energy_MLP, intermediate_size: 8192, add_bias: false}
-      - {mlp_type: Energy_MLP, intermediate_size: 8192, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
+      - {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4224, add_bias: false}
 
 tuning_args:
   tuning_method: pretraining
 
 save_args:
   save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/egpt_test
-  save_interval: 5000
+  save_interval: 2000
 
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: dolomite
-    name: baseline_3EGPT_3iter
+    name: EGPT_8b_400M
 
 training_parameters:
   num_training_steps: 30000
-  eval_interval: 5000
-  micro_batch_size: 2 #4
-  gradient_accumulation_steps: 4 #4
+  eval_interval: 10000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
   gradient_clipping: 1
 
 optimizer_args:

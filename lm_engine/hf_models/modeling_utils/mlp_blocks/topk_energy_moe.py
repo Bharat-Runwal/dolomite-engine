@@ -111,3 +111,14 @@ class TopK_Energy_MoE_MLP(nn.Module):
 
     def get_metrics(self) -> dict[str, float] | None:
         return self._cached_metrics
+
+    def get_num_active_parameters(self) -> int:
+        # Per-token: only top_k of n_experts is used in W1 and W2; router is fully used.
+        active = 0
+        for parameter in self.W1.parameters():
+            active += (parameter.numel() * self.top_k) // self.n_experts
+        for parameter in self.W2.parameters():
+            active += (parameter.numel() * self.top_k) // self.n_experts
+        for parameter in self.router.parameters():
+            active += parameter.numel()
+        return active

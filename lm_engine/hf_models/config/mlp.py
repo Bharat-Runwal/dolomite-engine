@@ -168,17 +168,21 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
     """
 
     mlp_type: str = "BoltzmannMoE_Energy_MLP"
-    intermediate_size: int
-    n_experts: int = 16
+    intermediate_size: int  # total across all experts = n_experts * per_expert_I
+    n_experts: int = 8
     temperature: float = 1.0
-    repulsion_coef: float = 0.0
+    repulsion_coef: float = 0.0      # 0 = disabled; try 0.01 for stochastic repulsion
     n_repulsion_pairs: int = 4
-    activation_function: str = "gelu_pytorch_tanh"
+    # None or 0 = soft (all experts active); int>0 = sparse top-k Boltzmann routing
+    top_k: int | None = None
+    gelu_grad_method: str = "sigmoid"
+    activation_function: str = "gelu"
     dropout: float = 0.0
     add_bias: bool = False
-    # top_k=0 → dense (Nima's original). top_k>0 → F5-style sparse routing
-    # weights (all expert outputs still computed; only mixing becomes sparse).
-    top_k: int = 0
+    # Backward-compat: checkpoints trained with the EARLIER BoltzmannMoE port carry
+    # `normalized_topk` in their saved config. Nima's vendored class uses no-renorm
+    # truncation and does NOT consume this field, but we must ACCEPT it so those old
+    # checkpoints still load/eval. Accepted-but-ignored.
     normalized_topk: bool = True
 
     def model_post_init(self, __context: Any) -> None:
@@ -189,8 +193,12 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
             f"n_experts ({self.n_experts})"
         )
         assert self.temperature > 0, "temperature must be positive"
-        assert 0 <= self.top_k <= self.n_experts, (
-            f"top_k ({self.top_k}) must be in [0, n_experts={self.n_experts}]"
+        assert self.top_k is None or 0 <= self.top_k <= self.n_experts, (
+            f"top_k ({self.top_k}) must be None or in [0, n_experts={self.n_experts}]"
+        )
+        assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact"), (
+            f"gelu_grad_method must be one of 'sigmoid' / 'tanh_exact' / 'erf_exact', "
+            f"got {self.gelu_grad_method}"
         )
 
 
@@ -217,6 +225,36 @@ class _TopKEnergyMoEMLPArgs(BaseArgs):
         assert 1 <= self.top_k <= self.n_experts, (
             f"top_k ({self.top_k}) must be in [1, n_experts={self.n_experts}]"
         )
+
+
+class _BoltzRouterTopKEnergyMoEMLPArgs(BaseArgs):
+    """fh1 with a Boltzmann router instead of a linear top-k router.
+
+    Same per-expert energy-gradient form as TopK_Energy_MoE_MLP. Routing is
+    softmax over -E_e(x) / T with learnable T. Switch load-balance only;
+    no z-loss, no KL distillation, no repulsion.
+    """
+
+    mlp_type: str = "BoltzRouter_TopK_Energy_MoE_MLP"
+    intermediate_size: int                # per-expert (NOT divided by n_experts)
+    n_experts: int = 8
+    top_k: int = 2
+    load_balance_coef: float = 0.01
+    boltzmann_temperature: float = 1.0
+    learnable_temperature: bool = True
+    energy_scale_mode: str = "temperature"   # "temperature" (learnable T) or "sqrt_inv_d" (fixed 1/sqrt(d))
+    sqrt_inv_d_dim: str = "intermediate"     # for sqrt_inv_d mode: "intermediate" (=intermediate_size) or "hidden" (=hidden_size)
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0.0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "BoltzRouter_TopK_Energy_MoE_MLP"
+        assert self.n_experts >= 2
+        assert 1 <= self.top_k <= self.n_experts
+        assert self.boltzmann_temperature > 0
+        assert self.energy_scale_mode in ("temperature", "sqrt_inv_d")
+        assert self.sqrt_inv_d_dim in ("intermediate", "hidden")
 
 
 class _LRDiagonalGaussBoltzmannMoEArgs(BaseArgs):

@@ -10,7 +10,7 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MoEEnergyArgs, _MoEEnergyModuleArgs, _MoEEnergyF5Args, _MoEEnergyF6Args, _GaussianBoltzmannMoEArgs, _LRDiagonalGaussBoltzmannMoEArgs, _BoltzmannMoEEnergyMLPArgs, _TopKEnergyMoEMLPArgs
+from .mlp import _MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs, _MoEEnergyArgs, _MoEEnergyModuleArgs, _MoEEnergyF5Args, _MoEEnergyF6Args, _GaussianBoltzmannMoEArgs, _LRDiagonalGaussBoltzmannMoEArgs, _BoltzmannMoEEnergyMLPArgs, _TopKEnergyMoEMLPArgs, _BoltzRouterTopKEnergyMoEMLPArgs
 from .sequence_mixer import (
     _CausalConvolution,
     _EGradAttentionArgs,
@@ -93,6 +93,7 @@ _MLP_CONFIG_CLASSES = {
     "LRDiagonalGaussBoltzmannMoE": _LRDiagonalGaussBoltzmannMoEArgs,
     "BoltzmannMoE_Energy_MLP": _BoltzmannMoEEnergyMLPArgs,
     "TopK_Energy_MoE_MLP": _TopKEnergyMoEMLPArgs,
+    "BoltzRouter_TopK_Energy_MoE_MLP": _BoltzRouterTopKEnergyMoEMLPArgs,
 }
 
 

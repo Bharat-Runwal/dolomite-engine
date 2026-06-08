@@ -10,6 +10,10 @@ fi
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID # Recommended
 export CUDA_MODULE_LOADING=LAZY # Recommended
+
+# Reduce CUDA-allocator fragmentation; helps avoid OOM at large model size where
+# the alloc message itself recommends this. No downside for smaller runs.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # export CUDA_DEVICE_MAX_CONNECTIONS=1 # Required
 
 # NCCl/InfiniBand options

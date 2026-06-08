@@ -8,6 +8,7 @@ from .moe import MoE, ParameterizedExperts
 from .moe_energy import MoE_Energy, MoE_Energy_Module, MoE_Energy_F5, MoE_Energy_F6, GaussianBoltzmannMoE, LRDiagonalGaussBoltzmannMoE
 from .boltzmann_moe import BoltzmannMoE_Energy_MLP
 from .topk_energy_moe import TopK_Energy_MoE_MLP
+from .boltz_router_topk_energy_moe import BoltzRouter_TopK_Energy_MoE_MLP
 
 
 
@@ -132,16 +133,16 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             temperature=block.temperature,
             repulsion_coef=block.repulsion_coef,
             n_repulsion_pairs=block.n_repulsion_pairs,
-            init_method=config.init_method,
+            top_k=block.top_k,
+            gelu_grad_method=getattr(block, "gelu_grad_method", "sigmoid"),
             activation_function=block.activation_function,
+            add_bias=block.add_bias,
             dropout=block.dropout,
+            init_method=config.init_method,
             initializer_range=config.initializer_range,
             m_width=config.m_width,
             num_layers=config.num_layers,
-            add_bias=block.add_bias,
             layer_idx=layer_idx,
-            top_k=block.top_k,
-            normalized_topk=block.normalized_topk,
         )
     elif mlp_type == "TopK_Energy_MoE_MLP":
         mlp = TopK_Energy_MoE_MLP(
@@ -150,6 +151,26 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             n_experts=block.n_experts,
             top_k=block.top_k,
             load_balance_coef=block.load_balance_coef,
+            activation_function=block.activation_function,
+            add_bias=block.add_bias,
+            dropout=block.dropout,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            layer_idx=layer_idx,
+        )
+    elif mlp_type == "BoltzRouter_TopK_Energy_MoE_MLP":
+        mlp = BoltzRouter_TopK_Energy_MoE_MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            n_experts=block.n_experts,
+            top_k=block.top_k,
+            load_balance_coef=block.load_balance_coef,
+            boltzmann_temperature=block.boltzmann_temperature,
+            learnable_temperature=block.learnable_temperature,
+            energy_scale_mode=block.energy_scale_mode,
+            sqrt_inv_d_dim=block.sqrt_inv_d_dim,
             activation_function=block.activation_function,
             add_bias=block.add_bias,
             dropout=block.dropout,

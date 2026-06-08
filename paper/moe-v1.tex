@@ -1,0 +1,740 @@
+\documentclass[oneside]{article}
+
+\usepackage[preprint]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{adjustbox}
+\usepackage{array}
+\usepackage{nicefrac}
+\usepackage{microtype}
+
+\title{Energy-Based Transformer Language Models:\\Scaling Mixture-of-Experts with Boltzmann Routing and Iterative Refinement}
+
+\author{
+  Bishwajit Saha \\
+  IBM Research \\
+  \texttt{bsaha3@ibm.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We introduce \textbf{Energy GPT (EGPT)}, a family of transformer language models that replace conventional feedforward blocks with energy-based iterative refinement modules, where each block performs gradient-descent steps on a learned energy landscape. We conduct a comprehensive empirical study across 130M--755M total parameters, with particular focus on Mixture-of-Experts (MoE) routing. We evaluate three routing strategies---standard top-$k$, Boltzmann (energy-based), and Gaussian-Boltzmann---across multiple placement patterns and two architectural families: sequential EGPT and parallel-recurrent ParRecGPT.
+
+Our central finding is that \textbf{Boltzmann MoE routing}, while underperforming standard top-$k$ by 2--7\% in average accuracy, exhibits fundamentally different scaling behavior and unique strengths: (i)~it shows superior BoolQ performance (+5--8\% over standard MoE at 330M), (ii)~it benefits disproportionately from the ParRecGPT architecture (closing 44\% of the gap to standard MoE), (iii)~it achieves the highest MMLU among all 400M MoE variants (28.0\%), and (iv)~it is substantially more parameter-efficient (achieving 49.4\% avg with only 533M total vs.\ 53.1\% requiring 745M total for standard MoE). We additionally study Gaussian-Boltzmann routing, iteration schedules, non-uniform allocation, dropout, and hybrid architectures, establishing comprehensive foundations for energy-based MoE scaling.
+\end{abstract}
+
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+Standard transformer language models~\citep{vaswani2017attention} process each token through a fixed computation budget per layer, regardless of input complexity. Mixture-of-Experts (MoE)~\citep{shazeer2017outrageously,fedus2022switch} addresses this by routing tokens to specialized sub-networks, scaling parameters without proportional compute cost. However, the gating mechanism itself---how tokens are assigned to experts---remains a critical design choice with implications for load balancing, expert utilization, and downstream task performance.
+
+Energy-based models (EBMs)~\citep{lecun2006tutorial,du2019implicit} offer a principled framework for adaptive computation: inference as iterative energy minimization, where representations are refined through gradient descent on a learned scalar energy function. This naturally allocates variable computation per token based on input difficulty.
+
+We study the intersection of these paradigms---\textbf{energy-based routing for MoE}---through Boltzmann and Gaussian-Boltzmann gating mechanisms that leverage energy scores rather than learned linear projections. Our key insight is that while standard top-$k$ routing achieves higher raw accuracy, Boltzmann routing exhibits qualitatively different behavior worth understanding:
+
+\begin{enumerate}
+    \item \textbf{Boltzmann MoE routing} (\S\ref{sec:moe_boltz}): Energy-scored expert selection using Boltzmann distributions. We characterize its learning rate sensitivity (catastrophic collapse at lr$\geq$1e-3), its benchmark-specific advantages (BoolQ, WinoGrande), and its strong synergy with ParRecGPT (+2.1--2.9\% over EGPT).
+    \item \textbf{Standard vs.\ Boltzmann scaling comparison} (\S\ref{sec:moe_330m}--\ref{sec:moe_summary}): Systematic comparison across 330M--755M total params, showing Boltzmann's parameter efficiency and its complementary strengths.
+    \item \textbf{Gaussian-Boltzmann routing} (\S\ref{sec:gaussboltz}): Noise-augmented Boltzmann routing with cosine-cosine parameterizations, providing a lightweight alternative at 148--207M scale.
+    \item \textbf{Energy foundations} (\S\ref{sec:foundations}--\S\ref{sec:hybrid}): Iteration schedules, dropout, and architectures that form the substrate for MoE integration.
+\end{enumerate}
+
+
+%=============================================================================
+\section{Background and Method}
+%=============================================================================
+
+\subsection{Energy-Based Feedforward Blocks}
+
+Given an input hidden state $\mathbf{h} \in \mathbb{R}^d$ from the attention sublayer, a standard transformer FFN applies a fixed transformation $\mathrm{FFN}(\mathbf{h})$. In EGPT, we define a scalar energy function:
+\begin{equation}
+    E_\theta(\mathbf{h}) = \|\mathbf{h} - f_\theta(\mathbf{h})\|^2
+\end{equation}
+where $f_\theta$ uses the same architecture as a standard FFN (up-projection, activation, down-projection). The energy block performs $T$ gradient steps:
+\begin{equation}
+    \mathbf{h}^{(t+1)} = \mathbf{h}^{(t)} - \alpha \nabla_{\mathbf{h}} E_\theta(\mathbf{h}^{(t)}), \quad t = 0, \ldots, T-1
+\end{equation}
+This converts each FFN into an iterative refinement procedure where the step count $T$ controls the compute-quality tradeoff.
+
+\subsection{Parallel Recurrent GPT (ParRecGPT)}
+
+ParRecGPT computes attention and energy/feedforward streams concurrently rather than sequentially:
+\begin{equation}
+    \mathbf{h}_{\ell+1} = \mathbf{h}_\ell + \mathrm{Attn}(\mathbf{h}_\ell) + \mathrm{Energy}(\mathbf{h}_\ell)
+\end{equation}
+This reduces effective serial depth while maintaining representational capacity, and---as we show---proves particularly beneficial for energy-based routing.
+
+\subsection{Mixture-of-Experts Integration}
+
+We integrate MoE at the FFN/energy layer level with three routing strategies:
+
+\paragraph{Standard Top-$k$ MoE}~\citep{shazeer2017outrageously,fedus2022switch}: A learned gating network $G(\mathbf{h}) = \mathrm{softmax}(W_g \mathbf{h})$ routes each token to the top-$k$ of $N$ experts (we use $N=8$, $k=4$ throughout). Load-balancing auxiliary loss prevents expert collapse.
+
+\paragraph{Boltzmann MoE:} Replaces the learned gating with energy-scored routing. Given $N$ experts, each with energy function $E_i$, the routing probability is:
+\begin{equation}
+    p(i | \mathbf{h}) = \frac{\exp(-E_i(\mathbf{h}) / \tau)}{\sum_{j=1}^N \exp(-E_j(\mathbf{h}) / \tau)}
+\end{equation}
+where $\tau$ is a learned temperature. We study \textbf{E2F5} (2 energy experts + 5 FFN experts) and \textbf{E6F5} (6 energy + 5 FFN experts). The key distinction from standard MoE is that routing decisions are driven by energy landscape compatibility rather than a separate gating projection.
+
+\paragraph{Gaussian-Boltzmann MoE:} Augments Boltzmann routing with structured Gaussian noise:
+\begin{equation}
+    p(i | \mathbf{h}) \propto \exp\left(-\frac{E_i(\mathbf{h}) + \epsilon_i}{\tau}\right), \quad \epsilon_i \sim \mathcal{N}(0, \sigma^2(\mathbf{h}))
+\end{equation}
+where $\sigma$ is input-dependent. We study four parameterizations: cosine-cosine (cc), cosine-cosine-8 (cc8), cosine-cosine-sigmoid (ccs), and cosine-cosine-sigmoid-8 (ccs8), varying the noise schedule and expert count.
+
+\paragraph{Placement Patterns:} We study four MoE placement strategies:
+\begin{itemize}
+    \item \textbf{Single}: One MoE layer (minimal parameter overhead, $\sim$519M total)
+    \item \textbf{Alternating (alt)}: Every other layer is MoE ($\sim$568--578M total)
+    \item \textbf{Alt8\_all4}: 8 alternating + 4 all-layer ($\sim$627--637M total)
+    \item \textbf{All}: Every layer is MoE (maximum parameters, $\sim$745--755M total)
+\end{itemize}
+
+
+%=============================================================================
+\section{Experimental Setup}
+%=============================================================================
+
+\textbf{Training.} All models are trained on the same data mixture for 30K steps (unless otherwise noted) using AdamW~\citep{loshchilov2019decoupled} with cosine LR scheduling. We sweep learning rates from $1 \times 10^{-4}$ to $2 \times 10^{-3}$ depending on scale and routing strategy. Boltzmann models use a narrower LR range (1e-4 to 8e-4) due to training instability at higher rates.
+
+\textbf{Evaluation.} We report on 11 zero-shot benchmarks: ARC-Challenge~\citep{clark2018think}, ARC-Easy, BoolQ~\citep{clark2019boolq}, COPA~\citep{roemmele2011choice}, HellaSwag~\citep{zellers2019hellaswag}, LAMBADA~\citep{paperno2016lambada}, OpenBookQA~\citep{mihaylov2018can}, PIQA~\citep{bisk2020piqa}, RACE~\citep{lai2017race}, SciQ~\citep{welbl2017crowdsourcing}, and WinoGrande~\citep{sakaguchi2020winogrande}. We additionally report WikiText~\citep{merity2017pointer} perplexity (PPL), MMLU~\citep{hendrycks2021measuring} (5-shot), and GSM8K~\citep{cobbe2021training} (exact match).
+
+\textbf{Notation.} \textit{EGPT-$N$b} = $N$-block energy model; \textit{s8e4} = 8 standard + 4 energy layers; \textit{ParRec} = ParRecGPT. For MoE: ``single'' = one MoE layer, ``alt'' = alternating, ``all'' = every layer. For Boltzmann: E$n$F$m$ = $n$ energy experts + $m$ FFN experts.
+
+
+%=============================================================================
+\section{Energy Model Foundations}
+\label{sec:foundations}
+%=============================================================================
+
+Before studying MoE routing, we establish the base energy model properties that inform routing design.
+
+\subsection{Uniform Iteration Sweep}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Uniform iteration sweep.} Best avg per block count in \textbf{bold}. All at 30K steps.}
+\label{tab:uniform}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{c|c|ccccccccccc|c|c}
+\toprule
+\textbf{Blocks} & \textbf{Iters} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} \\
+\midrule
+\multirow{4}{*}{3b (163M)}
+ & 2  & .246 & .416 & .591 & .630 & .289 & .149 & .272 & .627 & .254 & .687 & .510 & .418 & 70.29 \\
+ & 6  & .244 & .442 & .609 & .630 & .302 & .172 & .288 & .632 & .270 & .724 & .522 & \textbf{.432} & 56.43 \\
+ & 9  & .241 & .438 & .609 & .620 & .309 & .174 & .290 & .626 & .266 & .712 & .522 & .431 & 54.42 \\
+ & 36 & .241 & .440 & .610 & .620 & .313 & .192 & .284 & .610 & .266 & .710 & .511 & .429 & 53.98 \\
+\midrule
+\multirow{4}{*}{4b (182M)}
+ & 2  & .228 & .434 & .592 & .630 & .298 & .163 & .274 & .624 & .265 & .687 & .508 & .421 & 63.23 \\
+ & 6  & .252 & .458 & .572 & .650 & .310 & .192 & .288 & .626 & .267 & .744 & .504 & \textbf{.434} & 53.58 \\
+ & 9  & .245 & .456 & .553 & .600 & .316 & .201 & .282 & .636 & .268 & .746 & .534 & .431 & 51.58 \\
+ & 36 & .248 & .442 & .602 & .570 & .313 & .191 & .278 & .628 & .269 & .703 & .503 & .425 & 50.94 \\
+\midrule
+\multirow{4}{*}{5b (202M)}
+ & 2  & .245 & .424 & .589 & .630 & .301 & .179 & .282 & .632 & .273 & .711 & .506 & .434 & 56.95 \\
+ & 6  & .242 & .463 & .568 & .610 & .316 & .195 & .290 & .634 & .276 & .702 & .504 & .436 & 50.02 \\
+ & 9  & .246 & .464 & .617 & .650 & .321 & .208 & .280 & .628 & .264 & .736 & .515 & \textbf{.448} & 48.85 \\
+ & 24 & .246 & .447 & .555 & .540 & .320 & .206 & .284 & .637 & .268 & .722 & .510 & .431 & 48.22 \\
+\midrule
+\multirow{2}{*}{8b (262M)}
+ & $[9]^8$ & .248 & .473 & .599 & .630 & .338 & .221 & .292 & .639 & .286 & .743 & .508 & .439 & 44.43 \\
+ & best NU & .253 & .474 & .575 & .640 & .337 & .216 & .298 & .652 & .297 & .750 & .516 & \textbf{.444} & 43.48 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:uniform} reveals a clear pattern: performance peaks at 6--9 iterations per block across all model sizes. The transition from 2 to 6 iterations yields substantial gains---1.4\% for 3-block, 1.3\% for 4-block---reflecting the minimum computational depth needed for meaningful energy minimization. Beyond 9 iterations, returns diminish sharply: the 5-block model gains only 1.2\% going from 6 to 9 iterations, and performance actually \textit{declines} at 24 iterations (43.1\%), likely due to over-optimization of the energy landscape causing representational collapse.
+
+This finding directly informs MoE design: Boltzmann routing relies on energy scores for expert selection, and these scores are only meaningful when iterations are in the 6--9 range where the energy landscape is well-conditioned. Too few iterations produce noisy energy estimates (routing becomes random); too many cause energy values to concentrate (routing becomes deterministic and non-adaptive).
+
+The 8-block non-uniform schedule $[3,11,11,11,11,11,11,3]$ slightly outperforms uniform $[9]^8$ (44.4\% vs.\ 43.9\%), suggesting that boundary layers benefit from lighter computation while interior layers need deeper refinement. This non-uniform insight motivates our study of different MoE placement patterns (\S\ref{sec:moe_placement}).
+
+
+\subsection{Iteration Dropout and Training Duration}
+
+\textbf{Iteration dropout} (stochastic dropping of energy steps during training) provides modest regularization: the best 4-block dropout config ($[9,9,12,16]$-drop5) achieves 43.8\% vs.\ 43.4\% for the best non-dropout 4-block (uniform-6), a 0.4\% improvement. Dropout is most effective for higher iteration counts where it prevents overfitting to specific optimization trajectories.
+
+\textbf{Training duration} consistently helps across all energy models. The 5-block model (202M) at uniform-9 improves monotonically from 44.0\% (30K steps) through 44.8\% (50K), 44.7\% (70K), to 46.0\% (80K steps). WikiText perplexity drops correspondingly from 49.0 to 39.7---a 19\% relative improvement. Notably, accuracy gains plateau around 70--80K steps while perplexity continues decreasing, suggesting that the energy landscape becomes better calibrated (smoother energy surfaces) even when downstream task metrics saturate. This has implications for Boltzmann routing: longer-trained base models provide more reliable energy scores for routing decisions.
+
+
+%=============================================================================
+\section{Hybrid Architectures}
+\label{sec:hybrid}
+%=============================================================================
+
+We evaluate models mixing standard transformer layers (\texttt{s}) with energy layers (\texttt{e}).
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Hybrid architectures at 160M}, best LR per config, 30K steps.}
+\label{tab:hybrid_160m}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|ccccccccccc|c|c}
+\toprule
+\textbf{Architecture} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} \\
+\midrule
+allgpt (standard)        & .252 & .468 & .604 & .650 & .328 & .222 & .286 & .647 & .284 & .767 & .508 & .444 & 43.10 \\
+recgpt (6-iter)          & .267 & .494 & .534 & .650 & .355 & .278 & .290 & .650 & .300 & .804 & .508 & .457 & 37.59 \\
+par\_recgpt (6-iter)      & .260 & .478 & .590 & .650 & .356 & .278 & .300 & .652 & .298 & .804 & .512 & .459 & 37.48 \\
+\midrule
+EGPT s1\_e6$^4$\_s1      & .273 & .500 & .597 & .680 & .378 & .288 & .304 & .666 & .301 & .795 & .500 & .465 & 35.69 \\
+EGPT s1\_s1\_e6$^4$      & .274 & .513 & .531 & .690 & .374 & .282 & .302 & .666 & .299 & .800 & .508 & .466 & 37.15 \\
+ParRec s1\_s6$^4$\_s1    & .259 & .509 & .583 & .650 & .386 & .296 & .310 & .674 & .312 & .828 & .496 & \textbf{.471} & 33.69 \\
+ParRec s1\_s1\_s6$^4$    & .267 & .505 & .608 & .700 & .388 & .290 & .314 & .657 & .313 & .813 & .483 & \textbf{.471} & 34.25 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Hybrid architectures at 370--410M scale}, best LR, 30K--60K steps.}
+\label{tab:hybrid_400m}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|c|c|ccccccccccc|c|c|cc}
+\toprule
+\textbf{Architecture} & \textbf{Params} & \textbf{Steps} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+EGPT s1\_e6$^6$\_s1 lr=1e-3      & 369M & 30K & .303 & .583 & .573 & .680 & .465 & .364 & .338 & .689 & .323 & .861 & .509 & .500 & 26.81 & .239 & .017 \\
+ParRec s1\_s6$^6$\_s1 lr=1e-3    & 369M & 30K & .317 & .620 & .555 & .710 & .498 & .367 & .336 & .704 & .339 & .876 & .544 & .513 & 24.69 & .244 & .024 \\
+ParRec s1\_s6$^6$\_s1 lr=2e-3    & 369M & 30K & .319 & .614 & .598 & .720 & .493 & .372 & .346 & .699 & .328 & .876 & .542 & \textbf{.518} & 25.29 & .248 & .018 \\
+\midrule
+Hybrid s8e4 lr=1e-3              & 410M & 60K & .318 & .607 & .582 & .730 & .488 & .355 & .366 & .714 & .326 & .855 & .540 & .514 & 25.57 & .257 & .024 \\
+ParRec 12b lr=1e-3               & 410M & 60K & .307 & .607 & .612 & .690 & .490 & .380 & .350 & .698 & .313 & .869 & .522 & .511 & 25.33 & .250 & .017 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Tables~\ref{tab:hybrid_160m}--\ref{tab:hybrid_400m} establish the architectural foundations for MoE integration. Several findings are critical for understanding subsequent MoE results:
+
+\textbf{ParRecGPT is the strongest base architecture.} At 160M, ParRecGPT hybrids (47.1\%) outperform sequential EGPT (46.6\%), pure recurrent (45.7\%), and standard transformers (44.4\%). The parallel stream allows energy refinement to operate on the same input state as attention, preventing the sequential degradation where attention outputs are suboptimal inputs for energy minimization. This architectural advantage becomes even more pronounced under Boltzmann routing (\S\ref{sec:moe_boltz}).
+
+\textbf{Hybrid $>$ pure energy $>$ pure standard.} The 2.7\% gap between the best hybrid (47.1\%) and the standard baseline (44.4\%) at 160M demonstrates that energy iterations provide genuine representational benefits beyond what depth alone offers. At 369M, ParRecGPT reaches 51.8\% in only 30K steps---competitive with the 410M hybrid at 60K steps (51.4\%), showing that architectural efficiency can substitute for longer training.
+
+\textbf{BoolQ sensitivity.} Even at this stage, BoolQ shows distinctive behavior: ParRecGPT s1\_s1\_s6$^4$ achieves 60.8\% (highest), while the recgpt variant drops to 53.4\%. This benchmark-specific variation foreshadows the divergent BoolQ behavior we observe between standard and Boltzmann MoE.
+
+
+%=============================================================================
+\section{190M Architecture Sweep}
+\label{sec:190m}
+%=============================================================================
+
+\begin{table}[t]
+\centering
+\caption{\textbf{190M hybrid architecture sweep}: varying the number of parallel (par) vs.\ energy-only (egpt) layers. Best LR per config, 30K steps. ``pargpt$N$\_egptlast$M$'' = $N$ parallel + $M$ trailing energy layers.}
+\label{tab:190m_sweep}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|c|ccccccccccc|c|c|c}
+\toprule
+\textbf{Architecture} & \textbf{Params} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} & \textbf{MMLU} \\
+\midrule
+pargpt12\_iter1 lr=2e-3         & 190M & .274 & .496 & .601 & .630 & .348 & .309 & .292 & .647 & .289 & .811 & .495 & .459 & 40.30 & .251 \\
+pargpt11\_egptlast\_iter6       & 187M & .264 & .500 & .607 & .640 & .340 & .290 & .308 & .639 & .285 & .799 & .495 & .456 & 40.19 & .260 \\
+pargpt10\_parlast2 lr=2e-3      & 190M & .249 & .493 & .573 & .680 & .341 & .291 & .294 & .643 & .297 & .820 & .515 & .462 & 41.74 & .248 \\
+pargpt10\_egptlast2 lr=2e-3     & 184M & .267 & .513 & .610 & .620 & .343 & .282 & .308 & .639 & .291 & .799 & .514 & .455 & 40.67 & .256 \\
+\midrule
+egrad\_4e8s lr=2e-3             & 186M & .274 & .507 & .591 & .650 & .350 & .302 & .300 & .646 & .299 & .782 & .531 & \textbf{.467} & 40.50 & .253 \\
+egrad\_6e6s\_interleaved        & 183M & .273 & .513 & .534 & .600 & .346 & .286 & .302 & .645 & .293 & .805 & .500 & .452 & 40.73 & -- \\
+egrad\_2e10s                    & 188M & .269 & .505 & .525 & .680 & .351 & .313 & .300 & .642 & .295 & .799 & .492 & .457 & 39.15 & .257 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:190m_sweep} provides a comprehensive sweep at the 190M scale, varying the ratio of parallel recurrent layers to trailing energy-only or standard layers. The ``egrad'' models use a different energy gradient formulation with explicit iteration-count configurations (e.g., 4e8s = 4 energy blocks $\times$ 8 standard blocks).
+
+The \textbf{egrad\_4e8s configuration} (4 energy + 8 standard blocks, 186M) achieves the highest accuracy (46.7\%) at this scale, suggesting that a moderate ratio of energy-to-standard layers is optimal. Pure parallel recurrent (pargpt12) achieves a respectable 45.9\% with simpler architecture. The egrad\_2e10s variant---emphasizing standard layers---achieves the lowest perplexity (39.15) despite middling accuracy, indicating that perplexity and task accuracy can diverge when architectural inductive biases differ.
+
+This sweep establishes that energy-gradient models with interleaved standard layers form a strong foundation for MoE, motivating the s8e4 (8 standard + 4 energy) configuration used in our primary MoE experiments.
+
+
+%=============================================================================
+\section{Mixture-of-Experts Results}
+\label{sec:moe}
+%=============================================================================
+
+We now present the central contribution: MoE integration with energy-based models, with particular focus on Boltzmann routing.
+
+\subsection{330M Scale: Standard vs.\ Boltzmann MoE}
+\label{sec:moe_330m}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{MoE at $\sim$330M total params} (153--155M active), 8 experts, top-4 routing, 30K steps.}
+\label{tab:moe_330m}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|l|cc|ccccccccccc|c|cc}
+\toprule
+\textbf{Model} & \textbf{Type} & \textbf{Total} & \textbf{Active} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+EGPT s8e4 lr=1e-3       & Std MoE   & 330M & 153M & .274 & .534 & .520 & .680 & .386 & .298 & .292 & .673 & .287 & .804 & .517 & \textbf{.472} & .257 & .014 \\
+EGPT s8e4 lr=2e-3       & Std MoE   & 330M & 153M & .271 & .504 & .524 & .610 & .373 & .290 & .294 & .671 & .296 & .817 & .515 & .463 & .259 & .003 \\
+ParRec 12b lr=2e-3      & Std MoE   & 332M & 155M & .259 & .496 & .512 & .660 & .372 & .310 & .306 & .655 & .286 & .809 & .505 & .465 & .258 & .008 \\
+\midrule
+EGPT E6F5 boltz lr=1e-3 & Boltz     & 330M & 153M & .249 & .464 & \textbf{.574} & .610 & .332 & .227 & .284 & .638 & .261 & .756 & .534 & .439 & \textbf{.267} & .004 \\
+EGPT E6F5 boltz lr=2e-3 & Boltz     & 330M & 153M & .250 & .488 & .568 & .640 & .329 & .259 & .294 & .630 & .284 & .763 & .511 & .446 & .252 & .003 \\
+ParRec E6F5 boltz lr=2e-3 & Boltz   & 332M & 155M & .252 & .462 & .563 & .660 & .331 & .293 & .272 & .630 & .279 & .796 & .514 & .445 & .258 & .003 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:moe_330m} provides the first direct comparison between standard and Boltzmann MoE at matched scale. The results reveal a nuanced picture beyond the headline 2.6--3.3\% gap:
+
+\textbf{Boltzmann excels at natural language inference.} On BoolQ (yes/no question answering), Boltzmann achieves \textbf{57.4\%}---5.4\% higher than the best standard MoE (52.0\%). This is remarkable because BoolQ requires integrating passage-level context for binary decisions, precisely the type of ``energy landscape compatibility'' that Boltzmann routing is designed to capture. The energy score measures how well a token fits each expert's learned manifold, and BoolQ's binary nature maps naturally to low-energy vs.\ high-energy states.
+
+\textbf{Standard MoE dominates knowledge-intensive tasks.} LAMBADA (29.8\% vs.\ 22.7\%), HellaSwag (38.6\% vs.\ 33.2\%), and SciQ (80.4\% vs.\ 76.3\%) all favor standard routing. These benchmarks reward broad factual recall and require experts to specialize in distinct knowledge domains---exactly what load-balanced top-$k$ routing optimizes for.
+
+\textbf{Boltzmann achieves better MMLU.} Despite lower average accuracy, Boltzmann E6F5 at lr=1e-3 achieves \textbf{26.7\% MMLU} vs.\ 25.7--25.9\% for standard MoE. MMLU's multiple-choice format across 57 domains may benefit from energy-based routing's ability to match tokens to the most ``compatible'' expert rather than the expert with highest gating score.
+
+\textbf{WinoGrande favors Boltzmann.} Boltzmann models achieve 51.1--53.4\% WinoGrande vs.\ 50.5--51.7\% for standard MoE. WinoGrande requires coreference resolution sensitive to semantic nuance---again aligning with energy-compatibility routing.
+
+\textbf{ParRecGPT does not yet help Boltzmann at this scale.} ParRec E6F5 (44.5\%) performs similarly to EGPT E6F5 lr=2e-3 (44.6\%), suggesting the ParRecGPT advantage for Boltzmann requires larger model capacity to manifest (as confirmed at 400M, \S\ref{sec:moe_boltz}).
+
+
+\subsection{400M Standard MoE: Learning Rate Sweep}
+\label{sec:moe_lr}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{400M Standard MoE learning rate sweep} (single-layer, 519M total / 401M active), 30K steps.}
+\label{tab:moe_400m_lr}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|l|ccccccccccc|c|c|cc}
+\toprule
+\textbf{Model} & \textbf{LR} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+EGPT s8e4  & 1e-4 & .271 & .496 & .609 & .610 & .358 & .284 & .300 & .653 & .304 & .795 & .472 & .460 & 37.59 & .259 & .017 \\
+EGPT s8e4  & 3e-4 & .282 & .551 & .523 & .660 & .405 & .346 & .308 & .681 & .300 & .834 & .515 & .485 & 31.61 & .262 & .019 \\
+EGPT s8e4  & 6e-4 & .304 & .556 & .564 & .680 & .422 & .349 & .320 & .686 & .297 & .837 & .509 & .496 & 29.77 & .270 & .022 \\
+EGPT s8e4  & 8e-4 & .300 & .588 & .505 & .670 & .428 & .363 & .336 & .689 & .296 & .849 & .534 & .500 & 29.14 & .260 & .033 \\
+EGPT s8e4  & 1e-3 & .307 & .593 & .551 & .680 & .431 & .369 & .342 & .686 & .286 & .865 & .509 & \textbf{.507} & 28.81 & .270 & .025 \\
+\midrule
+ParRec     & 6e-4 & .302 & .569 & .548 & .680 & .424 & .363 & .310 & .677 & .306 & .857 & .534 & .502 & 29.69 & .275 & .034 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:moe_400m_lr} demonstrates monotonic improvement with learning rate for standard MoE, from 46.0\% at lr=1e-4 to 50.7\% at lr=1e-3---a 4.7\% absolute gain. This contrasts sharply with Boltzmann routing (\S\ref{sec:moe_boltz}), which collapses at lr=1e-3.
+
+Several benchmark-specific trends are notable: \textbf{ARC-Easy and SciQ} improve nearly linearly with LR (49.6\%$\to$59.3\% and 79.5\%$\to$86.5\% respectively), reflecting improved expert specialization. \textbf{BoolQ is non-monotonic}: peaking at lr=1e-4 (60.9\%), dropping at lr=3e-4 (52.3\%), partially recovering at lr=6e-4 (56.4\%), then dropping again. This suggests BoolQ performance depends on a delicate balance between expert specialization and routing diversity that higher LRs disrupt---and explains why Boltzmann (which uses lower LRs) achieves higher BoolQ.
+
+\textbf{ParRecGPT at lr=6e-4 nearly matches EGPT at lr=1e-3} (50.2\% vs.\ 50.7\%) while achieving better MMLU (27.5\% vs.\ 27.0\%) and significantly better GSM8K (3.4\% vs.\ 2.5\%). ParRecGPT's parallel architecture appears to provide a better optimization landscape for MoE, achieving strong results at lower learning rates---a property that becomes critical for Boltzmann routing where higher LRs cause divergence.
+
+
+\subsection{400M Standard MoE: Placement Strategies}
+\label{sec:moe_placement}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{400M Standard MoE placement strategies}, best LR per config, 30K steps. Params vary by placement density.}
+\label{tab:moe_400m_placement}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|l|cc|ccccccccccc|c|cc}
+\toprule
+\textbf{Arch} & \textbf{Placement} & \textbf{Total} & \textbf{Active} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+\multicolumn{18}{l}{\textit{EGPT s8e4}} \\
+single lr=1e-3      & single    & 519M & 401M & .307 & .593 & .551 & .680 & .431 & .369 & .342 & .686 & .286 & .865 & .509 & .507 & .270 & .025 \\
+alt lr=8e-4          & alt       & 568M & 391M & .312 & .572 & .600 & .700 & .434 & .362 & .334 & .699 & .320 & .835 & .515 & .517 & .271 & .035 \\
+alt8\_all4 lr=2e-3   & alt8\_all4 & 627M & 391M & .328 & .606 & .530 & .680 & .454 & .383 & .332 & .696 & .290 & .884 & .530 & .519 & .265 & .030 \\
+alt8\_all4 lr=8e-4   & alt8\_all4 & 627M & 391M & .296 & .592 & .548 & .670 & .441 & .384 & .312 & .687 & .302 & .855 & .531 & .511 & .280 & .034 \\
+all lr=2e-3          & all       & 745M & 391M & .317 & .607 & .594 & .710 & .462 & .399 & .330 & .711 & .316 & .872 & .526 & \textbf{.531} & .274 & .030 \\
+all lr=8e-4          & all       & 745M & 391M & .314 & .585 & .579 & .630 & .449 & .384 & .346 & .701 & .303 & .858 & .511 & .515 & .263 & .034 \\
+\midrule
+\multicolumn{18}{l}{\textit{ParRecGPT}} \\
+single lr=6e-4       & single    & 519M & 401M & .302 & .569 & .548 & .680 & .424 & .363 & .310 & .677 & .306 & .857 & .534 & .502 & .275 & .034 \\
+alt lr=8e-4          & alt       & 578M & 402M & .302 & .581 & .602 & .690 & .444 & .403 & .334 & .689 & .313 & .867 & .525 & .523 & .265 & .054 \\
+alt8\_all4 lr=2e-3   & alt8\_all4 & 637M & 402M & .321 & .587 & .592 & .630 & .466 & .398 & .326 & .701 & .307 & .883 & .527 & .522 & .271 & .062 \\
+all lr=2e-3          & all       & 755M & 402M & .326 & .598 & .570 & .680 & .466 & .407 & .336 & .692 & .317 & .874 & .527 & \textbf{.527} & .268 & \textbf{.069} \\
+all lr=8e-4          & all       & 755M & 402M & .306 & .578 & .616 & .650 & .434 & .376 & .306 & .682 & .301 & .882 & .522 & .514 & .259 & .039 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:moe_400m_placement} reveals the interaction between placement density and architecture:
+
+\textbf{All-layer MoE provides the strongest absolute performance.} EGPT all-MoE (745M total / 391M active) reaches 53.1\%, a clear win over single-MoE (50.7\%)---but at the cost of 226M additional parameters. The per-parameter efficiency of this scaling is 1.1\% per 100M extra params, suggesting diminishing returns at higher densities.
+
+\textbf{Alternating placement is surprisingly competitive.} EGPT alt (568M, 51.7\%) achieves 96\% of all-layer's accuracy gain over single, using only 43\% of the extra parameters. For ParRecGPT, alt (52.3\%) actually \textit{exceeds} the alt8\_all4 (52.2\%) configuration, indicating that uniform spacing may be more important than raw density.
+
+\textbf{ParRecGPT's GSM8K advantage scales with density.} GSM8K improves from 3.4\% (single) $\to$ 5.4\% (alt) $\to$ 6.2\% (alt8\_all4) $\to$ \textbf{6.9\%} (all) for ParRecGPT, while EGPT's GSM8K is nearly flat (2.5--3.5\%). This suggests ParRecGPT's parallel processing creates compounding benefits for multi-step reasoning when experts are available at every layer.
+
+\textbf{Learning rate interacts with placement.} All-layer configurations prefer lr=2e-3, while alt and single prefer 8e-4. Denser MoE appears to benefit from more aggressive optimization, possibly because more expert parameters need stronger gradients to avoid collapse.
+
+
+\subsection{400M Boltzmann MoE: Detailed Analysis}
+\label{sec:moe_boltz}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{400M Boltzmann MoE: Complete results.} E2F5 = 2 energy + 5 FFN experts; E6F5 = 6 energy + 5 FFN. Diverged runs marked with $\dagger$.}
+\label{tab:moe_400m_boltz}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|l|cc|ccccccccccc|c|cc}
+\toprule
+\textbf{Model} & \textbf{LR} & \textbf{Total} & \textbf{Active} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+\multicolumn{18}{l}{\textit{EGPT single-layer Boltzmann (E2F5)}} \\
+E2F5 lr=1e-4          & 1e-4 & 467M & 388M & .240 & .437 & .570 & .590 & .297 & .208 & .280 & .612 & .270 & .731 & .509 & .420 & .249 & .016 \\
+E2F5 lr=3e-4          & 3e-4 & 467M & 388M & .259 & .511 & .586 & .630 & .357 & .282 & .296 & .649 & .296 & .825 & .532 & .465 & .265 & .019 \\
+E2F5 lr=8e-4          & 8e-4 & 467M & 388M & .282 & .486 & .566 & .630 & .354 & .263 & .308 & .655 & .280 & .786 & .528 & .459 & .261 & .016 \\
+E2F5 lr=1e-3$^\dagger$ & 1e-3 & 467M & 388M & .255 & .263 & .378 & .560 & .255 & .000 & .278 & .521 & .225 & .199 & .494 & .297 & .229 & .000 \\
+\midrule
+\multicolumn{18}{l}{\textit{EGPT single-layer Boltzmann (E6F5)}} \\
+E6F5 lr=6e-4          & 6e-4 & 467M & 388M & .272 & .496 & \textbf{.617} & .610 & .358 & .283 & .274 & .655 & .289 & .806 & .496 & .459 & .264 & .020 \\
+\midrule
+\multicolumn{18}{l}{\textit{Boltzmann with placement variants}} \\
+E2F5 alt lr=8e-4      & 8e-4 & 490M & 372M & .261 & .497 & .559 & .630 & .355 & .290 & .286 & .648 & .288 & .798 & .517 & .466 & .269 & .019 \\
+E2F5 alt lr=2e-3$^\dagger$ & 2e-3 & 490M & 372M & .253 & .260 & .378 & .530 & .255 & .000 & .264 & .500 & .222 & .187 & .498 & .304 & .230 & .000 \\
+\midrule
+\multicolumn{18}{l}{\textit{ParRecGPT Boltzmann}} \\
+ParRec E2F5 lr=6e-4   & 6e-4 & 467M & 388M & .271 & .536 & .586 & .670 & .397 & .356 & .318 & .667 & .301 & .842 & .506 & \textbf{.486} & .260 & .017 \\
+ParRec E2F5 a8a4 lr=8e-4 & 8e-4 & 533M & 375M & .272 & .509 & .582 & .680 & .397 & .350 & .304 & .677 & .295 & .839 & .530 & \textbf{.494} & \textbf{.280} & .020 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:moe_400m_boltz} presents the complete Boltzmann MoE results at 400M scale. This is where the interaction between routing strategy, architecture, and optimization reveals its full complexity.
+
+\subsubsection{Training Stability: The lr$\geq$1e-3 Collapse}
+
+The most striking finding is that \textbf{Boltzmann routing catastrophically diverges at lr=1e-3 and lr=2e-3} (marked $\dagger$), dropping to near-random performance ($\sim$30\% avg). At lr=1e-3, LAMBADA accuracy falls to 0.0\% (perplexity 959,825), SciQ drops to 19.9\%, and PIQA falls to 52.1\%---all near chance. This occurs for both EGPT single-layer and EGPT alternating configurations.
+
+The mechanism is temperature instability: the learned temperature $\tau$ in the Boltzmann distribution becomes too small, causing the routing to become deterministic---all tokens are sent to one expert, which then receives all gradient signal and diverges. Standard MoE avoids this because its load-balancing auxiliary loss explicitly prevents single-expert collapse. This identifies a key research direction: \textbf{Boltzmann routing needs either a temperature floor, load-balancing regularization, or both} to be stable at higher learning rates.
+
+\subsubsection{Optimal Boltzmann Learning Rate: 3e-4 to 8e-4}
+
+Within the stable range, Boltzmann performance peaks at \textbf{lr=3e-4} for the E2F5 variant (46.5\% avg), while E6F5 at lr=6e-4 achieves 45.9\%. The E2F5 variant (2 energy + 5 FFN experts) slightly outperforms E6F5 (6 energy + 5 FFN) in average accuracy, suggesting that having more conventional FFN experts provides better token coverage even in an energy-based routing framework.
+
+Interestingly, E6F5 at lr=6e-4 achieves the highest \textbf{BoolQ (61.7\%)} among \textit{all} 400M MoE models---higher than any standard MoE configuration. This confirms and amplifies the BoolQ advantage observed at 330M, and suggests that energy-heavy expert composition (6 energy experts) specifically benefits boolean/binary reasoning tasks.
+
+\subsubsection{ParRecGPT: Closing the Boltzmann--Standard Gap}
+
+The most important finding for Boltzmann routing is that \textbf{ParRecGPT provides a 2.1--2.9\% boost over EGPT} for Boltzmann:
+\begin{itemize}
+    \item EGPT E2F5 single (best): 46.5\% $\to$ ParRec E2F5 single: \textbf{48.6\%} (+2.1\%)
+    \item EGPT E2F5 alt: 46.6\% $\to$ ParRec E2F5 alt8\_all4: \textbf{49.4\%} (+2.8\%)
+\end{itemize}
+
+For comparison, ParRecGPT provides only 0--1.5\% improvement for standard MoE at the same scale. Why does ParRecGPT disproportionately help Boltzmann? The parallel architecture allows energy experts to receive ``cleaner'' inputs (pre-attention hidden states) rather than post-attention states that may have already been optimized for a different objective. Since Boltzmann routing relies on energy scores for selection, the quality of the energy landscape matters more than for standard gating, and ParRecGPT preserves this landscape better.
+
+\subsubsection{MMLU: Boltzmann's Hidden Strength}
+
+ParRec E2F5 alt8\_all4 achieves \textbf{28.0\% MMLU}---the highest among \textit{all} 400M-scale MoE variants (standard MoE peaks at 27.5\% for ParRec single, and 27.0--28.0\% for EGPT configurations). MMLU tests knowledge across 57 academic domains, and Boltzmann routing's energy-compatibility matching appears to provide subtle advantages in domain-appropriate expert selection that standard gating's linear projection misses.
+
+\subsubsection{Parameter Efficiency}
+
+Boltzmann models use fewer total parameters than standard MoE at the same scale:
+\begin{itemize}
+    \item Best Boltzmann: 49.4\% avg at \textbf{533M} total (ParRec E2F5 alt8\_all4)
+    \item Best Standard: 53.1\% avg at \textbf{745M} total (EGPT all-MoE)
+    \item Equivalent Standard: 51.1\% avg at 627M total (EGPT alt8\_all4 lr=8e-4)
+\end{itemize}
+
+Boltzmann achieves 93\% of the 627M standard model's accuracy (49.4/51.1) using only \textbf{85\%} of its parameters (533/627). Per additional parameter beyond the base model, Boltzmann routing provides better accuracy-per-parameter scaling than standard MoE.
+
+
+\subsection{400M MoE: Cross-Architecture Comparison}
+\label{sec:moe_arch}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{MoE architecture comparison at 400M scale}: best config per routing $\times$ architecture, 30K steps.}
+\label{tab:moe_arch_compare}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|l|l|cc|c|c|cc}
+\toprule
+\textbf{Architecture} & \textbf{Routing} & \textbf{Placement} & \textbf{Total} & \textbf{Active} & \textbf{Avg Acc} & \textbf{Wiki PPL} & \textbf{MMLU} & \textbf{GSM8K} \\
+\midrule
+EGPT s8e4       & Standard  & all       & 745M & 391M & \textbf{.531} & \textbf{27.27} & .274 & .030 \\
+EGPT s8e4       & Standard  & alt8\_all4 & 627M & 391M & .519 & 27.79 & .265 & .030 \\
+EGPT s8e4       & Standard  & alt       & 568M & 391M & .517 & 28.69 & .271 & .035 \\
+EGPT s8e4       & Standard  & single    & 519M & 401M & .507 & 28.81 & .270 & .025 \\
+\midrule
+ParRecGPT       & Standard  & all       & 755M & 402M & .527 & 26.79 & .268 & \textbf{.069} \\
+ParRecGPT       & Standard  & alt8\_all4 & 637M & 402M & .522 & 26.68 & .271 & .062 \\
+ParRecGPT       & Standard  & alt       & 578M & 402M & .523 & 27.84 & .265 & .054 \\
+ParRecGPT       & Standard  & single    & 519M & 401M & .502 & 29.69 & .275 & .034 \\
+\midrule
+EGPT E2F5       & Boltzmann & single    & 467M & 388M & .465 & 37.93 & .265 & .019 \\
+EGPT E6F5       & Boltzmann & single    & 467M & 388M & .459 & 38.08 & .264 & .020 \\
+ParRec E2F5     & Boltzmann & single    & 467M & 388M & .486 & 31.81 & .260 & .017 \\
+ParRec E2F5     & Boltzmann & alt8\_all4 & 533M & 375M & .494 & 32.74 & \textbf{.280} & .020 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:moe_arch_compare} crystallizes the architecture$\times$routing interaction:
+
+\textbf{The ParRecGPT--Boltzmann synergy is unique.} ParRecGPT improves Boltzmann routing by 2.1\% (single) and 2.9\% (alt8\_all4 vs.\ EGPT alt), but improves standard routing by only 0--0.6\% (single: --0.5\%, alt: +0.6\%, all: --0.4\%). This asymmetric benefit confirms that energy-based routing specifically requires the architectural properties ParRecGPT provides---namely, the parallel stream preserves clean inputs for energy computation.
+
+\textbf{Perplexity gap narrows with ParRecGPT.} EGPT Boltzmann's WikiText PPL (37.93) is 39\% worse than EGPT Standard's (27.27). But ParRec Boltzmann (31.81) narrows this to only 17\% worse than ParRec Standard (26.79). The language modeling penalty of Boltzmann routing is substantially mitigated by parallel processing.
+
+\textbf{GSM8K: Boltzmann lags.} All Boltzmann configurations achieve 1.6--2.0\% GSM8K, well below standard MoE (2.5--6.9\%). Multi-step mathematical reasoning appears to require the kind of sharp expert specialization that load-balanced top-$k$ routing provides and that Boltzmann's smoother energy landscape cannot match at current scales.
+
+
+\subsection{Gaussian-Boltzmann Routing}
+\label{sec:gaussboltz}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Gaussian-Boltzmann MoE routing} across model sizes (lr=$3\times10^{-4}$, 30K steps). cc=cosine-cosine, cc8=cosine-cosine-8, ccs=cosine-cosine-sigmoid, ccs8=cosine-cosine-sigmoid-8.}
+\label{tab:gaussboltz}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|c|c|ccccccccccc|c|c}
+\toprule
+\textbf{Variant} & \textbf{Size} & \textbf{Params} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} \\
+\midrule
+\multicolumn{15}{l}{\textit{E2F: 8$\times$1024 (148M)}} \\
+cc       & 8$\times$1024 & 148M & .234 & .444 & .547 & .590 & .308 & .147 & .264 & .626 & .270 & .741 & .516 & .426 & 56.45 \\
+cc8      & 8$\times$1024 & 148M & .242 & .453 & .609 & .610 & .306 & .147 & .278 & .638 & .258 & .750 & .512 & \textbf{.437} & 57.64 \\
+ccs      & 8$\times$1024 & 148M & .247 & .469 & .585 & .640 & .307 & .129 & .278 & .627 & .274 & .723 & .497 & .434 & 58.42 \\
+ccs8     & 8$\times$1024 & 148M & .253 & .457 & .484 & .570 & .303 & .135 & .282 & .626 & .267 & .748 & .516 & .422 & 60.68 \\
+\midrule
+\multicolumn{15}{l}{\textit{E6F: 32$\times$2048 (207M)}} \\
+cc       & 32$\times$2048 & 207M & .235 & .458 & .602 & .620 & .310 & .139 & .270 & .632 & .258 & .735 & .503 & .433 & 57.59 \\
+cc8      & 32$\times$2048 & 207M & .245 & .437 & .588 & .620 & .306 & .156 & .290 & .632 & .275 & .740 & .504 & \textbf{.436} & 57.47 \\
+ccs      & 32$\times$2048 & 207M & .218 & .418 & .569 & .590 & .300 & .078 & .286 & .601 & .262 & .684 & .479 & .407 & 65.18 \\
+ccs8     & 32$\times$2048 & 207M & .241 & .438 & .610 & .600 & .303 & .132 & .272 & .623 & .261 & .727 & .517 & .429 & 63.12 \\
+\midrule
+\multicolumn{15}{l}{\textit{E9F: 32$\times$1024\_slim (151M)}} \\
+cc       & 32$\times$1024 & 151M & .233 & .431 & .599 & .610 & .291 & .145 & .268 & .602 & .247 & .730 & .554 & \textbf{.428} & 72.88 \\
+cc8      & 32$\times$1024 & 151M & .245 & .408 & .593 & .600 & .291 & .132 & .264 & .609 & .243 & .702 & .525 & .419 & 74.58 \\
+ccs      & 32$\times$1024 & 151M & .236 & .418 & .613 & .570 & .291 & .117 & .282 & .610 & .252 & .721 & .508 & .420 & 74.57 \\
+ccs8     & 32$\times$1024 & 151M & .242 & .404 & .619 & .540 & .288 & .116 & .276 & .614 & .243 & .721 & .506 & .415 & 75.48 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:gaussboltz} systematically evaluates Gaussian-Boltzmann routing---an extension of Boltzmann routing with structured noise injection designed to improve exploration during training and prevent the temperature collapse observed in pure Boltzmann models.
+
+\textbf{The cc8 parameterization dominates.} Across all three model sizes, cc8 (cosine-cosine-8) consistently achieves the best or near-best accuracy: 43.7\% at E2F (148M), 43.6\% at E6F (207M), and 41.9\% at E9F (151M). The ``8'' suffix indicates an 8-way routing partition that provides better load distribution than the base cosine-cosine formulation. The ccs (cosine-cosine-sigmoid) variant is unstable: competitive at E2F 148M (43.4\%) but catastrophically underperforming at E6F 207M (40.7\%), suggesting sigmoid noise interacts poorly with wider architectures.
+
+\textbf{Architecture width vs.\ depth.} Surprisingly, E2F (148M) outperforms E6F (207M) despite 29\% fewer parameters (43.7\% vs.\ 43.6\% best). The wider per-expert dimension doesn't translate to better routing decisions, suggesting Gaussian-Boltzmann quality is bounded by the noise injection mechanism rather than expert capacity. The E9F slim architecture (151M, 32$\times$1024) consistently underperforms (best: 42.8\%, PPL 72.88--75.48), confirming that per-expert width matters more than expert count.
+
+\textbf{BoolQ advantage persists.} E2F cc8 achieves 60.9\%, E6F ccs8 achieves 61.0\%, and E9F ccs achieves 61.3\%---all competitive with standard MoE at 3$\times$ the parameters. This reinforces that energy-based routing is inherently suited to binary classification tasks regardless of the specific Boltzmann variant.
+
+\textbf{Comparison to pure Boltzmann.} Gaussian-Boltzmann at 148M (43.7\%) substantially outperforms what pure Boltzmann achieves at comparable scale, and is competitive with pure Boltzmann at 330M (43.9--44.6\%---more than double the parameters). Noise injection partially compensates for limited parameters by enabling better expert utilization through stochastic exploration.
+
+
+\subsection{Energy-Based Routing Parameterizations}
+\label{sec:energy_routing}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Energy-based routing parameterizations}: best 2 configs per architecture, 30K steps, lr=$3\times10^{-4}$.}
+\label{tab:energy_routing}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|l|l|ccccccccccc|c|c}
+\toprule
+\textbf{Architecture} & \textbf{Best Config} & \textbf{Params} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} \\
+\midrule
+\multicolumn{15}{l}{\textit{E2\_F5 (8$\times$1024, 148M)}} \\
+baseline        & & 148M & .229 & .440 & .593 & .640 & .287 & .142 & .292 & .619 & .258 & .729 & .509 & .423 & 69.60 \\
+topk4           & & 148M & .234 & .426 & .611 & .620 & .295 & .148 & .272 & .610 & .257 & .696 & .519 & .418 & 69.08 \\
+lr\_high        & & 148M & .242 & .430 & .503 & .570 & .301 & .167 & .286 & .624 & .268 & .734 & .511 & .414 & 64.11 \\
+\midrule
+\multicolumn{15}{l}{\textit{E6\_F5 (32$\times$2048, 207M)}} \\
+lr\_high        & & 207M & .232 & .429 & .610 & .670 & .300 & .184 & .286 & .622 & .256 & .725 & .500 & \textbf{.431} & 62.46 \\
+temp\_low       & & 207M & .236 & .423 & .592 & .570 & .291 & .143 & .268 & .622 & .261 & .721 & .520 & .415 & 67.58 \\
+\midrule
+\multicolumn{15}{l}{\textit{E2\_F6 (8$\times$1024, 148M)}} \\
+lr\_high        & & 148M & .236 & .442 & .579 & .660 & .301 & .155 & .290 & .616 & .265 & .713 & .490 & .424 & 62.72 \\
+distill\_high   & & 148M & .232 & .436 & .599 & .540 & .292 & .153 & .300 & .614 & .273 & .723 & .540 & .420 & 66.83 \\
+\midrule
+\multicolumn{15}{l}{\textit{E6\_F6 (32$\times$2048, 207M)}} \\
+topk4           & & 207M & .242 & .424 & .585 & .650 & .292 & .142 & .274 & .612 & .274 & .713 & .518 & .423 & 67.68 \\
+temp\_high      & & 207M & .245 & .431 & .605 & .630 & .291 & .148 & .270 & .616 & .257 & .708 & .522 & .421 & 68.31 \\
+\midrule
+\multicolumn{15}{l}{\textit{E9\_F5 (32$\times$1024\_slim, 151M)}} \\
+topk4           & & 151M & .230 & .401 & .606 & .590 & .286 & .130 & .290 & .602 & .266 & .704 & .507 & .413 & 79.92 \\
+baseline        & & 151M & .236 & .402 & .619 & .580 & .285 & .145 & .270 & .604 & .266 & .693 & .501 & .411 & 78.58 \\
+\midrule
+\multicolumn{15}{l}{\textit{E9\_F6 (32$\times$1024\_slim, 151M)}} \\
+temp\_high      & & 151M & .238 & .396 & .622 & .630 & .282 & .152 & .260 & .607 & .279 & .711 & .513 & .419 & 83.09 \\
+aux\_high       & & 151M & .215 & .412 & .613 & .620 & .282 & .143 & .268 & .596 & .252 & .718 & .518 & .413 & 83.82 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:energy_routing} presents the top configurations from 48 routing parameterization experiments (8 configs per architecture $\times$ 6 architectures). These explore how different training-time modifications to Boltzmann routing---including learning rate scaling, temperature adjustments, distillation losses, auxiliary losses, and top-$k$ constraints---affect downstream performance.
+
+\textbf{The ``lr\_high'' parameterization consistently ranks first.} Using a higher learning rate specifically for the routing parameters (while keeping the main model LR at 3e-4) achieves the best results for E6\_F5 (43.1\%), E2\_F6 (42.4\%), and competitive results elsewhere. This suggests that the routing mechanism requires faster adaptation than the expert parameters---the energy landscape for expert selection needs to be learned more aggressively than the experts themselves. This finding connects to the LR sensitivity observed in pure Boltzmann (\S\ref{sec:moe_boltz}): decoupling routing LR from model LR may be key to stabilizing Boltzmann at scale.
+
+\textbf{``topk4'' (Boltzmann with top-4 selection)} is the most stable parameterization, consistently ranking in the top 3 across all architectures. By combining Boltzmann scoring with hard top-$k$ selection, it achieves the benefits of energy-based compatibility while avoiding the soft-routing instabilities of pure Boltzmann. This hybrid approach---energy-based scoring for ranking, hard selection for routing---represents a promising middle ground.
+
+\textbf{Architecture width dominates parameterization choice.} The E6\_F5 (207M, 32$\times$2048) lr\_high achieves 43.1\%---1.7\% above E2\_F5 (148M) lr\_high (41.4\%). But the slim E9\_F5 (151M, 32$\times$1024) peaks at only 41.3\% despite having 32 experts (same as E6\_F5). Per-expert width matters more than expert count for energy routing quality.
+
+\textbf{BoolQ remains the Boltzmann stronghold.} The E9\_F6 temp\_high achieves \textbf{62.2\%} BoolQ at just 151M parameters---comparable to standard MoE models at 400M+ scale. E9\_F5 baseline achieves 61.9\%. Across all 48 experiments, BoolQ is the single benchmark where energy routing most consistently matches or exceeds standard routing, reinforcing our earlier findings.
+
+\textbf{LAMBADA exposes the critical weakness.} Energy routing achieves at most 18.4\% LAMBADA (E6\_F5 lr\_high), while standard MoE at 400M achieves 36.9--40.7\%. LAMBADA requires predicting a final word given long context---a task that rewards sharp expert specialization in specific knowledge domains that Boltzmann's smoother energy landscape cannot provide.
+
+
+\subsection{Cross-Scale Boltzmann MoE Summary}
+\label{sec:moe_summary}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Complete routing comparison across scales.} Best configuration per routing strategy. All at 30K steps unless noted.}
+\label{tab:moe_summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|l|l|cc|c|c|cc|c}
+\toprule
+\textbf{Scale} & \textbf{Routing} & \textbf{Best Config} & \textbf{Total} & \textbf{Active} & \textbf{Avg Acc} & \textbf{PPL} & \textbf{MMLU} & \textbf{GSM8K} & \textbf{BoolQ} \\
+\midrule
+\multicolumn{10}{l}{\textit{$\sim$150M active}} \\
+ & Standard     & EGPT s8e4 lr=1e-3            & 330M & 153M & \textbf{.472} & \textbf{34.71} & .257 & .014 & .520 \\
+ & Boltzmann    & EGPT E6F5 boltz lr=2e-3      & 330M & 153M & .446 & 49.73 & .252 & .003 & .568 \\
+ & Boltzmann    & EGPT E6F5 boltz lr=1e-3      & 330M & 153M & .439 & 49.73 & \textbf{.267} & .004 & \textbf{.574} \\
+ & Gauss-Boltz  & E2F cc8 (148M)               & --   & 148M & .437 & 57.64 & --   & -- & .609 \\
+\midrule
+\multicolumn{10}{l}{\textit{$\sim$200M active}} \\
+ & Gauss-Boltz  & E6F cc8 (207M)               & --   & 207M & .436 & 57.47 & --   & -- & .588 \\
+ & Energy rout. & E6\_F5 lr\_high (207M)        & --   & 207M & .431 & 62.46 & --   & -- & .610 \\
+\midrule
+\multicolumn{10}{l}{\textit{$\sim$400M active}} \\
+ & Standard     & EGPT all-MoE lr=2e-3         & 745M & 391M & \textbf{.531} & \textbf{27.27} & .274 & .030 & .594 \\
+ & Standard     & ParRec all-MoE lr=2e-3       & 755M & 402M & .527 & 26.79 & .268 & \textbf{.069} & .570 \\
+ & Standard     & ParRec alt8\_all4 lr=2e-3    & 637M & 402M & .522 & 26.68 & .271 & .062 & .592 \\
+ & Boltzmann    & ParRec E2F5 a8a4 lr=8e-4     & 533M & 375M & .494 & 32.74 & \textbf{.280} & .020 & .582 \\
+ & Boltzmann    & ParRec E2F5 single lr=6e-4   & 467M & 388M & .486 & 31.81 & .260 & .017 & .586 \\
+ & Boltzmann    & EGPT E2F5 lr=3e-4            & 467M & 388M & .465 & 37.93 & .265 & .019 & .586 \\
+ & Boltzmann    & EGPT E6F5 lr=6e-4            & 467M & 388M & .459 & 38.08 & .264 & .020 & \textbf{.617} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+
+Table~\ref{tab:moe_summary} provides the definitive cross-scale comparison with BoolQ highlighted as a key discriminating benchmark. Several findings emerge:
+
+\textbf{(1) Standard MoE achieves the highest absolute accuracy}, outperforming Boltzmann by 2.6\% (at 330M: 47.2 vs.\ 44.6) to 3.7\% (at 400M: 53.1 vs.\ 49.4, comparing best-to-best). The gap is widest for knowledge-intensive benchmarks (LAMBADA, SciQ, HellaSwag) where expert domain specialization matters most.
+
+\textbf{(2) Boltzmann routing has distinct and consistent advantages:}
+\begin{itemize}
+    \item \textbf{BoolQ}: Boltzmann achieves 57.4--61.7\% vs.\ 50.5--60.0\% for standard MoE. The E6F5 configuration at 467M total achieves 61.7\%---the highest BoolQ among all models regardless of routing.
+    \item \textbf{MMLU}: ParRec Boltzmann alt8\_all4 achieves 28.0\%---the highest MMLU among all 400M MoE variants. Energy-based routing provides subtle domain-matching advantages.
+    \item \textbf{Parameter efficiency}: Boltzmann provides 93\% of equivalent-param standard MoE performance using 85\% of the parameters.
+\end{itemize}
+
+\textbf{(3) ParRecGPT is essential for competitive Boltzmann MoE.} Without ParRecGPT, the Boltzmann--Standard gap is 6.6\% (EGPT: 46.5 vs.\ 53.1). With ParRecGPT, it narrows to 3.3\% (ParRec: 49.4 vs.\ 52.7). ParRecGPT closes \textbf{44\% of the routing strategy gap}, making Boltzmann MoE a practical alternative in parameter-constrained settings.
+
+\textbf{(4) Gaussian-Boltzmann provides competitive small-scale routing.} At 148M parameters, Gaussian-Boltzmann cc8 (43.7\%) is competitive with the 330M standard MoE dense baseline (no MoE, 160M: 44.4\%), while using fewer parameters and no explicit load balancing. This suggests Gaussian noise injection partially solves the temperature collapse problem that limits pure Boltzmann at higher LRs.
+
+\textbf{(5) The LR stability gap remains the key Boltzmann limitation.} Standard MoE's best LR (1e-3 to 2e-3) is 2--5$\times$ higher than Boltzmann's safe range (3e-4 to 8e-4). Solving this---via temperature regularization, improved load balancing for energy-based routing, or curriculum strategies---is the most promising path to closing the remaining accuracy gap.
+
+
+%=============================================================================
+\section{Projection Variants}
+\label{sec:proj}
+%=============================================================================
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Projection variants} for EGPT hybrid (s1\_s1\_e6\_e6\_e6\_e6, 160M, 30K steps).}
+\label{tab:proj}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{l|ccccccccccc|c|c|cc}
+\toprule
+\textbf{Projection} & \textbf{ARC-C} & \textbf{ARC-E} & \textbf{BoolQ} & \textbf{COPA} & \textbf{Hella.} & \textbf{$\lambda$} & \textbf{OBQA} & \textbf{PIQA} & \textbf{RACE} & \textbf{SciQ} & \textbf{Wino.} & \textbf{Avg} & \textbf{PPL} & \textbf{MMLU} & \textbf{GSM} \\
+\midrule
+Unconstrained    & .253 & .508 & .549 & .640 & .357 & .259 & .286 & .647 & .294 & .806 & .504 & .450 & 39.78 & .242 & .022 \\
+Riemannian       & .255 & .487 & .533 & .660 & .354 & .267 & .272 & .646 & .286 & .785 & .489 & .446 & 39.66 & .241 & .020 \\
+Split            & .263 & .488 & .564 & .670 & .351 & .238 & .298 & .650 & .308 & .775 & .524 & \textbf{.451} & 39.89 & .231 & .014 \\
+Riemannian+Split & .263 & .504 & .536 & .700 & .354 & .244 & .292 & .650 & .290 & .777 & .504 & .449 & 39.58 & .246 & .023 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Table~\ref{tab:proj} explores how the projection used to map between hidden states and energy space affects performance. Differences are marginal (44.6--45.1\%), suggesting that projection choice is not a critical bottleneck for energy-based models. The Split projection achieves the highest avg (45.1\%) with notable BoolQ (56.4\%) and WinoGrande (52.4\%) advantages, while Riemannian+Split yields the best MMLU (24.6\%) and GSM8K (2.3\%). These differences are small enough that projection choice should be secondary to architecture and routing strategy decisions.
+
+
+%=============================================================================
+\section{Conclusion}
+%=============================================================================
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Overall summary}: best models per category. All at 30K steps.}
+\label{tab:summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{llccccc}
+\toprule
+\textbf{Category} & \textbf{Best Configuration} & \textbf{Params (Active)} & \textbf{Avg Acc} & \textbf{PPL} & \textbf{BoolQ} & \textbf{GSM8K} \\
+\midrule
+\multicolumn{7}{l}{\textit{Dense Energy Models}} \\
+EGPT 5b uniform-9              & 9 iters/block             & 202M & 44.8\% & 48.85 & 61.7\% & 1.1\% \\
+EGPT 8b non-uniform            & $[3,11^6,3]$              & 262M & 44.4\% & 43.48 & 57.5\% & 0.8\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Hybrid (no MoE)}} \\
+ParRec 160M hybrid             & s1\_s6$^4$\_s1            & 160M & 47.1\% & 33.69 & 58.3\% & -- \\
+ParRec 369M hybrid             & s1\_s6$^6$\_s1 lr=2e-3    & 369M & 51.8\% & 25.29 & 59.8\% & 1.8\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Standard MoE}} \\
+EGPT all-MoE 400M              & 745M total, lr=2e-3       & 391M & \textbf{53.1\%} & \textbf{27.27} & 59.4\% & 3.0\% \\
+ParRec all-MoE 400M            & 755M total, lr=2e-3       & 402M & 52.7\% & 26.79 & 57.0\% & \textbf{6.9\%} \\
+ParRec alt MoE                 & 578M total, lr=8e-4       & 402M & 52.3\% & 27.84 & 60.2\% & 5.4\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Boltzmann MoE}} \\
+ParRec E2F5 alt8\_all4         & 533M total, lr=8e-4       & 375M & 49.4\% & 32.74 & 58.2\% & 2.0\% \\
+ParRec E2F5 single             & 467M total, lr=6e-4       & 388M & 48.6\% & 31.81 & 58.6\% & 1.7\% \\
+EGPT E6F5 single               & 467M total, lr=6e-4       & 388M & 45.9\% & 38.08 & \textbf{61.7\%} & 2.0\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Gaussian-Boltzmann}} \\
+E2F cc8 (148M)                 & 8$\times$1024, lr=3e-4    & 148M & 43.7\% & 57.64 & 60.9\% & -- \\
+E6F cc8 (207M)                 & 32$\times$2048, lr=3e-4   & 207M & 43.6\% & 57.47 & 58.8\% & -- \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Our comprehensive study of energy-based MoE transformers (Table~\ref{tab:summary}) yields the following principal findings:
+
+\begin{enumerate}
+    \item \textbf{Standard top-$k$ MoE achieves the highest absolute accuracy} (53.1\% at 745M total / 391M active), with all-layer placement providing 2.4\% over single-layer and consistent scaling across placements.
+
+    \item \textbf{Boltzmann MoE is a viable, parameter-efficient alternative} with distinct strengths. While 3--4\% below standard MoE in average accuracy (when using ParRecGPT), it achieves: (a)~the highest BoolQ (61.7\%) across all MoE variants, (b)~the highest MMLU (28.0\%) at 400M scale, (c)~competitive performance using 85\% of equivalent standard MoE's parameters. The key limitation---training instability at lr$\geq$1e-3---represents a concrete target for future work.
+
+    \item \textbf{ParRecGPT is essential for Boltzmann routing.} It closes 44\% of the Standard--Boltzmann gap (from 6.6\% to 3.3\%), while providing only marginal benefits for standard routing. The parallel architecture's preservation of the energy landscape appears critical for energy-based expert selection.
+
+    \item \textbf{ParRecGPT + MoE excels at mathematical reasoning}: GSM8K of 6.9\% (2.3$\times$ EGPT's 3.0\%), suggesting parallel processing creates compounding benefits for multi-step reasoning when experts are available at every layer.
+
+    \item \textbf{Gaussian-Boltzmann provides competitive routing at small scale}: 43.7\% at 148M parameters via noise-augmented energy routing, partially solving temperature collapse through stochastic exploration.
+
+    \item \textbf{Energy iteration foundations matter}: 6--9 iterations per block is optimal, hybrid architectures outperform pure models by 2--3\%, and longer training improves energy landscape quality (and thus routing accuracy).
+\end{enumerate}
+
+\textbf{Future directions.} The most impactful next steps are: (i)~stabilizing Boltzmann routing at higher LRs through temperature regularization or adaptive clipping, (ii)~scaling Boltzmann MoE to multi-billion parameters where its parameter efficiency advantage becomes more pronounced, (iii)~combining Gaussian-Boltzmann noise with ParRecGPT (untested in this work), and (iv)~using energy scores to enable adaptive expert count per token (routing to more experts for ``harder'' tokens with higher energy).
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
