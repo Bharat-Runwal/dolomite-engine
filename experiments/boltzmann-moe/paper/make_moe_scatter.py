@@ -288,41 +288,32 @@ SIMPLE_FAMILIES = {
 
 # (name, total_M, active_M, avg, ppl, gsm8k_flex_avg, tokens_B, family)
 # Selection rule: latest/canonical evaluated checkpoint per (arch, scale).
+# Names kept short — token counts are reported in tables, not labels.
 MODELS_SIMPLE = [
     # Baseline GPT (red) — 160M, 354M, 354M-extended.
-    ("V0 GPT d=768",            162,  85, 0.479, 38.30, 2.08,   7.86, "baseline_gpt"),
-    ("V9 GPT d=1024",           354, 251, 0.513, 29.80, 2.69,   7.86, "baseline_gpt"),
-    ("scale_v9 GPT @100B",      354, 251, 0.5413, 26.17, 1.82, 100.7, "baseline_gpt"),
+    ("V0 GPT",                  162,  85, 0.479,  38.30, 2.08,   7.86, "baseline_gpt"),
+    ("V9 GPT",                  354, 251, 0.513,  29.80, 2.69,   7.86, "baseline_gpt"),
+    ("scale_v9 GPT",            354, 251, 0.5413, 26.17, 1.82, 100.70, "baseline_gpt"),
 
     # EGPT non-MoE hybrids (blue) — 145M, 354M, 620M.
-    ("V1 EGPT d=768",           143,  66, 0.481, 47.70, 1.97,   7.86, "egpt_no_moe"),
-    ("h1 EGPT no-MoE d=768",    145,  68, 0.4892, 39.55, 2.20,  7.86, "egpt_no_moe"),
-    ("V1-400M EGPT d=1024",     354, 251, 0.494, 38.60, 1.93,   7.86, "egpt_no_moe"),
-    ("scale_h3 8gpt+4egpt @63B",620, 620, 0.542, 25.00, 2.50,  63.00, "egpt_no_moe"),
-    ("scale_r3 11gpt+1egpt6x @63B",620, 620, 0.546, 24.20, 3.26, 63.00, "egpt_no_moe"),
+    ("V1 EGPT",                 143,  66, 0.481,  47.70, 1.97,   7.86, "egpt_no_moe"),
+    ("h1 EGPT",                 145,  68, 0.4892, 39.55, 2.20,   7.86, "egpt_no_moe"),
+    ("V1-400M EGPT",            354, 251, 0.494,  38.60, 1.93,   7.86, "egpt_no_moe"),
+    ("scale_h3 EGPT",           620, 620, 0.542,  25.00, 2.50,  63.00, "egpt_no_moe"),
+    ("scale_r3 EGPT-rec",       620, 620, 0.546,  24.20, 3.26,  63.00, "egpt_no_moe"),
 
     # Boltz-MoE (orange) — 145M, 407M, 620M, 679M.
-    ("h1 Boltz-MoE d=768",      145,  68, 0.501, 36.50, 2.12,   7.86, "boltz_moe"),
-    ("B4 rerun d=768",          407, 330, 0.4935, 38.04, 2.20,  7.86, "boltz_moe"),
-    ("scale_h3_boltz @63B",     620, 620, 0.5694, 21.89, 1.74, 62.91, "boltz_moe"),
-    ("580M Boltz @65B FINAL",   679, 679, 0.5847, 19.33, 2.08, 65.01, "boltz_moe"),
+    ("h1 Boltz-MoE",            145,  68, 0.501,  36.50, 2.12,   7.86, "boltz_moe"),
+    ("B4 Boltz-MoE",            407, 330, 0.4935, 38.04, 2.20,   7.86, "boltz_moe"),
+    ("scale_h3 Boltz-MoE",      620, 620, 0.5694, 21.89, 1.74,  62.91, "boltz_moe"),
+    ("580M Boltz-MoE",          679, 679, 0.5847, 19.33, 2.08,  65.01, "boltz_moe"),
 
     # GPT + standard MoE (green) — 145M, 585M, 585M, 962M.
-    ("h1 GPT+Switch+Boltz d=768", 145, 68, 0.486, 35.50, 1.86,   7.86, "gpt_moe"),
-    ("8gpt+4sw @65B FINAL",     585, 459, 0.5797, 20.90, 1.74, 65.01, "gpt_moe"),
-    ("12moe-I2k @65B FINAL",    585, 396, 0.5612, 21.64, 2.39, 65.01, "gpt_moe"),
-    ("12moe-I4k @50B",          962, 585, 0.5732, 21.27, 2.50, 50.33, "gpt_moe"),
+    ("h1 GPT+Switch-MoE",       145,  68, 0.486,  35.50, 1.86,   7.86, "gpt_moe"),
+    ("8gpt+4switch",            585, 459, 0.5797, 20.90, 1.74,  65.01, "gpt_moe"),
+    ("12moe Boltz I=2k",        585, 396, 0.5612, 21.64, 2.39,  65.01, "gpt_moe"),
+    ("12moe Boltz I=4k",        962, 585, 0.5732, 21.27, 2.50,  50.33, "gpt_moe"),
 ]
-
-
-def _wrap_simple(s: str, max_len: int = 20) -> str:
-    if len(s) <= max_len:
-        return s
-    for sep in (" @", " + ", " "):
-        idx = s.rfind(sep, 0, max_len + 1)
-        if idx > 0:
-            return s[:idx] + "\n" + s[idx + len(sep) - 1:].lstrip(" ")
-    return s
 
 
 def _draw_simple_panel(ax, ykey, ylabel, xs):
@@ -336,13 +327,13 @@ def _draw_simple_panel(ax, ykey, ylabel, xs):
         ax.scatter(x, y, c=color, marker="o", s=size,
                    edgecolors="white", linewidths=0.8, alpha=0.9, zorder=3)
         if _HAS_ADJUST_TEXT:
-            t = ax.text(x, y, _wrap_simple(name), fontsize=6.5, color=color, zorder=4,
-                        ha="left", va="bottom")
+            t = ax.text(x, y, name, fontsize=7, color=color, zorder=4,
+                        ha="center", va="center")
             texts.append(t)
         else:
-            ax.annotate(_wrap_simple(name), (x, y),
+            ax.annotate(name, (x, y),
                         textcoords="offset points", xytext=(5, 3),
-                        fontsize=6.5, color=color, zorder=4)
+                        fontsize=7, color=color, zorder=4)
 
     if ykey == 4:
         ax.invert_yaxis()
@@ -354,14 +345,18 @@ def _draw_simple_panel(ax, ykey, ylabel, xs):
     ax.tick_params(labelsize=8)
 
     if _HAS_ADJUST_TEXT and texts:
+        # Run after axis limits are settled. Stronger repulsion between texts
+        # to keep the cluster on the right side from collapsing onto each
+        # other; modest repulsion from the points so labels stay close to
+        # their dots when there's room.
         adjust_text(
             texts, ax=ax,
-            arrowprops=dict(arrowstyle="-", color="#888888", lw=0.4, alpha=0.6),
-            expand_text=(1.05, 1.15),
-            expand_points=(1.2, 1.4),
-            force_text=(0.4, 0.6),
-            force_points=(0.3, 0.4),
-            only_move={"text": "xy", "points": "xy"},
+            arrowprops=dict(arrowstyle="-", color="#888888", lw=0.4, alpha=0.5),
+            expand_text=(1.20, 1.30),
+            expand_points=(1.30, 1.30),
+            force_text=(0.7, 1.0),
+            force_points=(0.4, 0.5),
+            only_move={"text": "xy", "static": "xy", "explode": "xy", "pull": "xy"},
         )
 
 
@@ -372,25 +367,38 @@ def _add_simple_legend(fig):
 
 
 def make_scatter_simple(variant="total"):
-    """Simplified scatter: final/canonical points only, 4-color family scheme."""
+    """Simplified scatter: final/canonical points only, 4-color family scheme.
+
+    Param axes (total/active) span ~1 decade (~140M-960M) so we keep linear x
+    — log-scale concentrates the labels in a tight high-x band that adjustText
+    can't separate cleanly. FLOPs span ~3 decades, so we keep log-x there.
+    """
     assert variant in ("active", "total", "flops")
     if variant == "total":
         xlabel = "Total params (M)"
         xs = [r[1] for r in MODELS_SIMPLE]
+        log_x = False
     elif variant == "active":
         xlabel = "Active (non-embed) params (M)"
         xs = [r[2] for r in MODELS_SIMPLE]
+        log_x = False
     else:  # flops — training FLOPs ≈ 6 · active · tokens, in EFLOPs (10^18)
         xlabel = "Training FLOPs (EFLOPs)"
         xs = [6.0 * r[2] * 1e6 * r[6] * 1e9 / 1e18 for r in MODELS_SIMPLE]
+        log_x = True
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 3.8), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.0), constrained_layout=True)
     ylabels = ["WikiText PPL", "Avg zero-shot acc", "GSM8k flex-avg (%)"]
     for ax, ykey, ylabel in zip(axes, [4, 3, 5], ylabels):
+        if log_x:
+            ax.set_xscale("log")
+        # Add 5% horizontal padding so labels at the right edge have room.
+        if not log_x:
+            xmin, xmax = min(xs), max(xs)
+            pad = (xmax - xmin) * 0.10
+            ax.set_xlim(xmin - pad, xmax + pad)
         _draw_simple_panel(ax, ykey, ylabel, xs)
         ax.set_xlabel(xlabel, fontsize=9)
-        if variant in ("total", "active", "flops"):
-            ax.set_xscale("log")
 
     _add_simple_legend(fig)
 
