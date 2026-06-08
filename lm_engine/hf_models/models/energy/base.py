@@ -13,15 +13,13 @@ class EnergyPreTrainedModel(PreTrainedModelMixin):
     config_class = EnergyConfig
     layer_class = EnergyBlock
 
-    @property
-    def _no_split_modules(self):
-        # When shared_backbone=True, all EnergyBlocks share the same attn/ffwd/ln
-        # tensors. FSDP2 can't shard parameters that already belong to another
-        # fully_shard'd module, so we skip per-block wrapping and let only the
-        # top-level model get wrapped (DDP-style with stage=0).
-        if getattr(self.config, "shared_backbone", False):
-            return []
-        return ["EnergyBlock"]
+    # NOTE: upstream defines this as a read-only @property, which is
+    # incompatible with transformers PreTrainedModel.__init__ (it assigns
+    # self._no_split_modules = set(...) and a property has no setter -> crash on
+    # both 4.57.1 and 5.1.0). We use a plain class attribute, identical to the
+    # property's return value for shared_backbone=False (the only mode this run
+    # uses; the config does not set shared_backbone). Zero numeric change.
+    _no_split_modules = ["EnergyBlock"]
 
 
 class EnergyModel(EnergyPreTrainedModel, BaseModelMixin): ...

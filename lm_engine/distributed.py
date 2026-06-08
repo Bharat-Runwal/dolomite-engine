@@ -196,9 +196,14 @@ def wrap_model_container_for_distributed_training(
 
         dtype = "bf16"
 
-    block_names = model_container[0].model._no_split_modules
+    # transformers>=5.0 exposes _no_split_modules as a set (was a list in <5.0);
+    # coerce to list so `block_names + teacher_block_names` below works on both.
+    # Same elements/order -> no behavior change.
+    block_names = list(model_container[0].model._no_split_modules)
     teacher_block_names = (
-        model_container[0].teacher_model._no_split_modules if model_container[0].has_teacher_model() else []
+        list(model_container[0].teacher_model._no_split_modules)
+        if model_container[0].has_teacher_model()
+        else []
     )
 
     dtype = None if dtype is None else string_to_torch_dtype(dtype)

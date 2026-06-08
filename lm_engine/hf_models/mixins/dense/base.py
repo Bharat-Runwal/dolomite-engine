@@ -605,7 +605,12 @@ class BaseModelMixin(PreTrainedModelMixin):
         if self.position_embedding_type == "learned_absolute":
             self.wpe = ParameterizedEmbedding(max_position_embeddings, self.embed_dim, std=self.initializer_range)
         elif self.position_embedding_type == "rope":
-            if self.config.rope_scaling is None:
+            # transformers>=5.0 auto-populates rope_scaling/rope_parameters even for
+            # plain (non-YaRN) rope, so it is no longer None. Treat a scaling dict
+            # that lacks a YaRN "factor" key as plain RoPE — identical behavior to
+            # rope_scaling=None. No effect on real YaRN configs (which have "factor").
+            _rope_scaling = self.config.rope_scaling
+            if _rope_scaling is None or "factor" not in _rope_scaling:
                 self.rope = RoPE(
                     self.rope_dim,
                     max_position_embeddings=max_position_embeddings,

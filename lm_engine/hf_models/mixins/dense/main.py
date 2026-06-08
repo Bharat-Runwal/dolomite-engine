@@ -19,7 +19,15 @@ from .base import PreTrainedModelMixin
 
 
 class CausalLMModelMixin(PreTrainedModelMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    # VERSION-COMPAT ONLY (transformers>=5.0); preserves original behavior exactly.
+    # This codebase ties weights MANUALLY: when tie_word_embeddings=True there is no
+    # `lm_head` module at all — get_lm_logits() applies F.linear(h, wte.weight)
+    # directly. HF's own module-tying is never used. Upstream's list form
+    # (["lm_head.weight"]) made transformers 5.x try to tie a non-existent lm_head
+    # submodule (AttributeError). The correct, behavior-identical value is an empty
+    # mapping: there is nothing for HF to auto-tie in either case
+    # (tied -> no lm_head; untied -> independent lm_head). No numeric change.
+    _tied_weights_keys = {}
     base_model_class = None
 
     def __init__(self, config: CommonConfig, **kwargs) -> CausalLMModelMixin:
