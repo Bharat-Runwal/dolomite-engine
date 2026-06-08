@@ -319,11 +319,13 @@ MODELS_SIMPLE = [
 def _draw_simple_panel(ax, ykey, ylabel, xs):
     texts = []
     for row, x in zip(MODELS_SIMPLE, xs):
-        name = row[0]; total = row[1]; family = row[7]
+        name = row[0]; tokens_B = row[6]; family = row[7]
         y = row[ykey]
         color = SIMPLE_FAMILIES[family][0]
-        # Size scales with total params: 60 (160M) → 220 (1B).
-        size = 60 + 0.18 * total
+        # Size scales with training tokens (linear): 8B → ~50; 65B → ~225;
+        # 100B → ~330. Highlights long-trained models like scale_v9 @ 100B
+        # and the 65B-token MoE finals against the 7.86B short-budget runs.
+        size = 30 + 3.0 * tokens_B
         ax.scatter(x, y, c=color, marker="o", s=size,
                    edgecolors="white", linewidths=0.8, alpha=0.9, zorder=3)
         if _HAS_ADJUST_TEXT:
@@ -361,9 +363,19 @@ def _draw_simple_panel(ax, ykey, ylabel, xs):
 
 
 def _add_simple_legend(fig):
-    handles = [mpatches.Patch(color=c, label=lbl) for c, lbl in SIMPLE_FAMILIES.values()]
-    fig.legend(handles=handles, loc="outside lower center",
-               ncol=4, fontsize=9, frameon=False)
+    family_handles = [mpatches.Patch(color=c, label=lbl)
+                      for c, lbl in SIMPLE_FAMILIES.values()]
+    # Size legend: three reference dots for token count.
+    size_handles = []
+    for tok in (8, 65, 100):
+        s = 30 + 3.0 * tok
+        size_handles.append(plt.scatter([], [], s=s, c="#888888",
+                                         edgecolors="white", linewidths=0.8,
+                                         label=f"{tok} B tokens"))
+    fig.legend(handles=family_handles + size_handles,
+               loc="outside lower center",
+               ncol=7, fontsize=9, frameon=False,
+               handletextpad=0.4, columnspacing=1.2)
 
 
 def make_scatter_simple(variant="total"):
