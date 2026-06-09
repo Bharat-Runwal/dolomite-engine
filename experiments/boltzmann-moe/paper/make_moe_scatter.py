@@ -5,7 +5,7 @@ Run on CPU, uses Agg backend (no X11 needed).
 
 Models shown: baselines (V0/V1/V1-400M/V58/V9), the H-series MoE variants we
 care about (h1_topk, h1_boltz_fullsize, h1_boltz_topk2, h1_gptmoe_boltz, plus
-h1_boltz iso-param for the failure-mode reference), and the 580M scale points.
+h1_boltz iso-param for the failure-mode reference), and the 680M scale points.
 B-series, C-series, and the r128 variant are excluded — they're in the paper
 appendix table for reference but clutter the scatter without changing the
 story.
@@ -51,15 +51,15 @@ MODELS = [
     # h2: 6 GPT + 2 distinct EGPT blocks × 6 iters each (18 effective layers).
     # Adds a second unique EGPT block to h1's pattern; lost to h1_boltz_fullsize.
     ("h2_6gpt_2egpt6x",     155,  78, 0.4871, 37.71, 1.74, 7.86, "boltzmann",    "H-series"),
-    # 580M Boltzmann MoE (K=8 × I_e=4096, d=1536) — training to 65B.
-    ("580M @ 7.3B",         679, 679, 0.5137, 30.4, 2.39, 7.34, "boltzmann",   "H-series"),
-    ("580M @ 9.4B",         679, 679, 0.5238, 28.97, 2.12, 9.43, "boltzmann",   "H-series"),
-    ("580M @ 15.7B",        679, 679, 0.5366, 26.84, 1.90, 15.73, "boltzmann", "H-series"),
-    ("580M @ 39.8B",        679, 679, 0.5593, 22.41, 2.39, 39.83, "boltzmann", "H-series"),
-    ("580M @ 53.5B",        679, 679, 0.5801, 20.23, 2.31, 53.48, "boltzmann", "H-series"),
-    ("580M @ 57.7B",        679, 679, 0.5759, 19.70, 1.86, 57.67, "boltzmann", "H-series"),
-    ("580M @ 61.9B",        679, 679, 0.5781, 19.48, 2.12, 61.87, "boltzmann", "H-series"),
-    ("580M @ 65.0B (FINAL)", 679, 679, 0.5847, 19.33, 2.08, 65.01, "boltzmann", "H-series"),
+    # 680M Boltzmann MoE (K=8 × I_e=4096, d=1536) — training to 65B.
+    ("680M @ 7.3B",         679, 679, 0.5137, 30.4, 2.39, 7.34, "boltzmann",   "H-series"),
+    ("680M @ 9.4B",         679, 679, 0.5238, 28.97, 2.12, 9.43, "boltzmann",   "H-series"),
+    ("680M @ 15.7B",        679, 679, 0.5366, 26.84, 1.90, 15.73, "boltzmann", "H-series"),
+    ("680M @ 39.8B",        679, 679, 0.5593, 22.41, 2.39, 39.83, "boltzmann", "H-series"),
+    ("680M @ 53.5B",        679, 679, 0.5801, 20.23, 2.31, 53.48, "boltzmann", "H-series"),
+    ("680M @ 57.7B",        679, 679, 0.5759, 19.70, 1.86, 57.67, "boltzmann", "H-series"),
+    ("680M @ 61.9B",        679, 679, 0.5781, 19.48, 2.12, 61.87, "boltzmann", "H-series"),
+    ("680M @ 65.0B (FINAL)", 679, 679, 0.5847, 19.33, 2.08, 65.01, "boltzmann", "H-series"),
     # scale_h3_boltz: 8gpt+4egpt no-recursion, d=1280, ~620M, BoltzMoE in EGPT.
     ("scale_h3_boltz @ 54.5B", 620, 620, 0.5563, 22.67, 2.39, 54.53, "boltzmann", "H-series"),
     ("scale_h3_boltz @ 62.9B", 620, 620, 0.5694, 21.89, 1.74, 62.91, "boltzmann", "H-series"),
@@ -80,14 +80,14 @@ MODELS = [
     ("12moe-I4k @ 38.3B",   962, 585, 0.5572, 23.66, 2.58, 38.27, "boltzmann",    "H-series"),
     ("12moe-I4k @ 50.3B",   962, 585, 0.5732, 21.27, 2.50, 50.33, "boltzmann",    "H-series"),
     ("12moe-I4k @ 65.0B FINAL", 962, 585, 0.5802, 19.73, 1.67, 65.01, "boltzmann", "H-series"),
-    # Matched-structure baseline: same 11+1×6 layout as 580M Boltz, but uses
+    # Matched-structure baseline: same 11+1×6 layout as 680M Boltz, but uses
     # softmax_attention + Switch-MoE in the recurrent block instead of
-    # energy_attention + BoltzmannMoE. Tests whether the 580M Boltz advantage
+    # energy_attention + BoltzmannMoE. Tests whether the 680M Boltz advantage
     # comes from the structural template or from energy-attn + Boltz routing.
-    ("gptswitchmoe-580M @ 15.2B", 730, 730, 0.5208, 27.73, 1.93, 15.21, "switch+boltz", "H-series"),
-    ("gptswitchmoe-580M @ 25.2B", 730, 730, 0.5417, 25.66, 1.86, 25.17, "switch+boltz", "H-series"),
-    ("gptswitchmoe-580M @ 42.5B", 730, 730, 0.5495, 22.52, 1.90, 42.47, "switch+boltz", "H-series"),
-    ("gptswitchmoe-580M @ 46.1B", 730, 730, 0.5602, 21.90, 2.69, 46.13, "switch+boltz", "H-series"),
+    ("gptswitchmoe-680M @ 15.2B", 730, 730, 0.5208, 27.73, 1.93, 15.21, "switch+boltz", "H-series"),
+    ("gptswitchmoe-680M @ 25.2B", 730, 730, 0.5417, 25.66, 1.86, 25.17, "switch+boltz", "H-series"),
+    ("gptswitchmoe-680M @ 42.5B", 730, 730, 0.5495, 22.52, 1.90, 42.47, "switch+boltz", "H-series"),
+    ("gptswitchmoe-680M @ 46.1B", 730, 730, 0.5602, 21.90, 2.69, 46.13, "switch+boltz", "H-series"),
 ]
 
 SHORT_NAMES = {
@@ -105,14 +105,14 @@ SHORT_NAMES = {
     "h1_boltz_topk2":      "h1 boltz-top2",
     "B4 rerun":            "B4 rerun",
     "h2_6gpt_2egpt6x":     "h2 (2 EGPT)",
-    "580M @ 7.3B":         "580M @ 7.3B",
-    "580M @ 9.4B":         "580M @ 9.4B",
-    "580M @ 15.7B":        "580M @ 15.7B",
-    "580M @ 39.8B":        "580M @ 39.8B",
-    "580M @ 53.5B":        "580M @ 53.5B",
-    "580M @ 57.7B":        "580M @ 57.7B",
-    "580M @ 61.9B":        "580M @ 61.9B",
-    "580M @ 65.0B (FINAL)": "580M @ 65B (final)",
+    "680M @ 7.3B":         "680M @ 7.3B",
+    "680M @ 9.4B":         "680M @ 9.4B",
+    "680M @ 15.7B":        "680M @ 15.7B",
+    "680M @ 39.8B":        "680M @ 39.8B",
+    "680M @ 53.5B":        "680M @ 53.5B",
+    "680M @ 57.7B":        "680M @ 57.7B",
+    "680M @ 61.9B":        "680M @ 61.9B",
+    "680M @ 65.0B (FINAL)": "680M @ 65B (final)",
     "scale_h3_boltz @ 54.5B": "scale_h3_boltz @54B",
     "scale_h3_boltz @ 62.9B": "scale_h3_boltz @63B",
     "8gpt+4sw @ 12.6B":    "8gpt+4sw @13B",
@@ -128,10 +128,10 @@ SHORT_NAMES = {
     "12moe-I4k @ 38.3B":   "12moe-I4k @38B",
     "12moe-I4k @ 50.3B":   "12moe-I4k @50B",
     "12moe-I4k @ 65.0B FINAL": "12moe-I4k @65B (final)",
-    "gptswitchmoe-580M @ 15.2B": "gptswitch-580M @15B",
-    "gptswitchmoe-580M @ 25.2B": "gptswitch-580M @25B",
-    "gptswitchmoe-580M @ 42.5B": "gptswitch-580M @42B",
-    "gptswitchmoe-580M @ 46.1B": "gptswitch-580M @46B",
+    "gptswitchmoe-680M @ 15.2B": "gptswitch-680M @15B",
+    "gptswitchmoe-680M @ 25.2B": "gptswitch-680M @25B",
+    "gptswitchmoe-680M @ 42.5B": "gptswitch-680M @42B",
+    "gptswitchmoe-680M @ 46.1B": "gptswitch-680M @46B",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
@@ -313,10 +313,10 @@ MODELS_SIMPLE = [
     # simplified plot — those land at avg ~49 / PPL ~38 due to a 21:1 FFN:Attn
     # imbalance in the all-MoE arch, not the Boltz routing itself. The
     # canonical Boltz-MoE line is the hybrid (GPT prefix + late MoE) at
-    # h1 145M → scale_h3 620M → 580M 679M.
+    # h1 145M → scale_h3 620M → 680M 679M.
     ("h1 Boltz-MoE",            145,  68, 0.501,  36.50, 2.12,   7.86, "boltz_moe"),
     ("scale_h3 Boltz-MoE",      620, 620, 0.5694, 21.89, 1.74,  62.91, "boltz_moe"),
-    ("580M Boltz-MoE",          679, 679, 0.5847, 19.33, 2.08,  65.01, "boltz_moe"),
+    ("680M Boltz-MoE",          679, 679, 0.5847, 19.33, 2.08,  65.01, "boltz_moe"),
 
     # GPT + standard MoE (green) — 145M, 585M, 585M, 962M.
     ("h1 GPT+Switch-MoE",       145,  68, 0.486,  35.50, 1.86,   7.86, "gpt_moe"),

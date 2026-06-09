@@ -2,18 +2,18 @@
 
 **TL;DR.** Two ~600M Boltzmann-MoE hybrids both beat all pure-GPT and no-MoE
 baselines on every metric (avg, WikiPPL) at substantially fewer training
-tokens. `580M` uses recursion (one EGPT block × 6); `scale_h3_boltz` uses 4
+tokens. `680M` uses recursion (one EGPT block × 6); `scale_h3_boltz` uses 4
 distinct EGPT blocks with no recursion. Both implement BoltzMoE FFNs in the
 EGPT layers.
 
 | Run | Config | Save path |
 |---|---|---|
-| **580M (recursive)** | [`configs/boltzmann_moe/h1_boltz_moe_580m_8x4096_d1536.yml`](../../configs/boltzmann_moe/h1_boltz_moe_580m_8x4096_d1536.yml) | `experiments/boltzmann-moe/results/h1_boltz_moe_580m_8x4096_d1536/` |
+| **680M (recursive)** | [`configs/boltzmann_moe/h1_boltz_moe_580m_8x4096_d1536.yml`](../../configs/boltzmann_moe/h1_boltz_moe_580m_8x4096_d1536.yml) | `experiments/boltzmann-moe/results/h1_boltz_moe_580m_8x4096_d1536/` |
 | **scale_h3_boltz (no-rec)** | [`configs/boltzmann_moe/scale_h3_8gpt_4egpt_boltz_d1280.yml`](../../configs/boltzmann_moe/scale_h3_8gpt_4egpt_boltz_d1280.yml) | `experiments/boltzmann-moe/results/scale_h3_8gpt_4egpt_boltz_d1280/` |
 
 ## Layer-by-layer architecture (quick read)
 
-### 580M — `h1_boltz_moe_580m_8x4096_d1536` (679M total params)
+### 680M — `h1_boltz_moe_580m_8x4096_d1536` (679M total params)
 
 ```
 d=1536, num_layers=12, layer_iterations=[1,1,1,1,1,1,1,1,1,1,1,6]   ⇒ 17 effective layers
@@ -57,12 +57,12 @@ Layers 9-12  EGPT (4 distinct blocks, no recursion)
 
 | Run | Tokens | Avg | WikiPPL | MMLU | GSM8k flex-avg | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| **580M @ step 124k (FINAL)** | **65.0B** | **58.47** | **19.33** | **26.33** | 2.08 | **🏆 final — best on every metric, training complete** |
-| 580M @ step 118k | 61.9B | 57.81 | 19.48 | 25.72 | 2.12 | prior |
-| 580M @ step 110k | 57.7B | 57.59 | 19.70 | 26.17 | 1.86 | prior |
-| 580M @ step 102k | 53.5B | 58.14 | 20.23 | 26.09 | 2.31 | prior |
-| 580M @ step 76k | 39.8B | 55.93 | 22.41 | 25.30 | 2.39 | prior champion |
-| 580M @ step 30k (pre-bug, clean) | 15.7B | 53.66 | 26.84 | 25.42 | 1.90 | trustworthy clean snapshot |
+| **680M @ step 124k (FINAL)** | **65.0B** | **58.47** | **19.33** | **26.33** | 2.08 | **🏆 final — best on every metric, training complete** |
+| 680M @ step 118k | 61.9B | 57.81 | 19.48 | 25.72 | 2.12 | prior |
+| 680M @ step 110k | 57.7B | 57.59 | 19.70 | 26.17 | 1.86 | prior |
+| 680M @ step 102k | 53.5B | 58.14 | 20.23 | 26.09 | 2.31 | prior |
+| 680M @ step 76k | 39.8B | 55.93 | 22.41 | 25.30 | 2.39 | prior champion |
+| 680M @ step 30k (pre-bug, clean) | 15.7B | 53.66 | 26.84 | 25.42 | 1.90 | trustworthy clean snapshot |
 | **scale_h3_boltz @ step 120k** | 62.9B | **56.94** | **21.89** | 26.11 | 1.74 | iso-params no-recursion sibling |
 | scale_h3_boltz @ step 104k | 54.5B | 55.63 | 22.67 | 25.03 | 2.39 | prior |
 
@@ -76,7 +76,7 @@ energy-attention layers separately from the routing scheme.
 Models share the same scaffold (d=1280, 12 transformer layers, softmax
 attention everywhere). They differ on routing, MoE coverage, and per-expert
 size — see the architecture summary at the top of this file. The Boltz-MoE
-**580M** baseline (which uses energy attention and a recurrent EGPT layer)
+**680M** baseline (which uses energy attention and a recurrent EGPT layer)
 is included as the structurally-different reference.
 
 | Run | Config | Total / Active (M) | Tokens | Avg | WikiPPL | MMLU | gsm8k flex-avg | Notes |
@@ -93,26 +93,26 @@ is included as the structurally-different reference.
 | `scale_gptmoe_12moe_K4I4096_d1280` @ 45k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 23.6 B | 54.36 | 26.35 | 25.92 | 2.24 | mid |
 | `scale_gptmoe_12moe_K4I4096_d1280` @ 73k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 38.3 B | 55.72 | 23.66 | 26.64 | 2.58 | mid-late |
 | `scale_gptmoe_12moe_K4I4096_d1280` @ 96k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 50.3 B | 57.32 | 21.27 | 25.13 | 2.50 | mid-late |
-| **`scale_gptmoe_12moe_K4I4096_d1280` @ 124k FINAL** | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 65.0 B | **58.02** | **19.73** | 25.65 | 1.67 | 🏁 final — within 0.45pp/0.40 PPL of 580M Boltz |
-| **gptswitchmoe-580M** @ 29k (matched-structure baseline) | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 15.2 B | 52.08 | 27.73 | 26.81 | 1.93 | structural ablation start |
-| **gptswitchmoe-580M** @ 48k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 25.2 B | 54.17 | 25.66 | 24.08 | 1.86 | structural ablation, gap closing |
-| **gptswitchmoe-580M** @ 81k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 42.5 B | 54.95 | 22.52 | 23.96 | 1.90 | structural ablation, ~40B mid; PPL nearly matches Boltz |
-| **gptswitchmoe-580M** @ 88k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 46.1 B | 56.02 | 21.90 | 25.04 | 2.69 | structural ablation, 46B mid; PPL passes Boltz @ 40B but Boltz interp at 46B still wins |
-| **580M Boltz** @ 30k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 15.7 B | **53.66** | **26.84** | 25.42 | 1.90 | iso-tokens vs gptswitchmoe-580M |
-| **580M Boltz** @ 76k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 39.8 B | 55.93 | 22.41 | 25.30 | 2.39 | iso-tokens vs gptmoe trio at ~30-40B |
-| **580M Boltz** @ 124k FINAL | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 65.0 B | **58.47** | **19.33** | 26.33 | 2.08 | 🏆 final — best on every metric in our table |
+| **`scale_gptmoe_12moe_K4I4096_d1280` @ 124k FINAL** | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 65.0 B | **58.02** | **19.73** | 25.65 | 1.67 | 🏁 final — within 0.45pp/0.40 PPL of 680M Boltz |
+| **gptswitchmoe-680M** @ 29k (matched-structure baseline) | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 15.2 B | 52.08 | 27.73 | 26.81 | 1.93 | structural ablation start |
+| **gptswitchmoe-680M** @ 48k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 25.2 B | 54.17 | 25.66 | 24.08 | 1.86 | structural ablation, gap closing |
+| **gptswitchmoe-680M** @ 81k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 42.5 B | 54.95 | 22.52 | 23.96 | 1.90 | structural ablation, ~40B mid; PPL nearly matches Boltz |
+| **gptswitchmoe-680M** @ 88k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 46.1 B | 56.02 | 21.90 | 25.04 | 2.69 | structural ablation, 46B mid; PPL passes Boltz @ 40B but Boltz interp at 46B still wins |
+| **680M Boltz** @ 30k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 15.7 B | **53.66** | **26.84** | 25.42 | 1.90 | iso-tokens vs gptswitchmoe-680M |
+| **680M Boltz** @ 76k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 39.8 B | 55.93 | 22.41 | 25.30 | 2.39 | iso-tokens vs gptmoe trio at ~30-40B |
+| **680M Boltz** @ 124k FINAL | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 65.0 B | **58.47** | **19.33** | 26.33 | 2.08 | 🏆 final — best on every metric in our table |
 
 Story (updated with all four 65B-token FINAL snapshots):
 
 - **Iso-token leaderboard at 65B**:
   | Run                       | Total/Active | avg9   | WikiPPL | MMLU  | gsm8k |
   |---------------------------|-------------:|-------:|--------:|------:|------:|
-  | 580M Boltz (energy+Boltz) | 679 / 679    | **58.47** | **19.33** | 26.33 | 2.08 |
+  | 680M Boltz (energy+Boltz) | 679 / 679    | **58.47** | **19.33** | 26.33 | 2.08 |
   | 12moe-I4k (Boltz, larger) | 962 / 585    | 58.02  | 19.73  | 25.65 | 1.67 |
   | 8gpt+4sw  (Switch top-1)  | 585 / 459    | 57.97  | 20.90  | **27.03** | 1.74 |
   | 12moe-I2k (Boltz, smaller)| 585 / 396    | 56.12  | 21.64  | 25.59 | **2.39** |
 - **Surprising headline**: at 65B tokens, the top three runs are **statistically
-  indistinguishable** on avg (58.0-58.5pp, ~0.5pp spread). 580M Boltz keeps the lead
+  indistinguishable** on avg (58.0-58.5pp, ~0.5pp spread). 680M Boltz keeps the lead
   on avg+PPL but only narrowly. The gap to **12moe-I4k (962M, pure-GPT, Boltzmann
   routing) is just 0.45pp avg / 0.40 PPL** despite no energy attention.
 - **Routing comparison (within pure-GPT-MoE)**:
@@ -121,15 +121,15 @@ Story (updated with all four 65B-token FINAL snapshots):
   - At 65B FINAL: Switch (58.0) ≈ I4k (58.0) > I2k (56.1).
   - **Larger experts (I=4096) match Switch top-1 with the same Boltzmann routing**;
     smaller experts (I=2048) trail by ~1.9pp.
-- **Energy-attention contribution (revised)**: 580M Boltz still wins on avg+PPL,
+- **Energy-attention contribution (revised)**: 680M Boltz still wins on avg+PPL,
   but **only by margins that 1.4× more params can substitute for**. The
   "energy-attention is the load-bearing piece" framing of earlier rounds was
   overstated; what we see at 65B is:
   - +0.5pp avg / -1.6 PPL vs the strongest matched-param-count MoE (8gpt+4sw 585M)
   - +0.45pp avg / -0.40 PPL vs a larger-param Boltzmann pure-GPT (12moe-I4k 962M)
   - Energy attention compresses ~1.4× param scaling into the same 679M.
-- **Structural ablation (gptswitchmoe-580M)** progression:
-  - 15.2B: -1.6pp avg / +0.9 PPL behind 580M Boltz
+- **Structural ablation (gptswitchmoe-680M)** progression:
+  - 15.2B: -1.6pp avg / +0.9 PPL behind 680M Boltz
   - 25.2B: ~-0.4pp avg / -1.0 PPL (gap closing)
   - 42.5B: ~-1.0pp avg / +0.1 PPL (gap stable around 1pp avg, PPL essentially tied)
   - Same scaffold w/o energy-attn; PPL nearly matches Boltz; avg-acc gap persists.
@@ -145,15 +145,15 @@ Both substantially beat baselines:
 - **scale_r3** 11gpt+1egpt6x (no MoE) 620M @ 63B: avg 54.6 / PPL 24.2
 - **scale_h3** 8gpt+4egpt (no MoE) 620M @ 63B: avg 54.2 / PPL 25.0
 
-580M @ 39.8B beats scale_v9 @ 100.7B by **+1.8pp avg, −3.8 PPL** at ⅓ the tokens.
+680M @ 39.8B beats scale_v9 @ 100.7B by **+1.8pp avg, −3.8 PPL** at ⅓ the tokens.
 
-## Where Boltz-MoE wins (vs scale_v9 GPT 354M @ 100.7B) — final 580M @ 124k
+## Where Boltz-MoE wins (vs scale_v9 GPT 354M @ 100.7B) — final 680M @ 124k
 
-**At final 65B-token training, 580M Boltz wins on every benchmark — including COPA, the
+**At final 65B-token training, 680M Boltz wins on every benchmark — including COPA, the
 last holdout V9 had at 53.5B tokens. WikiPPL improved monotonically across all
 snapshots: 26.84 → 22.41 → 20.23 → 19.70 → 19.48 → 19.33 (15.7B → 65.0B tokens).**
 
-| Task | scale_v9 | 580M @ 124k | Δ | family |
+| Task | scale_v9 | 680M @ 124k | Δ | family |
 |---|---:|---:|---:|---|
 | arc_easy | 56.6 | **68.14** | **+11.5** | knowledge / multi-choice |
 | hellaswag | 44.3 | **54.21** | **+9.9** | commonsense |
@@ -170,7 +170,7 @@ snapshots: 26.84 → 22.41 → 20.23 → 19.70 → 19.48 → 19.33 (15.7B → 65
 
 ## Training setup (both runs)
 
-| Setting | 580M | scale_h3_boltz |
+| Setting | 680M | scale_h3_boltz |
 |---|---|---|
 | Optimizer | TorchAdamW, betas (0.9, 0.95), eps 1e-8, wd 0.1 | same |
 | Peak LR (cosine, 2k warmup) | 1e-3 | 1.5e-3 |
@@ -202,7 +202,7 @@ To reset a run that hit max_resubmits (see watchdog log under
 
 ## Caveats
 
-- **580M had a brief buggy training window** (~steps 40000-43000) where a
+- **680M had a brief buggy training window** (~steps 40000-43000) where a
   config edit accidentally set `phi_prime → 0` for a single resubmitted
   process. The model has since recovered (`output_norm` 19→26 from corrected-
   code training). Step-30000 eval (`unsharded_step14k`/30k) is fully clean
