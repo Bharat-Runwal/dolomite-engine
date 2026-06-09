@@ -63,6 +63,7 @@ MODELS = [
     # scale_h3_boltz: 8gpt+4egpt no-recursion, d=1280, ~620M, BoltzMoE in EGPT.
     ("scale_h3_boltz @ 54.5B", 620, 620, 0.5563, 22.67, 2.39, 54.53, "boltzmann", "H-series"),
     ("scale_h3_boltz @ 62.9B", 620, 620, 0.5694, 21.89, 1.74, 62.91, "boltzmann", "H-series"),
+    ("scale_h3_boltz @ 65.0B FINAL", 620, 620, 0.5754, 21.82, 2.08, 65.01, "boltzmann", "H-series"),
     # Pure-GPT + MoE comparison set (d=1280, in-progress). Numbers (total /
     # active M) are model.numel() / model_wrapper.calculate_num_parameters().
     # Switch top-1 of 4 routes ~78% active (8gpt+4sw); the 12-layer K=4 MoEs
@@ -115,6 +116,7 @@ SHORT_NAMES = {
     "680M @ 65.0B (FINAL)": "680M @ 65B (final)",
     "scale_h3_boltz @ 54.5B": "scale_h3_boltz @54B",
     "scale_h3_boltz @ 62.9B": "scale_h3_boltz @63B",
+    "scale_h3_boltz @ 65.0B FINAL": "scale_h3_boltz @65B (final)",
     "8gpt+4sw @ 12.6B":    "8gpt+4sw @13B",
     "8gpt+4sw @ 31.5B":    "8gpt+4sw @31B",
     "8gpt+4sw @ 56.6B":    "8gpt+4sw @57B",
@@ -315,7 +317,7 @@ MODELS_SIMPLE = [
     # canonical Boltz-MoE line is the hybrid (GPT prefix + late MoE) at
     # h1 145M → scale_h3 620M → 680M 679M.
     ("h1 Boltz-MoE",            145,  68, 0.501,  36.50, 2.12,   7.86, "boltz_moe"),
-    ("scale_h3 Boltz-MoE",      620, 620, 0.5694, 21.89, 1.74,  62.91, "boltz_moe"),
+    ("scale_h3 Boltz-MoE",      620, 620, 0.5754, 21.82, 2.08,  65.01, "boltz_moe"),
     ("680M Boltz-MoE",          679, 679, 0.5847, 19.33, 2.08,  65.01, "boltz_moe"),
 
     # GPT + standard MoE (green) — 145M, 585M, 585M, 962M.

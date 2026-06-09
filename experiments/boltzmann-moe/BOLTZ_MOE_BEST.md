@@ -63,7 +63,8 @@ Layers 9-12  EGPT (4 distinct blocks, no recursion)
 | 680M @ step 102k | 53.5B | 58.14 | 20.23 | 26.09 | 2.31 | prior |
 | 680M @ step 76k | 39.8B | 55.93 | 22.41 | 25.30 | 2.39 | prior champion |
 | 680M @ step 30k (pre-bug, clean) | 15.7B | 53.66 | 26.84 | 25.42 | 1.90 | trustworthy clean snapshot |
-| **scale_h3_boltz @ step 120k** | 62.9B | **56.94** | **21.89** | 26.11 | 1.74 | iso-params no-recursion sibling |
+| **scale_h3_boltz @ step 124k FINAL** | 65.0B | **57.54** | **21.82** | 25.87 | 2.08 | 🏁 final — no-recursion sibling at 65B iso-tokens |
+| scale_h3_boltz @ step 120k | 62.9B | 56.94 | 21.89 | 26.11 | 1.74 | prior |
 | scale_h3_boltz @ step 104k | 54.5B | 55.63 | 22.67 | 25.03 | 2.39 | prior |
 
 ### Pure-GPT + Switch MoE comparison set (in-progress, ~12B tokens each)
