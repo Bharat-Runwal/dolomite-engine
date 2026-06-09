@@ -142,6 +142,9 @@ class CommonConfig(PretrainedConfig):
         energy_stop_grad_key: bool = False,
         energy_attn_add_wv_wo: bool = False,
         energy_apply_rayleigh: bool = False,
+        energy_unified_grad: bool = False,
+        energy_self_k_diag: bool = False,
+        energy_full_per_token_grad: bool = False,
         scale_ff_init: float | list[float] | None = None,
         energy_descent_loss_coef: float = 0.0,
         shared_backbone: bool = False,
@@ -183,6 +186,9 @@ class CommonConfig(PretrainedConfig):
         self.energy_stop_grad_key = energy_stop_grad_key
         self.energy_attn_add_wv_wo = energy_attn_add_wv_wo
         self.energy_apply_rayleigh = energy_apply_rayleigh
+        self.energy_unified_grad = energy_unified_grad
+        self.energy_self_k_diag = energy_self_k_diag
+        self.energy_full_per_token_grad = energy_full_per_token_grad
         self.scale_ff_init = scale_ff_init
         self.energy_descent_loss_coef = energy_descent_loss_coef
         self.shared_backbone = shared_backbone

@@ -696,6 +696,46 @@ class EnergyBlock(nn.Module):
             # Config key: energy_apply_rayleigh. Legacy alias: energy_apply_reileigh.
             self.apply_reileigh = (getattr(config, 'energy_apply_rayleigh', False) or
                                    getattr(config, 'energy_apply_reileigh', False))
+
+            # Unified-energy gradient: include the FULL K-role term (Q+K paths,
+            # gradient of E_total = sum_A E_A). See energy_attention.k_role_grad.
+            # WARNING: this is *not* causally safe for AR pretraining — the K-role
+            # at position B sums over queries A >= B, which leaks future-token
+            # information at training time. Use only for inference-time analysis
+            # on already-trained models. See sec/uni_energy.tex for the writeup.
+            self.energy_unified_grad = getattr(config, 'energy_unified_grad', False)
+
+            # Self-K diagonal: the A=B term of the K-role, which depends only on
+            # q_B, alpha_BB, k_B (all at position B). Causally safe — unlike the
+            # full unified gradient, this can be used at training time. It
+            # completes the Q-role attn_out to the *full* gradient of E_B at h_B
+            # (the Q-only forward silently drops this self-K diagonal).
+            self.energy_self_k_diag = getattr(config, 'energy_self_k_diag', False)
+            assert not (self.energy_unified_grad and self.energy_self_k_diag), \
+                "energy_unified_grad and energy_self_k_diag are mutually exclusive"
+
+            # Full per-token gradient: the chain-rule-correct +∇_h E_B at h_B,
+            # equivalent to torch.autograd.grad(E_B, h_B) with E_B = -LSE_B.
+            # On top of the Q-role + self-K-diagonal (which together give the
+            # gradient w.r.t. the LN'd state g_B), this branch:
+            #   (a) adds the RMSNorm Jacobian's radial scaling sqrt(d)/||h_B||
+            #       (Rayleigh tangent projection P_g is already applied via
+            #       energy_apply_rayleigh; the radial 1/||h|| factor is the
+            #       missing piece);
+            #   (b) flips the sign so the update direction is +∇E (not the
+            #       legacy +∇LSE = -∇E convention) — meaning h := h - proj(...)
+            #       descends E rather than ascending it.
+            # Implies energy_self_k_diag (for completeness of the Q+self-K
+            # gradient) and requires energy_apply_rayleigh (for the tangent
+            # piece of the LN Jacobian).
+            self.energy_full_per_token_grad = getattr(config, 'energy_full_per_token_grad', False)
+            if self.energy_full_per_token_grad:
+                assert self.apply_reileigh, \
+                    "energy_full_per_token_grad requires energy_apply_rayleigh: true"
+                assert not self.energy_unified_grad, \
+                    "energy_full_per_token_grad and energy_unified_grad are mutually exclusive"
+                # auto-enable self-K-diag (it's part of the per-token gradient)
+                self.energy_self_k_diag = True
         elif self.sequence_mixer_type == "boltzmann_moe_paired_unit":
             # C4: Paired (attn+ffn) expert units with joint Boltzmann routing.
             # PairedUnitMoE handles both attn and ffn; we only need ln + dual projections.
@@ -834,6 +874,18 @@ class EnergyBlock(nn.Module):
             # Descent projections (unconstrained, pos_scalar, identity, psd_anti): h := h - proj(grad_E)
             else:
                 grad_E = attn_out + self.scale_ff * ffwd_out
+                # Unified-energy (FULL K-role): leaks future tokens at training,
+                # see sec/uni_energy.tex. Kept for inference-time experiments only.
+                if getattr(self, 'energy_unified_grad', False):
+                    grad_E = grad_E + self.attn.k_role_grad(ln_x, rope_cos_sin=rope_cos_sin)
+                # Self-K diagonal: causally safe addition that completes the
+                # gradient of E_B at h_B. Same +grad_LSE sign as attn_out.
+                elif getattr(self, 'energy_self_k_diag', False):
+                    grad_E = grad_E + self.attn.k_role_self_diagonal(ln_x, rope_cos_sin=rope_cos_sin)
+                # Full per-token gradient: applied AFTER attn_out + ffwd_out + self-K
+                # but BEFORE Rayleigh tangent projection (so Rayleigh acts on the right
+                # quantity). The radial 1/||h|| scale and the E = -LSE sign flip are
+                # applied AFTER Rayleigh so they wrap the whole tangent-projected vector.
                 if self.apply_reileigh:
                     # Reileigh tangent projection: P(v,g) = v - g*(g·v)/d
                     # where g = ln_x = RMSNorm(x) satisfies ||g||^2 = d.
@@ -841,6 +893,16 @@ class EnergyBlock(nn.Module):
                     d = ln_x.shape[-1]
                     gv = (ln_x * grad_E).sum(dim=-1, keepdim=True)
                     grad_E = grad_E - ln_x * gv / d
+                if getattr(self, 'energy_full_per_token_grad', False):
+                    # Multiply by the RMSNorm Jacobian's radial factor sqrt(d)/||h||
+                    # and flip sign (E = -LSE → +∇E = -(+∇LSE_partial)). Together
+                    # with the Rayleigh tangent piece above this gives +∇_h E_B at h_B
+                    # (the chain-rule-correct per-token energy gradient), so the
+                    # update h := h - proj(grad_E) descends E by the standard
+                    # PSDA descent identity dE/dt = -|S^T ∇E|^2 ≤ 0.
+                    d_size = hidden_states.shape[-1]
+                    inv_h_norm = (d_size ** 0.5) / hidden_states.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                    grad_E = -grad_E * inv_h_norm
                 hidden_states = hidden_states - self.proj(grad_E)
             return hidden_states
         else:

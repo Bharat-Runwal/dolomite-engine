@@ -326,6 +326,110 @@ class EnergyAttention_QK(nn.Module):
         """Return cached metrics for external tracking."""
         return self._cached_metrics
 
+    def k_role_self_diagonal(self, x: torch.Tensor, rope_cos_sin=None) -> torch.Tensor:
+        """Causally-safe self-K diagonal: the A=B term of the K-role gradient.
+
+        The full K-role gradient at position B sums over A >= B (see
+        k_role_grad). Only the A=B diagonal term is causally safe (it
+        depends only on q_B, alpha_BB, k_B at position B). It is
+        precisely the K-role of E_B at h_B restricted to the j=B key,
+        which the standard forward output (Q-role only) silently drops.
+
+        Returns: per-position tensor with same shape as standard forward
+        output, in the same +grad_LSE sign convention, to be ADDED to
+        attn_out.
+
+        Causally safe: at each position B, this uses only q_B and k_B,
+        which depend only on h_B (and through RoPE, on positions <= B).
+        Unlike the full k_role_grad it does NOT pull in q_A for A > B,
+        so it can be used at training time without leaking future
+        tokens.
+        """
+        batch_size, seq_len = x.shape[:2]
+        qk = self.c_attn(x)
+        qk = qk.view(batch_size, seq_len, 2, self.num_heads, self.head_dim)
+        query, key = qk.unbind(2)
+        query = query.transpose(1, 2).contiguous()  # [B, H, T, d_h]
+        key = key.transpose(1, 2).contiguous()
+        if self.position_embedding_type == "rope" and rope_cos_sin is not None:
+            query = apply_rotary_pos_emb(query, rope_cos_sin)
+            key = apply_rotary_pos_emb(key, rope_cos_sin)
+
+        # Compute alpha_BB = softmax_j(q_B . k_j / sqrt(d_h))[j=B] for each B.
+        # We only need the diagonal of alpha (B,B), so we compute the full
+        # row-LSE per position to normalize, but only evaluate the j=B numerator.
+        # scores_diag[B] = q_B . k_B / sqrt(d_h)         [B, H, T]
+        # row_lse[B] = LSE_{j<=B}(q_B . k_j / sqrt(d_h)) [B, H, T]
+        # alpha_BB = exp(scores_diag - row_lse)
+        scale = 1.0 / math.sqrt(self.head_dim)
+        scores_diag = (query * key).sum(dim=-1) * scale         # [B, H, T]
+        # For row-LSE we need the full causal scores once. T*T memory,
+        # but no transposed copy and no alpha materialized — just LSE.
+        scores = torch.matmul(query, key.transpose(-2, -1)) * scale
+        causal = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
+        scores = scores.masked_fill(~causal, float('-inf'))
+        row_lse = torch.logsumexp(scores, dim=-1)               # [B, H, T]
+        del scores
+        alpha_diag = torch.exp(scores_diag - row_lse)           # [B, H, T]
+
+        # diag-K contribution: out[B] = alpha_BB * q_B   (no /sqrt(d_h);
+        # the standard attn_out also drops this factor — Π absorbs the scale).
+        out = alpha_diag.unsqueeze(-1) * query                  # [B, H, T, d_h]
+
+        # Project by W_K^T (second hidden_size rows of c_attn.weight).
+        k_weight = self.c_attn.weight[self.hidden_size:]
+        k_weight = k_weight.view(self.num_heads, self.head_dim, self.hidden_size)
+        k_weight = k_weight.permute(0, 2, 1).contiguous()
+        return torch.einsum("bhts,hcs->btc", out, k_weight)
+
+    def k_role_grad(self, x: torch.Tensor, rope_cos_sin=None) -> torch.Tensor:
+        """Hand-coded K-role contribution to the LSE gradient.
+
+        Total attention "energy" the layer treats as gradient is the
+        partial gradient through Q only (this is what the standard forward
+        returns). For the unified-energy variant we include the K-role
+        contribution that arises when differentiating E_total = sum_A E_A
+        w.r.t. h_B through the K-path of every E_A with A >= B (the keys
+        of B are read by all queries A >= B):
+
+            g^K_B = sum_h W_K^{h,T} * sum_{A >= B} alpha[A,B]^h * q_A^h
+
+        where alpha[A,B]^h = softmax_j(q_A^h . k_j^h / sqrt(d_h))[B], i.e.
+        the column B of the row-softmax causal attention map. Sign
+        convention matches the existing forward output (= +grad_LSE).
+
+        Returns: tensor with same shape as standard forward output, to be
+        ADDED to attn_out before applying the projection.
+        """
+        batch_size, seq_len = x.shape[:2]
+        # Project to Q, K (V = K shared in energy attention)
+        qk = self.c_attn(x)  # [B, T, 2*H*d_h]
+        qk = qk.view(batch_size, seq_len, 2, self.num_heads, self.head_dim)
+        query, key = qk.unbind(2)
+        query = query.transpose(1, 2).contiguous()  # [B, H, T, d_h]
+        key = key.transpose(1, 2).contiguous()
+        if self.position_embedding_type == "rope" and rope_cos_sin is not None:
+            query = apply_rotary_pos_emb(query, rope_cos_sin)
+            key = apply_rotary_pos_emb(key, rope_cos_sin)
+
+        # Causal-masked softmax (explicit because we need alpha to project columns)
+        scale = 1.0 / math.sqrt(self.head_dim)
+        scores = torch.matmul(query, key.transpose(-2, -1)) * scale  # [B, H, Tq, Tk]
+        causal = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
+        scores = scores.masked_fill(~causal, float('-inf'))
+        alpha = F.softmax(scores, dim=-1)  # [B, H, Tq, Tk]; alpha[A, B] -> mass of B in row A
+
+        # K-role: out_K[B] = sum_{A >= B} alpha[A, B] * q_A
+        # = (alpha^T @ Q)[B] computed via dim swap.
+        # alpha.transpose(-2, -1) has shape [B, H, Tk, Tq] indexed as alpha_T[B, A] = alpha[A, B].
+        out_K = torch.matmul(alpha.transpose(-2, -1), query)  # [B, H, Tk, d_h]
+
+        # Project by W_K^T (second hidden_size rows of c_attn.weight reshaped to (H, hidden, d_h)).
+        k_weight = self.c_attn.weight[self.hidden_size:]                      # [H*d_h, hidden]
+        k_weight = k_weight.view(self.num_heads, self.head_dim, self.hidden_size)
+        k_weight = k_weight.permute(0, 2, 1).contiguous()                     # [H, hidden, d_h]
+        return torch.einsum("bhts,hcs->btc", out_K, k_weight)                  # [B, T, hidden]
+
     def energy_per_token(self, x: torch.Tensor, rope_cos_sin=None) -> torch.Tensor:
         """Compute attention energy per token: E_attn = -logsumexp(QK^T/sqrt(d)) summed over heads.
 
