@@ -79,12 +79,15 @@ MODELS = [
     ("12moe-I4k @ 23.6B",   962, 585, 0.5436, 26.35, 2.24, 23.59, "boltzmann",    "H-series"),
     ("12moe-I4k @ 38.3B",   962, 585, 0.5572, 23.66, 2.58, 38.27, "boltzmann",    "H-series"),
     ("12moe-I4k @ 50.3B",   962, 585, 0.5732, 21.27, 2.50, 50.33, "boltzmann",    "H-series"),
+    ("12moe-I4k @ 65.0B FINAL", 962, 585, 0.5802, 19.73, 1.67, 65.01, "boltzmann", "H-series"),
     # Matched-structure baseline: same 11+1×6 layout as 580M Boltz, but uses
     # softmax_attention + Switch-MoE in the recurrent block instead of
     # energy_attention + BoltzmannMoE. Tests whether the 580M Boltz advantage
     # comes from the structural template or from energy-attn + Boltz routing.
     ("gptswitchmoe-580M @ 15.2B", 730, 730, 0.5208, 27.73, 1.93, 15.21, "switch+boltz", "H-series"),
     ("gptswitchmoe-580M @ 25.2B", 730, 730, 0.5417, 25.66, 1.86, 25.17, "switch+boltz", "H-series"),
+    ("gptswitchmoe-580M @ 42.5B", 730, 730, 0.5495, 22.52, 1.90, 42.47, "switch+boltz", "H-series"),
+    ("gptswitchmoe-580M @ 46.1B", 730, 730, 0.5602, 21.90, 2.69, 46.13, "switch+boltz", "H-series"),
 ]
 
 SHORT_NAMES = {
@@ -124,8 +127,11 @@ SHORT_NAMES = {
     "12moe-I4k @ 23.6B":   "12moe-I4k @24B",
     "12moe-I4k @ 38.3B":   "12moe-I4k @38B",
     "12moe-I4k @ 50.3B":   "12moe-I4k @50B",
+    "12moe-I4k @ 65.0B FINAL": "12moe-I4k @65B (final)",
     "gptswitchmoe-580M @ 15.2B": "gptswitch-580M @15B",
     "gptswitchmoe-580M @ 25.2B": "gptswitch-580M @25B",
+    "gptswitchmoe-580M @ 42.5B": "gptswitch-580M @42B",
+    "gptswitchmoe-580M @ 46.1B": "gptswitch-580M @46B",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
@@ -316,7 +322,7 @@ MODELS_SIMPLE = [
     ("h1 GPT+Switch-MoE",       145,  68, 0.486,  35.50, 1.86,   7.86, "gpt_moe"),
     ("8gpt+4switch",            585, 459, 0.5797, 20.90, 1.74,  65.01, "gpt_moe"),
     ("12moe Boltz I=2k",        585, 396, 0.5612, 21.64, 2.39,  65.01, "gpt_moe"),
-    ("12moe Boltz I=4k",        962, 585, 0.5732, 21.27, 2.50,  50.33, "gpt_moe"),
+    ("12moe Boltz I=4k",        962, 585, 0.5802, 19.73, 1.67,  65.01, "gpt_moe"),
 ]
 
 

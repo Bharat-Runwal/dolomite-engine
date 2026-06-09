@@ -92,38 +92,53 @@ is included as the structurally-different reference.
 | `scale_gptmoe_12moe_K4I4096_d1280` @ 14k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 |  7.3 B | 52.99 | 31.30 | 23.12 | 2.01 | early |
 | `scale_gptmoe_12moe_K4I4096_d1280` @ 45k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 23.6 B | 54.36 | 26.35 | 25.92 | 2.24 | mid |
 | `scale_gptmoe_12moe_K4I4096_d1280` @ 73k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 38.3 B | 55.72 | 23.66 | 26.64 | 2.58 | mid-late |
-| `scale_gptmoe_12moe_K4I4096_d1280` @ 96k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 50.3 B | **57.32** | **21.27** | 25.13 | **2.50** | 50B; in-progress, may overtake 580M |
+| `scale_gptmoe_12moe_K4I4096_d1280` @ 96k  | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 50.3 B | 57.32 | 21.27 | 25.13 | 2.50 | mid-late |
+| **`scale_gptmoe_12moe_K4I4096_d1280` @ 124k FINAL** | 12 GPT + Boltz-MoE FFN K=4 I=4096 | 962 / 585 | 65.0 B | **58.02** | **19.73** | 25.65 | 1.67 | 🏁 final — within 0.45pp/0.40 PPL of 580M Boltz |
 | **gptswitchmoe-580M** @ 29k (matched-structure baseline) | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 15.2 B | 52.08 | 27.73 | 26.81 | 1.93 | structural ablation start |
 | **gptswitchmoe-580M** @ 48k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 25.2 B | 54.17 | 25.66 | 24.08 | 1.86 | structural ablation, gap closing |
+| **gptswitchmoe-580M** @ 81k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 42.5 B | 54.95 | 22.52 | 23.96 | 1.90 | structural ablation, ~40B mid; PPL nearly matches Boltz |
+| **gptswitchmoe-580M** @ 88k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 46.1 B | 56.02 | 21.90 | 25.04 | 2.69 | structural ablation, 46B mid; PPL passes Boltz @ 40B but Boltz interp at 46B still wins |
 | **580M Boltz** @ 30k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 15.7 B | **53.66** | **26.84** | 25.42 | 1.90 | iso-tokens vs gptswitchmoe-580M |
 | **580M Boltz** @ 76k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 39.8 B | 55.93 | 22.41 | 25.30 | 2.39 | iso-tokens vs gptmoe trio at ~30-40B |
 | **580M Boltz** @ 124k FINAL | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 65.0 B | **58.47** | **19.33** | 26.33 | 2.08 | 🏆 final — best on every metric in our table |
 
-Story (updated with FINAL 65B-token snapshots for 8gpt+4sw and 12moe-I2k):
+Story (updated with all four 65B-token FINAL snapshots):
 
-- **Trajectory of routing comparison**:
-  - At 12-13B tokens, Boltz led Switch by +2.8pp avg (53.6 vs 50.8).
-  - At ~30B, Switch had caught up and overtaken slightly (54.7 vs 54.0).
-  - At final 65B, **Switch top-1 (8gpt+4sw) wins decisively over Boltz-soft (12moe-I2k)**:
-    57.97 / 20.90 vs 56.12 / 21.64 → +1.85pp avg / -0.74 PPL.
-  - Switch top-1 is the better router for pure-GPT-MoE in this regime.
-- **580M Boltz iso-token leadership at 65B**:
-  - vs 8gpt+4sw FINAL (closest baseline): +0.50pp avg / -1.57 PPL / -0.70 MMLU / +0.34 gsm8k
-  - vs 12moe-I2k FINAL (matched routing): +2.35pp avg / -2.31 PPL / +0.74 MMLU / -0.31 gsm8k
-  - The PPL margin (~1.6-2.3) is the cleanest signal — survives across both ablations.
-- **Larger-experts variant (12moe-I4k, ~960M total)** at 50.3B is at avg 57.32 / PPL 21.27.
-  At similar token budget it's ~1.1pp avg below 580M Boltz @ 65B; if it finishes ~65B
-  with continued descent, it could match or exceed 8gpt+4sw FINAL.
-- **Structural ablation gap is closing**: gptswitchmoe-580M (matched scaffold w/o
-  energy-attn) was -1.6pp / +0.9 PPL behind 580M Boltz at 15B tokens; at 25B that
-  narrowed to roughly -0.4pp avg / -1.0 PPL (via interpolation of 580M Boltz at 25B).
-  The energy-attention advantage may be largest in the warm-up phase and shrink at
-  scale — worth tracking through the gptswitchmoe-580M run's full target.
-- **Honest conclusion**: at iso-tokens (65B), 580M Boltz wins by **~0.5-2.3pp avg /
-  ~1.6-2.3 PPL** over the closest matched MoE baselines. Most of the headline +4.4pp /
-  -6.9 PPL vs scale_v9 was driven by scale_v9's truncation (102B of 126B planned) and
-  its lack of MoE; against MoE at the same token budget the architecture advantage
-  is real but modest.
+- **Iso-token leaderboard at 65B**:
+  | Run                       | Total/Active | avg9   | WikiPPL | MMLU  | gsm8k |
+  |---------------------------|-------------:|-------:|--------:|------:|------:|
+  | 580M Boltz (energy+Boltz) | 679 / 679    | **58.47** | **19.33** | 26.33 | 2.08 |
+  | 12moe-I4k (Boltz, larger) | 962 / 585    | 58.02  | 19.73  | 25.65 | 1.67 |
+  | 8gpt+4sw  (Switch top-1)  | 585 / 459    | 57.97  | 20.90  | **27.03** | 1.74 |
+  | 12moe-I2k (Boltz, smaller)| 585 / 396    | 56.12  | 21.64  | 25.59 | **2.39** |
+- **Surprising headline**: at 65B tokens, the top three runs are **statistically
+  indistinguishable** on avg (58.0-58.5pp, ~0.5pp spread). 580M Boltz keeps the lead
+  on avg+PPL but only narrowly. The gap to **12moe-I4k (962M, pure-GPT, Boltzmann
+  routing) is just 0.45pp avg / 0.40 PPL** despite no energy attention.
+- **Routing comparison (within pure-GPT-MoE)**:
+  - At 12B: Boltz led Switch by +2.8pp avg.
+  - At ~30B: Switch caught up; +0.7pp.
+  - At 65B FINAL: Switch (58.0) ≈ I4k (58.0) > I2k (56.1).
+  - **Larger experts (I=4096) match Switch top-1 with the same Boltzmann routing**;
+    smaller experts (I=2048) trail by ~1.9pp.
+- **Energy-attention contribution (revised)**: 580M Boltz still wins on avg+PPL,
+  but **only by margins that 1.4× more params can substitute for**. The
+  "energy-attention is the load-bearing piece" framing of earlier rounds was
+  overstated; what we see at 65B is:
+  - +0.5pp avg / -1.6 PPL vs the strongest matched-param-count MoE (8gpt+4sw 585M)
+  - +0.45pp avg / -0.40 PPL vs a larger-param Boltzmann pure-GPT (12moe-I4k 962M)
+  - Energy attention compresses ~1.4× param scaling into the same 679M.
+- **Structural ablation (gptswitchmoe-580M)** progression:
+  - 15.2B: -1.6pp avg / +0.9 PPL behind 580M Boltz
+  - 25.2B: ~-0.4pp avg / -1.0 PPL (gap closing)
+  - 42.5B: ~-1.0pp avg / +0.1 PPL (gap stable around 1pp avg, PPL essentially tied)
+  - Same scaffold w/o energy-attn; PPL nearly matches Boltz; avg-acc gap persists.
+- **Honest conclusion**: at iso-tokens (65B), the architecture advantages are
+  **real but modest** — Boltz-MoE wins by 0.4-2.4pp avg / 0.4-2.3 PPL across
+  matched MoE baselines. The +4.4pp / -6.9 PPL vs scale_v9 was inflated by
+  scale_v9's truncation. The PPL margin (cleanest signal) is consistent at
+  ~0.4-2 across the comparison set — energy-attention does add LM-quality, but
+  pure-GPT-MoE with enough scale closes most of the gap.
 
 Both substantially beat baselines:
 - **scale_v9 GPT** 354M @ 100.7B: avg 54.1 / PPL 26.2
