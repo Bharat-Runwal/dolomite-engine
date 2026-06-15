@@ -1,32 +1,19 @@
 #!/bin/bash
-# 400M-class h1 PSD-anti LRA-32 + FPT @ d=1536, 32 H100 GPUs (4 nodes × 8),
-# normal queue / grp_ebm. Plans for 126B tokens (240k steps × 524k tok/step).
-#
-# Effective batch matches boltz 580M (mb=4, ga=1, 32 GPU = 524k tok/step) so
-# the boltz LR schedule (1e-3) transfers directly.
-#
-# Multi-node specifics (added 2026-06-15 after job 724499 hung at startup):
-#   * `-R "span[ptile=1]"` forces one task per host so all 4 nodes are distinct
-#     and each $HOSTNAME shows up exactly once in $LSB_MCPU_HOSTS.
-#   * `blaunch bash pretrain.sh` fans the script out to every allocated host —
-#     without this, bsub runs the script only on the head node, torchrun starts
-#     the rendezvous server on rank 0, and ranks 1-3 never join.
-# Unshard + eval at the end remain head-only (single-process), outside blaunch.
-#
-# Self-resubmits via latest_checkpointed_iteration.json. Auto-chains unshard +
-# eval after final step.
+# Fresh-from-scratch sibling of run_math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_8gpu.sh
+# with iter_dropout 6±3 enabled on the EGPT block from step 0. Runs in parallel
+# to job 724594 (no-itd) so both basin trajectories are directly comparable.
+# Single node, 8 GPU, normal queue / grp_ebm. Same effective batch (524k tok/step),
+# same LR (1e-3), same total tokens target (126B).
 set -euo pipefail
 REPO=/proj/dmfexp/nima/Code/dolomite-engine
-CONFIG=${REPO}/configs/multi_block_ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt.yml
-SAVE_PATH=${REPO}/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt
-SCRIPT_PATH=${REPO}/experiments/energy-inference/scripts/multi-block-ablation/run_math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_32gpu.sh
-JOB_NAME=math_h1_d1536_fpt_32g
+CONFIG=${REPO}/configs/multi_block_ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_8gpu.yml
+SAVE_PATH=${REPO}/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_8gpu
+SCRIPT_PATH=${REPO}/experiments/energy-inference/scripts/multi-block-ablation/run_math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_8gpu.sh
+JOB_NAME=math_h1_d1536_fpt_itd3_8g
 mkdir -p "${HOME}/bsub_logs"
 bsub \
     -q normal -G grp_ebm -J ${JOB_NAME} \
-    -gpu "num=8/task:mode=exclusive_process" -n 4 -x \
-    -R "span[ptile=1]" \
-    -M 64G -W 24:00 \
+    -gpu "num=8/task:mode=exclusive_process" -n 1 -x -M 64G -W 24:00 \
     -o "${HOME}/bsub_logs/${JOB_NAME}_%J.stdout" \
     -e "${HOME}/bsub_logs/${JOB_NAME}_%J.stderr" \
     <<BSUB
@@ -45,9 +32,7 @@ if [ -f "\${LATEST_JSON}" ]; then
     printf "\nload_args:\n  load_path: %s\n" "\${SAVE_PATH}" >> "\${TMPCONFIG}"
     RUN_CONFIG="\${TMPCONFIG}"
 fi
-echo "[head] launching pretrain.sh on \$(echo \$LSB_MCPU_HOSTS | tr ' ' '\n' | sed 'n; d' | sort -u | wc -l) nodes via blaunch"
-echo "[head] LSB_MCPU_HOSTS=\$LSB_MCPU_HOSTS"
-blaunch bash ${REPO}/scripts/common/pretrain.sh "\${RUN_CONFIG}"
+bash ${REPO}/scripts/common/pretrain.sh "\${RUN_CONFIG}"
 [ -f "/tmp/\${JOB_NAME}_\${LSB_JOBID}.yml" ] && rm -f "/tmp/\${JOB_NAME}_\${LSB_JOBID}.yml"
 if [ -f "\${LATEST_JSON}" ]; then
     LATEST_ITER=\$(python3 -c "import json; print(json.load(open('\${LATEST_JSON}'))['latest_checkpointed_iteration'])")
@@ -63,4 +48,4 @@ if [ -f "\${LATEST_JSON}" ]; then
     fi
 fi
 BSUB
-echo "Submitted ${JOB_NAME} (32 GPU normal/grp_ebm, blaunch multi-node)"
+echo "Submitted ${JOB_NAME} (8 GPU normal/grp_ebm, iter_dropout 6±3, fresh from step 0)"
