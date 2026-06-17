@@ -122,7 +122,7 @@ training_parameters:
   num_training_steps: 1000          # 524M tokens at 16 GPUs (mb=4, ga=2, seq=4096) = 524k tok/step
   eval_interval: 200
   micro_batch_size: 4
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 4
   eval_during_training: false
   gradient_clipping: 0.5
 
