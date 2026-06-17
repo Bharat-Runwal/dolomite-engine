@@ -1,0 +1,165 @@
+# Goal A SFT: math-CoT continued training from lr2e4 step 10000.
+# Resume model weights only; fresh schedule (cosine 1e-5 → 1e-6, 1000 steps),
+# fresh dataloader (90% math reasoning, 10% pretrain holdout).
+#
+# Math mix (90%):
+#   0.50  metamath_qa            (~11M tok, ~24 epochs over 1000 steps)
+#   0.25  math_word_medium       (~26M tok, ~5 epochs)
+#   0.15  math_word_easy         (~21M tok, ~4 epochs)
+# Pretrain holdout (10%):
+#   0.05  web-nemotron-cc-hq
+#   0.05  megamath-web-pro
+# Total tokens at 1000 steps × 524k tok/step = 524M training tokens.
+#
+# Expected GSM8K target: 15-20% pass@1 (up from 4% on the base step 10k checkpoint).
+# Save every 100 steps (frequent for preempt safety + bench at multiple ckpts).
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.50
+        - /proj/dmfexp/nima/.cache/megatron/metamathqa_granite4/metamath_qa_text
+        - 0.25
+        - /proj/datasets/reasoning-megatron/math_word_medium_text
+        - 0.15
+        - /proj/datasets/reasoning-megatron/math_word_easy_text
+        - 0.05
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.05
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 6]
+    iter_dropout_range_per_block: [0, 0, 0, 0, 0, 0, 0, 0, 3]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1536
+    num_layers: 9
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    energy_proj_rank: 0
+    energy_antisym_rank: 32
+    energy_apply_rayleigh: true
+    energy_full_per_token_grad: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 24
+        num_key_value_heads: 24
+        add_bias: false
+        attention_multiplier: 0.125
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 24
+        num_key_value_heads: 24
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - mlp_type: Energy_MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_8gpt_1egpt6x_d1536_sft_metamath_20260617
+  save_interval: 100
+  max_to_keep: 12
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: EGPT-action
+    name: math_psda_h1_8gpt_1egpt6x_d1536_sft_metamath_20260617
+
+training_parameters:
+  num_training_steps: 1000          # 524M tokens at 16 GPUs (mb=4, ga=2, seq=4096) = 524k tok/step
+  eval_interval: 200
+  micro_batch_size: 4
+  gradient_accumulation_steps: 2
+  eval_during_training: false
+  gradient_clipping: 0.5
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.00001                     # peak 1e-5 — SFT-style fine-tune from a strongly-pretrained checkpoint
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+
+# Cosine 1e-5 → 1e-6 (10× ratio), no warmup — small LR + already-pretrained weights → safe.
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 0
+  num_constant_steps: 0
+  num_decay_steps: 1000
+
+# Load weights only from lr2e4 step 10000 — the practical-optimum checkpoint per the
+# step 4k/8k/10k/24k bench trajectory (avg10_norm=0.5223, GSM8K-CoT=0.0326). Reset
+# everything else so the SFT schedule applies cleanly.
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_lr2e4_16gpu
+  load_optimizer: false
+  load_lr_scheduler: false
+  load_starting_iteration: false
+  load_dataloader_state: false
+  load_rng_state: false
+  load_experiments_tracker_state: false
+  iteration: 10000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: false
+  stage: 0
