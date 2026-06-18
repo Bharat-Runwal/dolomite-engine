@@ -14,7 +14,7 @@ bsub \
     -q normal -G grp_ebm -J ${JOB_NAME} \
     -gpu "num=8/task:mode=exclusive_process" -n 1 \
     -R "select[hname!='p4-r24-n2']" \
-    -M 64G -W 24:00 \
+    -M 128G -W 24:00 \
     -o "${HOME}/bsub_logs/${JOB_NAME}_%J.stdout" \
     -e "${HOME}/bsub_logs/${JOB_NAME}_%J.stderr" \
     <<BSUB
