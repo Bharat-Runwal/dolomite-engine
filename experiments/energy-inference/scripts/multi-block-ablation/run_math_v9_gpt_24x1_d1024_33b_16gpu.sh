@@ -1,5 +1,6 @@
 #!/bin/bash
-# math_v9 baseline: scale_v9 architecture (354M GPT-24L) on math mix for ≥33B tokens.
+# math_v9 baseline: scale_v9 architecture (505M GPT-24L d=1024 i=4096 tied)
+# on math mix for ≥33B tokens. Same arch as scale_v9_gpt_24x1_d1024_126b config.
 # 16 GPU multi-node (2 nodes × 8) on normal queue grp_ebm, blaunch + span[ptile=1].
 # Trap-protected auto-resubmit; auto-eval (LM-harness + BBH) at completion.
 set -euo pipefail

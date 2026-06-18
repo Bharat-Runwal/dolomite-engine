@@ -1,6 +1,10 @@
-# math_v9 baseline: scale_v9 architecture (354M GPT-24L d=1024) trained on
-# the math-mix (35/35/15/15 web/web/megamath/finemath) for ≥33B tokens.
-# Comparable to the FET 8G+1Ex6 d=1536 ~400M at step 8k (33.6B tokens).
+# math_v9 baseline: scale_v9 architecture (505M GPT-24L d=1024 i=4096 tied)
+# trained on the math-mix (35/35/15/15 web/web/megamath/finemath) for ≥33B tokens.
+# Note: there are TWO "v9"s in the codebase — V9-GPT (354M, i=2048) is the older
+# config from the test-time-reasoning paper; scale_v9 / this config (505M, i=4096)
+# is the version used for the egpt-action paper baselines. Tied lm_head.
+# Comparable in scale to the FET 8G+1Ex6 d=1536 ~400M at step 8k (33.6B tokens),
+# slightly larger so any FET vs math_v9 lift is conservative.
 # 16 GPU multi-node, normal queue grp_ebm, 32k steps × 1.05M tok/step = 33.5B.
 
 datasets:
