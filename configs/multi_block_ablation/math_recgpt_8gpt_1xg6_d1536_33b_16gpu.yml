@@ -104,7 +104,7 @@ training_parameters:
   num_training_steps: 32000   # 32k × 1.05M tok/step = 33.5B tokens (matches FET step 8k = 33.6B)
   eval_interval: 8000
   micro_batch_size: 4
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 8
   eval_during_training: false
   gradient_clipping: 1.0
 
