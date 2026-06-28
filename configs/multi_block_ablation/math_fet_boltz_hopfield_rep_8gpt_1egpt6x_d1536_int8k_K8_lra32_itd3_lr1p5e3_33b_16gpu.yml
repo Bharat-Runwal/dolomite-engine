@@ -1,0 +1,157 @@
+# Boltzmann-MoE Hopfield FET with REPULSION — A/B vs no-repulsion baseline.
+#
+# Same backbone as math_fet_boltz_hopfield_*_16gpu.yml (8 GPT + 1 EGPT×6,
+# d=1536, PSD-anti + Rayleigh + FPT, intermediate_size=8192, K=8 experts at
+# 1024 each, iso-param with Hopfield-MEAN). The ONLY difference is the
+# energy FF: switch from BoltzmannMoE_Hopfield_Energy_MLP (no repulsion)
+# to the new composable EnergyFF_BoltzmannMoE(expert_kind="hopfield") with
+# repulsion_coef=0.01 + n_repulsion_pairs=4 + temperature=1.0.
+#
+# Hypothesis: the no-repulsion Boltz-MoE-Hopfield underperformed
+# Hopfield-MEAN by -0.6pp avg10_norm (0.5073 vs 0.5135) AT iso-tokens —
+# diagnosed as experts collapsing to uniform routing because (a) per-expert
+# width 1024 is 4× narrower than the validated 4096 and (b) MEAN
+# normalization makes the Hopfield form scale-invariant in d_int. Adding
+# repulsion to spread expert weights should mitigate (a), restoring
+# expressivity while preserving the bounded-below verifier behaviour
+# (Boltz-MoE-Hopfield had the LARGEST R3 lift at +1.21pp on openbookqa).
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 6]
+    iter_dropout_range_per_block: [0, 0, 0, 0, 0, 0, 0, 0, 3]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1536
+    num_layers: 9
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    energy_proj_rank: 0
+    energy_antisym_rank: 32
+    energy_apply_rayleigh: true
+    energy_full_per_token_grad: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 24
+        num_key_value_heads: 24
+        add_bias: false
+        attention_multiplier: 0.125
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 24
+        num_key_value_heads: 24
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - mlp_type: EnergyFF_BoltzmannMoE                 # NEW composable refactor (2026-06-28)
+        expert_kind: hopfield                            # single-W Hopfield experts
+        intermediate_size: 8192                          # total across K=8 experts (1024 each)
+        n_experts: 8
+        temperature: 1.0
+        repulsion_coef: 0.01                             # THE A/B KNOB — restores expert diversity
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        activation_function: gelu
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_fet_boltz_hopfield_rep_8gpt_1egpt6x_d1536_int8k_K8_lra32_itd3_lr1p5e3_33b_16gpu
+  save_interval: 2000
+  max_to_keep: 5
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: EGPT-action
+    name: math_fet_boltz_hopfield_rep_8gpt_1egpt6x_d1536_int8k_K8_lra32_itd3_lr1p5e3_33b_16gpu
+
+training_parameters:
+  num_training_steps: 32000          # 32k × 1.05M tok/step = 33.5B (matches FET-1.5e-3)
+  eval_interval: 8000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4     # 16 GPU × mb=4 × ga=4 = 1.05M tok/step
+  eval_during_training: false
+  gradient_clipping: 0.5
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.0015                       # iso with FET-1.5e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 30000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: false
+  stage: 0
