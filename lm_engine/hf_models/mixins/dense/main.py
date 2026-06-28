@@ -97,6 +97,7 @@ class CausalLMModelMixin(PreTrainedModelMixin):
         hidden_states = transformer_outputs.last_hidden_state
         past_key_values = transformer_outputs.past_key_values
         energy_descent_loss = transformer_outputs.energy_descent_loss
+        energy_action_loss = transformer_outputs.energy_action_loss
         del transformer_outputs
 
         lm_logits = None
@@ -140,12 +141,20 @@ class CausalLMModelMixin(PreTrainedModelMixin):
         if loss is not None and energy_descent_loss is not None:
             loss = loss + energy_descent_loss
 
+        # Energy action auxiliary loss: pushes path action S = sum_iter E.mean() down
+        # at training time (verifier signal made into a training signal). Passed via
+        # model output for compile safety.
+        if loss is not None and energy_action_loss is not None:
+            loss = loss + energy_action_loss
+
         return CausalLMOutputWithPast(
             loss=loss,
             aux_loss=aux_loss,
             logits=lm_logits,
             past_key_values=past_key_values,
             last_hidden_state=hidden_states,
+            energy_descent_loss=energy_descent_loss,
+            energy_action_loss=energy_action_loss,
         )
 
     def get_lm_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

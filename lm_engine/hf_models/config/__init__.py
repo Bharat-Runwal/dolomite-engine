@@ -10,9 +10,13 @@ from typing import Any, Callable
 from transformers import PretrainedConfig
 
 from ...utils import BaseArgs, divide_if_divisible
-from .mlp import (_MLPArgs, _MoEArgs, _EnergyMLPArgs, _CompositionalEnergyMLPArgs,
+from .mlp import (_MLPArgs, _MoEArgs, _EnergyMLPArgs, _HopfieldEnergyMLPArgs,
+                  _BoltzmannMoEHopfieldEnergyMLPArgs,
+                  _CompositionalEnergyMLPArgs,
                   _MixedEnergyMLPArgs, _BoltzmannMoEEnergyMLPArgs,
-                  _TopKEnergyMoEMLPArgs, _SurrogateBoltzmannMoEMLPArgs)
+                  _TopKEnergyMoEMLPArgs, _SurrogateBoltzmannMoEMLPArgs,
+                  _EnergyFFW1W2Args, _EnergyFFHopfieldArgs,
+                  _EnergyFFBoltzmannMoEArgs)
 from .sequence_mixer import (
     _CausalConvolution,
     _GatedDeltaNetArgs,
@@ -91,11 +95,19 @@ _MLP_CONFIG_CLASSES = {
     "MLP": _MLPArgs,
     "MoE": _MoEArgs,
     "Energy_MLP": _EnergyMLPArgs,
+    "Hopfield_Energy_MLP": _HopfieldEnergyMLPArgs,
+    "BoltzmannMoE_Hopfield_Energy_MLP": _BoltzmannMoEHopfieldEnergyMLPArgs,
     "Compositional_Energy_MLP": _CompositionalEnergyMLPArgs,
     "Mixed_Energy_MLP": _MixedEnergyMLPArgs,
     "BoltzmannMoE_Energy_MLP": _BoltzmannMoEEnergyMLPArgs,
     "TopK_Energy_MoE_MLP": _TopKEnergyMoEMLPArgs,
     "SurrogateBoltzmannMoE_Energy_MLP": _SurrogateBoltzmannMoEMLPArgs,
+    # 2026-06-28 composable refactor: new opt-in mlp_type names mapped to
+    # the FFEnergyBase hierarchy in modeling_utils/mlp_blocks/energy_ff.py.
+    # Legacy names above remain functional so existing checkpoints load.
+    "EnergyFF_W1W2": _EnergyFFW1W2Args,
+    "EnergyFF_Hopfield": _EnergyFFHopfieldArgs,
+    "EnergyFF_BoltzmannMoE": _EnergyFFBoltzmannMoEArgs,
 }
 
 
@@ -147,6 +159,7 @@ class CommonConfig(PretrainedConfig):
         energy_full_per_token_grad: bool = False,
         scale_ff_init: float | list[float] | None = None,
         energy_descent_loss_coef: float = 0.0,
+        energy_action_loss_coef: float = 0.0,
         shared_backbone: bool = False,
         **kwargs,
     ) -> CommonConfig:
@@ -191,6 +204,7 @@ class CommonConfig(PretrainedConfig):
         self.energy_full_per_token_grad = energy_full_per_token_grad
         self.scale_ff_init = scale_ff_init
         self.energy_descent_loss_coef = energy_descent_loss_coef
+        self.energy_action_loss_coef = energy_action_loss_coef
         self.shared_backbone = shared_backbone
 
         if layer_iterations is not None:

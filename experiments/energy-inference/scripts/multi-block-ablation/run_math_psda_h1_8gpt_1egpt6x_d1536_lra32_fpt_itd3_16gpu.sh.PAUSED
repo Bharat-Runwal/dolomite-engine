@@ -40,22 +40,33 @@ if [ -f "\${LATEST_JSON}" ]; then
     printf "\nload_args:\n  load_path: %s\n" "\${SAVE_PATH}" >> "\${TMPCONFIG}"
     RUN_CONFIG="\${TMPCONFIG}"
 fi
-echo "[head=\$(hostname)] LSB_MCPU_HOSTS=\$LSB_MCPU_HOSTS"
-echo "[head] launching pretrain.sh on \$(echo \$LSB_MCPU_HOSTS | tr ' ' '\n' | sed 'n; d' | sort -u | wc -l) nodes via blaunch"
-blaunch bash ${REPO}/scripts/common/pretrain.sh "\${RUN_CONFIG}"
-[ -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml" ] && rm -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml"
-if [ -f "\${LATEST_JSON}" ]; then
-    LATEST_ITER=\$(python3 -c "import json; print(json.load(open('\${LATEST_JSON}'))['latest_checkpointed_iteration'])")
+# Deterministic wandb resume so every resubmit continues the SAME wandb run
+# (consistent step counter + continuous loss curve). dolomite's WandBArgs has
+# no id/resume fields, but wandb SDK respects these env vars at init time.
+export WANDB_RUN_ID="math_h1_d1536_fpt_itd3_16gpu"
+export WANDB_RESUME="allow"
+# Trap: ensure resubmit fires on ANY exit (incl. blaunch false-positive shutdown
+# failures like job 761266 hit at step 56150). Without this, blaunch returning
+# non-zero meant the post-block was never executed.
+post_exit() {
+    [ -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml" ] && rm -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml"
+    if [ ! -f "\${LATEST_JSON}" ]; then return; fi
+    LATEST_ITER=\$(python3 -c "import json; print(json.load(open('\${LATEST_JSON}'))['latest_checkpointed_iteration'])" 2>/dev/null || echo 0)
     if [ "\${LATEST_ITER}" -lt "\${NUM_TRAINING_STEPS}" ]; then
+        echo "[trap] step \${LATEST_ITER} < \${NUM_TRAINING_STEPS}; resubmitting via \${SCRIPT_PATH}"
         bash "\${SCRIPT_PATH}"
     else
+        echo "[trap] training complete at step \${LATEST_ITER}; chaining unshard + eval"
         UNSHARDED="\${SAVE_PATH}/unsharded"
         UNSHARD_CFG="\${SAVE_PATH}/unshard_config_\${LSB_JOBID}.yml"
         printf "load_args:\n  load_path: %s\nunsharded_path: %s\nmixed_precision_args:\n  dtype: bf16\n" "\${SAVE_PATH}" "\${UNSHARDED}" > "\${UNSHARD_CFG}"
         python -m lm_engine.unshard --config "\${UNSHARD_CFG}" && rm -f "\${UNSHARD_CFG}"
-        bash ${REPO}/experiments/energy-inference/scripts/structured-proj/submit_eval.sh "\${UNSHARDED}" "eval_\${JOB_NAME}"
-        bash ${REPO}/experiments/energy-inference/scripts/multi-block-ablation/submit_bbh_eval.sh "\${UNSHARDED}" "eval_bbh_\${JOB_NAME}"
+        bash ${REPO}/experiments/eval_scripts/submit_eval.sh "\${UNSHARDED}" "eval_\${JOB_NAME}"
     fi
-fi
+}
+trap post_exit EXIT
+echo "[head=\$(hostname)] LSB_MCPU_HOSTS=\$LSB_MCPU_HOSTS"
+echo "[head] launching pretrain.sh on \$(echo \$LSB_MCPU_HOSTS | tr ' ' '\n' | sed 'n; d' | sort -u | wc -l) nodes via blaunch"
+blaunch bash ${REPO}/scripts/common/pretrain.sh "\${RUN_CONFIG}" || echo "[main] blaunch returned \$? — trap will still run"
 BSUB
 echo "Submitted ${JOB_NAME} (16 GPU multi-node, blaunch, iter_dropout 6±3)"

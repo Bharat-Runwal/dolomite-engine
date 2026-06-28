@@ -366,11 +366,24 @@ class ModelWrapperForPretraining(ModelWrapper):
                 if w_reg is not None:
                     lm_loss = lm_loss + w_reg
 
+        # Energy aux losses (descent + path-action) — scalars from model_outputs,
+        # precomputed in mixins/dense/base.py. The wrapper recomputes lm_loss from
+        # logits and discards model_outputs.loss, so add the energy terms back here.
+        # Kept separate from lm_loss so train-lm_loss remains pure CE for diagnostics.
+        # Each is None when its coef==0 (no overhead).
+        energy_aux = None
+        energy_descent_loss = getattr(model_outputs, "energy_descent_loss", None)
+        if energy_descent_loss is not None:
+            energy_aux = energy_descent_loss if energy_aux is None else energy_aux + energy_descent_loss
+        energy_action_loss = getattr(model_outputs, "energy_action_loss", None)
+        if energy_action_loss is not None:
+            energy_aux = energy_action_loss if energy_aux is None else energy_aux + energy_action_loss
+
         aux_loss = getattr(model_outputs, "aux_loss", 0)
 
         if is_aux_loss_zero(aux_loss):
-            loss = lm_loss
-            output = {"loss": loss, "lm_loss": loss}
+            loss = lm_loss if energy_aux is None else lm_loss + energy_aux
+            output = {"loss": loss, "lm_loss": lm_loss}
         else:
             if self.is_pipeline_parallel_enabled:
                 self._extra_metrics = self._extra_metrics + {"aux_loss": aux_loss}
@@ -379,7 +392,14 @@ class ModelWrapperForPretraining(ModelWrapper):
                 aux_loss = tensor_to_dtensor(aux_loss, device_mesh=self.tp_mesh, current_placement=Replicate())
 
             loss = _F.apply(lm_loss, aux_loss, self.router_aux_loss_coef)
+            if energy_aux is not None:
+                loss = loss + energy_aux
             output = {"loss": loss, "lm_loss": lm_loss, "aux_loss": aux_loss}
+
+        if energy_action_loss is not None:
+            output["energy_action_loss"] = energy_action_loss
+        if energy_descent_loss is not None:
+            output["energy_descent_loss"] = energy_descent_loss
 
         return output
 

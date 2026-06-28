@@ -18,6 +18,53 @@ class _EnergyMLPArgs(BaseArgs):
         assert self.mlp_type == "Energy_MLP"
 
 
+class _HopfieldEnergyMLPArgs(BaseArgs):
+    """Config for Hopfield_Energy_MLP: bounded-below FFN energy E_FF = ||gelu(Wh)||^2.
+
+    Single weight W of shape [intermediate, hidden] — half the per-block FFN
+    params of Energy_MLP (which has W1 + W2). To match the Energy_MLP param
+    count, double the intermediate_size at config time (e.g. 4096 → 8192).
+    """
+    mlp_type: str = "Hopfield_Energy_MLP"
+    intermediate_size: int
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "Hopfield_Energy_MLP"
+
+
+class _BoltzmannMoEHopfieldEnergyMLPArgs(BaseArgs):
+    """Config for BoltzmannMoE_Hopfield_Energy_MLP.
+
+    K experts, each with the bounded-below single-W Hopfield form
+    E_k = (1/expert_I) ||gelu(W_k h)||^2 ≥ 0.  Boltzmann routing
+    w_k = softmax(-E_k); total energy E_total = -LSE_k(-E_k) is bounded
+    both directions (∈ [-log K, min_k E_k]).
+
+    Iso-parameter with Hopfield_Energy_MLP at the same intermediate_size:
+    `intermediate_size` is the TOTAL across all experts; each expert gets
+    `intermediate_size / n_experts` neurons.  e.g. intermediate_size=8192,
+    n_experts=8 ⇒ 8 experts × 1024 neurons each (iso-param with the
+    Hopfield-MEAN big run).
+    """
+
+    mlp_type: str = "BoltzmannMoE_Hopfield_Energy_MLP"
+    intermediate_size: int   # total across all experts = n_experts * expert_I
+    n_experts: int = 8
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "BoltzmannMoE_Hopfield_Energy_MLP"
+        assert self.n_experts >= 2, "BoltzmannMoE_Hopfield requires at least 2 experts"
+        assert self.intermediate_size % self.n_experts == 0, (
+            f"intermediate_size ({self.intermediate_size}) must be divisible by "
+            f"n_experts ({self.n_experts})"
+        )
+
 
 class _MLPArgs(BaseArgs):
     mlp_type: str = "MLP"
@@ -157,6 +204,79 @@ class _TopKEnergyMoEMLPArgs(BaseArgs):
         assert 1 <= self.top_k <= self.n_experts, (
             f"top_k ({self.top_k}) must be in [1, n_experts ({self.n_experts})]"
         )
+
+
+class _EnergyFFW1W2Args(BaseArgs):
+    """Config for the new composable W1W2 FF energy class (``EnergyFF_W1W2``).
+
+    Drop-in replacement for ``Energy_MLP`` — same param count, same math,
+    different class. ``gelu_grad_method`` selects sigmoid (legacy) /
+    tanh_exact / erf_exact.
+    """
+    mlp_type: str = "EnergyFF_W1W2"
+    intermediate_size: int
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0
+    add_bias: bool = False
+    gelu_grad_method: str = "sigmoid"
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "EnergyFF_W1W2"
+        assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
+
+
+class _EnergyFFHopfieldArgs(BaseArgs):
+    """Config for the new composable Hopfield FF energy class (``EnergyFF_Hopfield``).
+
+    Drop-in replacement for ``Hopfield_Energy_MLP``. ``E = (1/d_int)||gelu(Wh)||²``.
+    """
+    mlp_type: str = "EnergyFF_Hopfield"
+    intermediate_size: int
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0
+    add_bias: bool = False
+    gelu_grad_method: str = "sigmoid"
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "EnergyFF_Hopfield"
+        assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
+
+
+class _EnergyFFBoltzmannMoEArgs(BaseArgs):
+    """Config for the new composable Boltzmann-MoE FF energy (``EnergyFF_BoltzmannMoE``).
+
+    Routes K experts of either ``w1w2`` or ``hopfield`` kind via softmax(±E_k/τ)
+    + optional stochastic repulsion. This is the variant that **adds the
+    repulsion + τ + n_repulsion_pairs** to the Hopfield-MoE form (which the
+    legacy ``BoltzmannMoE_Hopfield_Energy_MLP`` was missing).
+
+    Iso-parameter with the corresponding non-MoE expert kind at the same
+    ``intermediate_size``: ``n_experts × (intermediate_size / n_experts)``
+    total neurons.
+    """
+    mlp_type: str = "EnergyFF_BoltzmannMoE"
+    intermediate_size: int
+    n_experts: int = 8
+    expert_kind: str = "hopfield"     # "w1w2" or "hopfield"
+    temperature: float = 1.0
+    repulsion_coef: float = 0.0
+    n_repulsion_pairs: int = 4
+    top_k: int | None = None
+    gelu_grad_method: str = "sigmoid"
+    activation_function: str = "gelu_pytorch_tanh"
+    dropout: float = 0
+    add_bias: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "EnergyFF_BoltzmannMoE"
+        assert self.expert_kind in ("w1w2", "hopfield")
+        assert self.n_experts >= 2
+        assert self.intermediate_size % self.n_experts == 0, (
+            f"intermediate_size ({self.intermediate_size}) must be divisible by "
+            f"n_experts ({self.n_experts})"
+        )
+        assert self.temperature > 0
+        assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
 
 
 class _SurrogateBoltzmannMoEMLPArgs(BaseArgs):

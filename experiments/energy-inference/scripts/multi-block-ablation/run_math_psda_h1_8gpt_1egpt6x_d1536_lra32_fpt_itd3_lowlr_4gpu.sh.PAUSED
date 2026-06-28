@@ -1,0 +1,54 @@
+#!/bin/bash
+# Diagnostic LR experiment — clones main itd3 run from latest checkpoint and
+# continues at constant lr=2e-4 (5x lower than main run's peak 1e-3), no
+# warmup, no cosine. Goal: see whether reduced stochastic exploration gives
+# faster apparent loss drop / less oscillation than the main 16-GPU run at
+# near-peak LR.
+#
+# 8 GPU preemptable / grp_preemptable to not compete with the main 16-GPU run.
+# Eff batch matches main run (mb=4 ga=4 = 524k tok/step). 50k steps ≈ 26B
+# tokens — enough to compare oscillation σ + slope vs the main run's
+# 30k-35k window.
+#
+# Save path: *_itd3_lowlr_8gpu/  (separate from main *_itd3_16gpu/)
+# Loads weights + optimizer state from main run via config's `load_args`.
+#
+# NOTE: this is a single-node 8-GPU job, so no blaunch/span needed.
+set -euo pipefail
+REPO=/proj/dmfexp/nima/Code/dolomite-engine
+CONFIG=${REPO}/configs/multi_block_ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_lowlr_4gpu.yml
+SAVE_PATH=${REPO}/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_lowlr_4gpu
+SCRIPT_PATH=${REPO}/experiments/energy-inference/scripts/multi-block-ablation/run_math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_lowlr_4gpu.sh
+JOB_NAME=math_h1_d1536_fpt_itd3_lowlr_4g
+mkdir -p "${HOME}/bsub_logs"
+bsub \
+    -q preemptable -G grp_preemptable -J ${JOB_NAME} \
+    -gpu "num=4/task:mode=exclusive_process" -n 1 -x -M 64G -W 24:00 \
+    -o "${HOME}/bsub_logs/${JOB_NAME}_%J.stdout" \
+    -e "${HOME}/bsub_logs/${JOB_NAME}_%J.stderr" \
+    <<BSUB
+#!/bin/bash
+unset TMPDIR TEMP TMP
+source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
+export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
+REPO=${REPO}; CONFIG=${CONFIG}; SAVE_PATH=${SAVE_PATH}
+SCRIPT_PATH=${SCRIPT_PATH}; JOB_NAME=${JOB_NAME}; NUM_TRAINING_STEPS=50000
+LATEST_JSON="\${SAVE_PATH}/latest_checkpointed_iteration.json"
+RUN_CONFIG="\${CONFIG}"
+# On resubmit (after preemption), point load_args at OUR save_path instead of the main run
+if [ -f "\${LATEST_JSON}" ]; then
+    TMPCONFIG="\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml"
+    # Replace the main run's load_path with our own save_path
+    sed "s|load_path:.*math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_16gpu|load_path: \${SAVE_PATH}|" "\${CONFIG}" > "\${TMPCONFIG}"
+    RUN_CONFIG="\${TMPCONFIG}"
+fi
+bash ${REPO}/scripts/common/pretrain.sh "\${RUN_CONFIG}"
+[ -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml" ] && rm -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml"
+if [ -f "\${LATEST_JSON}" ]; then
+    LATEST_ITER=\$(python3 -c "import json; print(json.load(open('\${LATEST_JSON}'))['latest_checkpointed_iteration'])")
+    if [ "\${LATEST_ITER}" -lt "\${NUM_TRAINING_STEPS}" ]; then
+        bash "\${SCRIPT_PATH}"
+    fi
+fi
+BSUB
+echo "Submitted ${JOB_NAME} (4 GPU preemptable, constant lr=2e-4 from main itd3 latest ckpt)"

@@ -67,6 +67,14 @@ class Energy_MLP(nn.Module):
         # GELU path
         y1 = F.gelu(W1x)
 
+        # Energy aux-loss support: cache E_FF per token here (W1/W2 still gathered).
+        # FSDP-2 reshards on return — outer .energy_per_token call would fail.
+        # Matches energy_per_token def: E_FF(h) = -(gelu(W1x) * W2x).sum(-1).
+        if self.training and getattr(self, '_capture_energy', False):
+            self._last_energy_per_token = -(y1 * W2x).sum(dim=-1)
+        else:
+            self._last_energy_per_token = None
+
         # Sigmoid-gated path (energy gradient term)
         # W1.weight has shape (intermediate_size, hidden_size), so it acts as the projection back
         y2 = torch.sigmoid(self._SIGMOID_SCALE * W1x) * 0.5 * W2x
@@ -140,6 +148,256 @@ class Energy_MLP(nn.Module):
         W1x = self.W1(x)
         W2x = self.W2(x)
         return -(F.gelu(W1x) * W2x).sum(dim=-1)
+
+
+class Hopfield_Energy_MLP(nn.Module):
+    """Hopfield-style Energy MLP — bounded-below FFN energy with tied input/output weight.
+
+    Energy (MEAN form — scale-invariant in d_intermediate):
+        E_FF(h) = (1/d_int) ||gelu(Wh)||^2 = mean_i gelu(W_i h)^2
+    Bounded below by 0. The mean (not sum) is dimensionally O(1) per token
+    regardless of intermediate_size — without this, the gradient magnitude scales
+    with d_int (8192) and training is unstable (run 1714840 went NaN at step 3710
+    using the sum form even at LR 7.5e-4).
+
+    Forward output is the gradient of E_FF w.r.t. h (consistent with how the
+    descent update consumes ffwd_out: h := h - proj(attn_out + scale_ff*ffwd_out)):
+        ∇_h E_FF = (2/d_int) W^T (gelu(Wh) ⊙ gelu'(Wh))
+    Uses the sigmoid approximation for gelu' that the existing Energy_MLP uses
+    for its gating path, so numerics align with what FET-prior tuned with.
+
+    Compare to the W1/W2 Energy_MLP form -(gelu(W1h) . W2h) which is unbounded
+    below (the 2026-06-23 smoke showed it diverges to -infinity when used as an
+    aux loss).
+
+    Single weight W of shape [intermediate, hidden] — half the params of
+    Energy_MLP (W1 + W2). To match params, double intermediate at config time.
+    """
+
+    _SIGMOID_SCALE: float = (2.0 / math.pi) ** 0.5
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        init_method: str,
+        activation_function: str,
+        dropout: float,
+        initializer_range: float,
+        m_width: float,
+        num_layers: int,
+        add_bias: bool = False,
+        layer_idx: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.layer_idx = layer_idx
+        self._cached_metrics: dict[str, float] | None = None
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+
+        std = _get_std_for_linear(initializer_range, init_method, m_width)
+        self.W = ParameterizedLinear(hidden_size, intermediate_size, bias=add_bias, std=std)
+        mark_parameter_as_mup_learning_rate(self.W.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Single shared projection. Forward output IS the descent gradient
+        # ∇_h E_FF = (2/d_int) W^T (gelu(Wx) ⊙ gelu'(Wx)).
+        # The 1/d_int factor keeps the descent step magnitude O(1) regardless
+        # of intermediate_size (critical for stability with iterated descent).
+        Wx = self.W(x)                                    # [B, T, intermediate]
+        gelu_Wx = F.gelu(Wx)
+        # Sigmoid approximation for gelu' (matches Energy_MLP's gating path).
+        gelu_prime = torch.sigmoid(self._SIGMOID_SCALE * Wx)
+        gated = gelu_Wx * gelu_prime                       # [B, T, intermediate]
+        inv_d = 1.0 / self.intermediate_size               # scale-invariant in d_int
+        # (2/d) W^T gated  ≡  (2/d) gated @ W.weight  (W.weight is [intermediate, hidden]).
+        out = (2.0 * inv_d) * (gated @ self.W.weight)      # [B, T, hidden]
+
+        # Action-loss capture — mean form, bounded below by 0, O(1) per token.
+        if self.training and getattr(self, '_capture_energy', False):
+            self._last_energy_per_token = (gelu_Wx ** 2).mean(dim=-1)
+        else:
+            self._last_energy_per_token = None
+
+        if not torch.compiler.is_compiling():
+            self._log_norms(out)
+        return out
+
+    def _log_norms(self, out: torch.Tensor) -> None:
+        with torch.no_grad():
+            w_norm = self.W.weight.norm().item()
+            out_norm = out.norm(dim=-1).mean().item()
+            self._cached_metrics = {
+                "W_norm": w_norm, "W_total_norm": w_norm, "output_norm": out_norm,
+            }
+
+    def get_metrics(self) -> dict[str, float] | None:
+        return self._cached_metrics
+
+    def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
+        """E_FF(h) = (1/d_int) ||gelu(Wh)||^2  (mean form — bounded below by 0,
+        O(1) per token regardless of intermediate_size)."""
+        Wx = self.W(x)
+        return (F.gelu(Wx) ** 2).mean(dim=-1)
+
+
+class BoltzmannMoE_Hopfield_Energy_MLP(nn.Module):
+    """Boltzmann-MoE variant of Hopfield_Energy_MLP — K experts each with the
+    bounded-below single-W Hopfield form.
+
+    Per-expert energy (MEAN form — scale-invariant in expert_I = intermediate_size / K):
+        E_k(h) = (1/expert_I) ||gelu(W_k h)||^2  ≥  0
+    Routing (free-energy of mixture, Boltzmann at τ=1):
+        w_k(h) = softmax_k(-E_k(h))
+        E_total(h) = -log Σ_k exp(-E_k(h)) = -LSE_k(-E_k(h))
+    E_total is bounded below by 0 (since E_k ≥ 0 ⇒ -LSE_k(-E_k) ≥ 0 when
+    Σ_k exp(-E_k) ≤ K, and ≥ -log K when E_k all = 0) and bounded above by
+    min_k E_k(h) — strictly bounded both directions, unlike the W1/W2
+    Boltzmann form whose -φ·W2h energies are unbounded below.
+
+    Forward output is the descent gradient of E_total w.r.t. h:
+        ∇_h E_total = Σ_k w_k(h) · ∇_h E_k(h)
+                    = Σ_k w_k(h) · (2/expert_I) W_k^T (gelu(W_k h) ⊙ gelu'(W_k h))
+    where gelu' is the sigmoid approximation sigmoid(√(2/π)·W_k h) matching
+    the Energy_MLP / Hopfield_Energy_MLP convention.
+
+    Iso-parameter with Hopfield_Energy_MLP of the same intermediate_size:
+    K experts × (intermediate_size/K) neurons each = same single-W total.
+    Iso-FLOPs as well (one fused matmul, then per-expert chunking).
+
+    Capture hook for action-loss aux: when self.training and self._capture_energy,
+    stores E_total per token in self._last_energy_per_token. Mirrors the
+    Hopfield_Energy_MLP / Energy_MLP leaf-cache pattern that the FSDP-2
+    action-loss path relies on.
+    """
+
+    _SIGMOID_SCALE: float = (2.0 / math.pi) ** 0.5
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,   # total across all K experts = n_experts * expert_I
+        n_experts: int = 8,
+        init_method: str = "normal",
+        activation_function: str = "gelu_pytorch_tanh",
+        dropout: float = 0.0,
+        initializer_range: float = 0.02,
+        m_width: float | None = None,
+        num_layers: int = 1,
+        add_bias: bool = False,
+        layer_idx: int | None = None,
+    ) -> None:
+        super().__init__()
+
+        assert intermediate_size % n_experts == 0, (
+            f"intermediate_size ({intermediate_size}) must be divisible by "
+            f"n_experts ({n_experts})"
+        )
+
+        self.layer_idx = layer_idx
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.n_experts = n_experts
+        self.expert_I = intermediate_size // n_experts
+        self._cached_metrics: dict[str, float] | None = None
+
+        std = _get_std_for_linear(initializer_range, init_method, m_width)
+        # One fused projection of size [n_experts * expert_I, hidden] — chunking
+        # at forward recovers per-expert W_k slices. Single weight per expert
+        # mirrors the Hopfield_Energy_MLP single-W form (no separate W1/W2).
+        self.W = ParameterizedLinear(hidden_size, intermediate_size, bias=add_bias, std=std)
+        mark_parameter_as_mup_learning_rate(self.W.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        leading = x.shape[:-1]  # (B, T) or (BT,) for padding-free
+
+        # Per-expert W_k slices: zero-copy view into the fused weight.
+        # W.weight shape: (n_experts * expert_I, hidden). View as
+        # (n_experts, expert_I, hidden) — W_k = W_e[k].
+        W_e = self.W.weight.view(self.n_experts, self.expert_I, self.hidden_size)
+
+        # Per-expert pre-activations: Wx_e[..., k, i] = (W_k h)_i.
+        # Single fused matmul (W(x)) then reshape — iso-FLOPs vs Hopfield single-expert.
+        Wx = self.W(x).view(*leading, self.n_experts, self.expert_I)
+
+        gelu_Wx    = F.gelu(Wx)                                    # (..., n_experts, expert_I)
+        gelu_prime = torch.sigmoid(self._SIGMOID_SCALE * Wx)       # sigmoid approx (matches Energy_MLP)
+
+        # Per-expert energy E_k = (1/expert_I) ||gelu(W_k h)||^2 ≥ 0
+        # Shape: (..., n_experts)
+        inv_d = 1.0 / self.expert_I
+        E_k = (gelu_Wx * gelu_Wx).mean(dim=-1)                     # mean form ⇒ scale-invariant in expert_I
+
+        # Boltzmann routing weights w_k = softmax(-E_k). Temperature 1 by design
+        # (E_k is already O(1) thanks to the mean form — no /sqrt(d) needed).
+        w = F.softmax(-E_k, dim=-1)                                # (..., n_experts)
+
+        # Per-expert gradient gated activations: gelu(W_k h) ⊙ gelu'(W_k h).
+        # Shape: (..., n_experts, expert_I). Scale factor (2/expert_I) is the
+        # mean-form constant.
+        gated = gelu_Wx * gelu_prime                               # (..., n_experts, expert_I)
+
+        # Boltzmann-weighted gradient: ∇_h E_total = Σ_k w_k · (2/expert_I) W_k^T gated_k.
+        # Fold w and (2/expert_I) into gated first, then a single einsum back to hidden.
+        weighted_gated = (2.0 * inv_d) * w.unsqueeze(-1) * gated   # (..., n_experts, expert_I)
+        # einsum: (..., e, i) × (e, i, h) → (..., h)
+        out = torch.einsum("...ei,eih->...h", weighted_gated, W_e)
+
+        # Action-loss capture: E_total per token = -LSE_k(-E_k).
+        # Bounded below by 0 (Σ_k exp(-E_k) ≤ K when all E_k ≥ 0, so log ≤ log K
+        # ⇒ -LSE ≥ -log K; and ≤ min_k E_k since -LSE_k(-E_k) ≤ -(-min E_k) = min E_k).
+        if self.training and getattr(self, '_capture_energy', False):
+            self._last_energy_per_token = -torch.logsumexp(-E_k, dim=-1)
+        else:
+            self._last_energy_per_token = None
+
+        if not torch.compiler.is_compiling():
+            self._log_metrics(w, out)
+
+        return out
+
+    def _log_metrics(self, p: torch.Tensor, out: torch.Tensor) -> None:
+        """Log routing entropy / load balance metrics + weight norms."""
+        with torch.no_grad():
+            p_flat = p.reshape(-1, self.n_experts)  # (T, n_experts)
+            max_H = math.log(self.n_experts) if self.n_experts > 1 else 1.0
+
+            # Per-token routing entropy (averaged over tokens).
+            per_token_H = -(p_flat * (p_flat + 1e-8).log()).sum(-1)
+            mean_token_H = per_token_H.mean().item()
+            effective_n = math.exp(mean_token_H)
+
+            dominant = p_flat.argmax(-1)
+            expert_counts = dominant.bincount(minlength=self.n_experts).float()
+            n_dominant = int((expert_counts > 0).sum().item())
+            max_load = (expert_counts / p_flat.shape[0]).max().item()
+
+            w_norm = self.W.weight.norm().item()
+            out_norm = out.norm(dim=-1).mean().item()
+
+            self._cached_metrics = {
+                "W_norm": w_norm,
+                "W_total_norm": w_norm,
+                "output_norm": out_norm,
+                "effective_n_experts": effective_n,
+                "n_dominant_experts": float(n_dominant),
+                "max_expert_load": max_load,
+                "mean_token_entropy_norm": mean_token_H / max_H,
+            }
+
+    def get_metrics(self) -> dict[str, float] | None:
+        return self._cached_metrics
+
+    def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
+        """E_total(h) = -log Σ_k exp(-E_k(h)) where E_k = (1/expert_I) ||gelu(W_k h)||^2.
+
+        Bounded below by 0 (E_k ≥ 0 for all k ⇒ Σ_k exp(-E_k) ≤ K).  This matches
+        the convention of Hopfield_Energy_MLP (E ≥ 0) and is suitable as an
+        aux loss without divergence.
+        """
+        Wx = self.W(x).view(*x.shape[:-1], self.n_experts, self.expert_I)
+        E_k = (F.gelu(Wx) ** 2).mean(dim=-1)                                # (..., n_experts), ≥ 0
+        return -torch.logsumexp(-E_k, dim=-1)                               # (..., )
 
 
 class Compositional_Energy_MLP(nn.Module):

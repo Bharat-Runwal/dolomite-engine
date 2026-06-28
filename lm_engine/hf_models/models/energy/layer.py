@@ -824,6 +824,15 @@ class EnergyBlock(nn.Module):
                                         "boltzmann_moe_energy_attention"):
 
             ln_x = self.ln(hidden_states)
+            # Propagate capture flag to leaf modules so they cache their own E
+            # contributions while their FSDP-2 params are gathered (forward path).
+            # Set persistently (not per-iter) so grad-ckpt replay during backward
+            # follows the same path. Leaf modules also check self.training to avoid
+            # firing in eval/generate.
+            _capture_e = getattr(self, '_capture_energy', False)
+            if _capture_e:
+                self.attn._capture_energy = True
+                self.ffwd._capture_energy = True
             attn_out = self.attn(
                 ln_x,
                 past_key_values=past_key_values,
@@ -904,6 +913,29 @@ class EnergyBlock(nn.Module):
                     inv_h_norm = (d_size ** 0.5) / hidden_states.norm(dim=-1, keepdim=True).clamp(min=1e-6)
                     grad_E = -grad_E * inv_h_norm
                 hidden_states = hidden_states - self.proj(grad_E)
+            # Energy aux-loss support: combine the per-token energy contributions
+            # cached by self.attn (LSE of QK^T) and self.ffwd (-(gelu(W1x)*W2x).sum)
+            # during their own forwards. Note: this is E at the OLD ln_x (pre-update),
+            # not at the post-update hidden_states — but action = sum_iter E(h_iter)
+            # is invariant to that index shift up to a single boundary term.
+            if _capture_e:
+                e_attn = self.attn._last_energy_per_token       # [B, T] or None
+                e_ffwd = self.ffwd._last_energy_per_token       # [B, T] or None
+                # Use whichever leaf provided a value; tolerate either being None.
+                # During the debug period the attn LSE compute is disabled; we run
+                # action loss off MLP energy only. Both will be re-enabled post-fix.
+                parts = []
+                if e_attn is not None: parts.append(e_attn)
+                if e_ffwd is not None: parts.append(self.scale_ff * e_ffwd)
+                if parts:
+                    self._last_energy_mean = sum(parts).mean()
+                else:
+                    self._last_energy_mean = None
+                # Don't clear leaf flags — keep them set so grad-ckpt backward replay
+                # follows the same path as the original forward. Leaves use
+                # self.training to gate eval/generate calls.
+            else:
+                self._last_energy_mean = None
             return hidden_states
         else:
             return self.forward_gpt(hidden_states,past_key_values,attention_mask,rope_cos_sin,cu_seqlens,max_seqlen,layer_id=layer_id)

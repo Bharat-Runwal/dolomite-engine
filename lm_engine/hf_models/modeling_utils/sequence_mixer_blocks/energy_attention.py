@@ -188,6 +188,11 @@ class EnergyAttention_QK(nn.Module):
             query = apply_rotary_pos_emb(query, rope_cos_sin)
             key = apply_rotary_pos_emb(key, rope_cos_sin)
 
+        # Energy aux-loss support: TEMPORARILY DISABLED for debug. The MLP-side leaf
+        # cache is enough to verify the path; we'll re-enable attn LSE after isolating
+        # the CUDA illegal-memory issue this introduces.
+        self._last_energy_per_token = None
+
         # Stop-gradient on K: makes forward output = exact ∂E/∂h_i (no key-role contamination).
         # Without this, K = f(h_i) contributes an extra term to the backprop gradient that is
         # absent from the forward energy gradient, causing the structural misalignment we measured.

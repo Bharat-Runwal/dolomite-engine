@@ -1,41 +1,30 @@
 #!/bin/bash
-# 32-GPU multi-node launcher for math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3.
-# 4 nodes × 8 H100 = full grp_ebm GPU quota, normal queue. Effective batch
-# matches boltz 580M (mb=4, ga=1, 32 GPU = 524k tok/step) so LR transfers.
-# iter_dropout 6±3 enabled on the EGPT block from step 0.
-#
-# Multi-node setup (NEW after job 724499 hung at startup):
-#   * `-R "span[ptile=1]"` forces one task per host so each $HOSTNAME shows up
-#     exactly once in $LSB_MCPU_HOSTS (pretrain.sh expects this).
-#   * `blaunch bash pretrain.sh` fans the script out to every allocated host.
-#     Without blaunch, bsub runs the script only on the head, torchrun rank 0
-#     waits forever for ranks 1+ that never start (cause of 724499's hang).
-# Unshard + eval at the end remain head-only, outside blaunch.
+# Hopfield-FET 16 GPU big run. 8G+1Ex6 d=1536 with Hopfield_Energy_MLP (single
+# weight W, ||gelu(Wh)||^2 — bounded below by 0). Iso-data with FET-1.5e-3.
+# Trap-protected auto-resubmit; auto-eval at completion.
 set -euo pipefail
 REPO=/proj/dmfexp/nima/Code/dolomite-engine
-CONFIG=${REPO}/configs/multi_block_ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_32gpu.yml
-# Shares save_path with the 16-GPU run (this 32-GPU launcher is the speedup
-# path for the same training trajectory; same eff_batch=524k tok/step).
-# Must match `save_path` in the config so the LATEST_JSON resume check sees
-# the existing 16-GPU checkpoints.
-SAVE_PATH=${REPO}/experiments/energy-inference/results/multi-block-ablation/math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_16gpu
-SCRIPT_PATH=${REPO}/experiments/energy-inference/scripts/multi-block-ablation/run_math_psda_h1_8gpt_1egpt6x_d1536_lra32_fpt_itd3_32gpu.sh
-JOB_NAME=math_h1_d1536_fpt_itd3_32g
+TAG=math_fet_hopfield_mean_8gpt_1egpt6x_d1536_int8k_lra32_itd3_lr1p5e3_33b_16gpu
+CONFIG=${REPO}/configs/multi_block_ablation/${TAG}.yml
+SAVE_PATH=${REPO}/experiments/energy-inference/results/multi-block-ablation/${TAG}
+SCRIPT_PATH=${REPO}/experiments/energy-inference/scripts/multi-block-ablation/run_math_fet_hopfield_mean_d1536_int8k_lr1p5e3_33b_16gpu.sh
+JOB_NAME=math_fet_hopfield_33b_16g
 mkdir -p "${HOME}/bsub_logs"
 bsub \
     -q normal -G grp_ebm -J ${JOB_NAME} \
-    -gpu "num=8/task:mode=exclusive_process" -n 4 -x \
+    -gpu "num=8/task:mode=exclusive_process" -n 2 -x \
     -R "span[ptile=1] select[hname!='p4-r24-n2']" \
-    -M 64G -W 24:00 \
+    -M 192G -W 24:00 \
     -o "${HOME}/bsub_logs/${JOB_NAME}_%J.stdout" \
     -e "${HOME}/bsub_logs/${JOB_NAME}_%J.stderr" \
     <<BSUB
 #!/bin/bash
 unset TMPDIR TEMP TMP
+export PYTHONUNBUFFERED=1
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 REPO=${REPO}; CONFIG=${CONFIG}; SAVE_PATH=${SAVE_PATH}
-SCRIPT_PATH=${SCRIPT_PATH}; JOB_NAME=${JOB_NAME}; NUM_TRAINING_STEPS=240000
+SCRIPT_PATH=${SCRIPT_PATH}; JOB_NAME=${JOB_NAME}; NUM_TRAINING_STEPS=32000
 LATEST_JSON="\${SAVE_PATH}/latest_checkpointed_iteration.json"
 RUN_CONFIG="\${CONFIG}"
 if [ -f "\${LATEST_JSON}" ]; then
@@ -45,8 +34,20 @@ if [ -f "\${LATEST_JSON}" ]; then
     printf "\nload_args:\n  load_path: %s\n" "\${SAVE_PATH}" >> "\${TMPCONFIG}"
     RUN_CONFIG="\${TMPCONFIG}"
 fi
-# Trap so resubmit fires on ANY exit (incl. blaunch false-positive shutdown
-# failures like job 761266 hit at step 56150).
+export WANDB_DIR="\${SAVE_PATH}"
+mkdir -p "\${WANDB_DIR}"
+LATEST_TRACKER=\$(ls -t \${SAVE_PATH}/global_step*/experiments_tracker.json 2>/dev/null | head -1)
+if [ -n "\${LATEST_TRACKER}" ] && [ -f "\${LATEST_TRACKER}" ]; then
+    SAVED_ID=\$(python3 -c "import json; print(json.load(open('\${LATEST_TRACKER}'))['id'])" 2>/dev/null)
+    if [ -n "\${SAVED_ID}" ]; then
+        export WANDB_RUN_ID="\${SAVED_ID}"
+        export WANDB_RESUME="must"
+    fi
+fi
+if [ -z "\${WANDB_RUN_ID:-}" ]; then
+    rm -f "\${WANDB_DIR}/wandb/wandb-resume.json" 2>/dev/null
+    export WANDB_RESUME="never"
+fi
 post_exit() {
     [ -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml" ] && rm -f "\${SAVE_PATH}/runtime_config_\${LSB_JOBID}.yml"
     if [ ! -f "\${LATEST_JSON}" ]; then return; fi
@@ -68,4 +69,4 @@ echo "[head=\$(hostname)] LSB_MCPU_HOSTS=\$LSB_MCPU_HOSTS"
 echo "[head] launching pretrain.sh on \$(echo \$LSB_MCPU_HOSTS | tr ' ' '\n' | sed 'n; d' | sort -u | wc -l) nodes via blaunch"
 blaunch bash ${REPO}/scripts/common/pretrain.sh "\${RUN_CONFIG}" || echo "[main] blaunch returned \$? — trap will still run"
 BSUB
-echo "Submitted ${JOB_NAME} (32 GPU multi-node, blaunch, iter_dropout 6±3)"
+echo "Submitted ${JOB_NAME} (16 GPU multi-node Hopfield-FET, normal grp_ebm, 33.5B tokens)"

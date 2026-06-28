@@ -6,6 +6,8 @@ from ...config import CommonConfig
 from .mlp import (
     MLP,
     Energy_MLP,
+    Hopfield_Energy_MLP,
+    BoltzmannMoE_Hopfield_Energy_MLP,
     Compositional_Energy_MLP,
     Mixed_Energy_MLP,
     BoltzmannMoE_Energy_MLP,
@@ -13,6 +15,14 @@ from .mlp import (
     SurrogateBoltzmannMoE_Energy_MLP,
     interleave_up_gate_tensor_for_mlp,
     split_up_gate_tensor_for_mlp,
+)
+from .energy_ff import (
+    FFEnergyBase,
+    W1W2FFEnergy,
+    HopfieldFFEnergy,
+    BoltzmannMoEFFEnergy,
+    FusedMoEContainer,
+    build_boltzmann_moe,
 )
 from .moe import MoE, ParameterizedExperts
 
@@ -37,9 +47,34 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
     if mlp_type == "MLP":
         mlp = MLP(**kwargs)
     
-    elif mlp_type == "Energy_MLP":   
+    elif mlp_type == "Energy_MLP":
         mlp = Energy_MLP(**kwargs)
-        
+
+    elif mlp_type == "Hopfield_Energy_MLP":
+        # Bounded-below FFN energy: E_FF = ||gelu(Wh)||^2. Single shared weight W;
+        # half the per-block FFN params of Energy_MLP, so double intermediate_size
+        # at config time to keep param count matched.
+        mlp = Hopfield_Energy_MLP(**kwargs)
+
+    elif mlp_type == "BoltzmannMoE_Hopfield_Energy_MLP":
+        # Boltzmann-MoE over Hopfield single-W experts. K experts, each with
+        # expert_I = intermediate_size // n_experts neurons. E_k = (1/expert_I)
+        # ||gelu(W_k h)||^2 ≥ 0; routing softmax(-E_k); E_total = -LSE_k(-E_k).
+        # Iso-param with Hopfield_Energy_MLP at the same intermediate_size.
+        mlp = BoltzmannMoE_Hopfield_Energy_MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            n_experts=block.n_experts,
+            activation_function=block.activation_function,
+            add_bias=block.add_bias,
+            dropout=block.dropout,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            layer_idx=layer_idx,
+        )
+
     elif mlp_type == "Mixed_Energy_MLP":
         mlp = Mixed_Energy_MLP(
             hidden_size=config.hidden_size,
@@ -109,6 +144,56 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             initializer_range=config.initializer_range,
             m_width=config.m_width,
             num_layers=config.num_layers,
+            layer_idx=layer_idx,
+        )
+
+    elif mlp_type == "EnergyFF_W1W2":
+        # 2026-06-28 refactor: composable W1W2 energy FF. Drop-in for Energy_MLP.
+        mlp = W1W2FFEnergy(
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            add_bias=block.add_bias,
+            gelu_grad_method=getattr(block, "gelu_grad_method", "sigmoid"),
+            layer_idx=layer_idx,
+        )
+
+    elif mlp_type == "EnergyFF_Hopfield":
+        # 2026-06-28 refactor: composable Hopfield energy FF. Drop-in for
+        # Hopfield_Energy_MLP. Single shared W; E = (1/d_int)||gelu(Wh)||² ≥ 0.
+        mlp = HopfieldFFEnergy(
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            num_layers=config.num_layers,
+            add_bias=block.add_bias,
+            gelu_grad_method=getattr(block, "gelu_grad_method", "sigmoid"),
+            layer_idx=layer_idx,
+        )
+
+    elif mlp_type == "EnergyFF_BoltzmannMoE":
+        # 2026-06-28 refactor: composable Boltzmann-MoE over W1W2 OR Hopfield
+        # experts. Restores repulsion + τ + n_repulsion_pairs that the
+        # standalone BoltzmannMoE_Hopfield_Energy_MLP was missing.
+        mlp = build_boltzmann_moe(
+            expert_kind=block.expert_kind,
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            n_experts=block.n_experts,
+            temperature=block.temperature,
+            repulsion_coef=block.repulsion_coef,
+            n_repulsion_pairs=block.n_repulsion_pairs,
+            top_k=block.top_k,
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            add_bias=block.add_bias,
+            gelu_grad_method=getattr(block, "gelu_grad_method", "sigmoid"),
             layer_idx=layer_idx,
         )
 

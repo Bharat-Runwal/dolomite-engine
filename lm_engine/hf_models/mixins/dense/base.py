@@ -143,6 +143,14 @@ class BaseModelMixin(PreTrainedModelMixin):
         # Only applies to blocks with energy_attention. Set 0.0 (default) to disable.
         self.energy_descent_loss_coef = getattr(config, 'energy_descent_loss_coef', 0.0)
 
+        # Energy ACTION auxiliary loss: pushes the path action S = sum_iter E.mean()
+        # down at training time. The path action is the verifier signal that empirically
+        # discriminates correct vs wrong sequences (+0.85-1.6pp R3-gated lift).
+        # L_action = coef * sum_blocks sum_iters E(h_iter).mean()
+        # Free to compute — already calls energy_per_token() per iter for the descent term.
+        # Only applies to blocks with energy_attention. Set 0.0 (default) to disable.
+        self.energy_action_loss_coef = getattr(config, 'energy_action_loss_coef', 0.0)
+
 
 
     def _init_model(self, config: CommonConfig, **kwargs) -> None:
@@ -243,6 +251,7 @@ class BaseModelMixin(PreTrainedModelMixin):
         else:
             mamba_mask_computed = False
             energy_descent_loss = torch.tensor(0.0, device=hidden_states.device)
+            energy_action_loss = torch.tensor(0.0, device=hidden_states.device)
 
             layer_id = 0
             for i, num_iter in enumerate(self.layer_iterations):
@@ -260,12 +269,17 @@ class BaseModelMixin(PreTrainedModelMixin):
                 else:
                     effective_iter = num_iter
 
-                # Energy descent aux loss: track per-iteration energy for energy blocks
+                # Energy descent / action aux loss: track per-iteration energy for energy blocks.
+                # Set capture flag so the block's forward stores E.mean() on self._last_energy_mean
+                # WHILE FSDP-2 has params gathered. The outer call cannot use block.energy_per_token
+                # directly because params are resharded after the forward returns.
                 block = self.h[i]
                 has_energy = (self.training and
-                              self.energy_descent_loss_coef > 0 and
+                              (self.energy_descent_loss_coef > 0 or self.energy_action_loss_coef > 0) and
                               hasattr(block, 'energy_per_token') and
                               getattr(block, 'sequence_mixer_type', '') == 'energy_attention')
+                if has_energy:
+                    block._capture_energy = True
                 prev_energy = None
 
                 for j in range(effective_iter):
@@ -293,14 +307,22 @@ class BaseModelMixin(PreTrainedModelMixin):
                     )
                     layer_id += 1
 
-                    # Energy descent aux loss: penalize E(h_{t+1}) > E(h_t)
-                    # Accumulates locally (compile-safe), returned via BaseModelOutputWithPast
+                    # Energy descent / action aux loss: read E(h_new).mean() that the
+                    # block forward stored on self._last_energy_mean (computed while FSDP
+                    # had params gathered). Outer-loop calls to block.energy_per_token
+                    # fail under FSDP-2 because params are resharded after forward.
+                    # If curr_energy is None (debug paths or unsupported config) skip silently.
                     if has_energy:
-                        curr_energy = block.energy_per_token(hidden_states, rope_cos_sin=rope_cos_sin).mean()
-                        if prev_energy is not None:
-                            energy_increase = torch.clamp(curr_energy - prev_energy, min=0.0)
-                            energy_descent_loss = energy_descent_loss + energy_increase
-                        prev_energy = curr_energy.detach()  # stop gradient through prev
+                        curr_energy = block._last_energy_mean
+                        if curr_energy is not None:
+                            # Path action: cumulative E (with grad) for the action loss term.
+                            if self.energy_action_loss_coef > 0:
+                                energy_action_loss = energy_action_loss + curr_energy
+                            # Descent violation: clamp(E_curr - E_prev_detach, min=0).
+                            if self.energy_descent_loss_coef > 0 and prev_energy is not None:
+                                energy_increase = torch.clamp(curr_energy - prev_energy, min=0.0)
+                                energy_descent_loss = energy_descent_loss + energy_increase
+                            prev_energy = curr_energy.detach()  # stop gradient through prev
 
                     # Langevin noise: h = h + sqrt(2*eta) * noise
                     if self.training and self.iter_noise_eta > 0 and j < effective_iter - 1:
@@ -310,6 +332,9 @@ class BaseModelMixin(PreTrainedModelMixin):
                 # Account for skipped iterations in layer_id (for cache alignment)
                 if effective_iter < num_iter:
                     layer_id += (num_iter - effective_iter)
+                # Don't clear _capture_energy — leaves use self.training to gate
+                # eval/generate. Persistence keeps grad-ckpt backward replay
+                # consistent with the original forward graph.
 
 
 
@@ -331,13 +356,15 @@ class BaseModelMixin(PreTrainedModelMixin):
 
             hidden_states = self.ln_f(hidden_states)
 
-            # Scale energy descent loss by coefficient
+            # Scale aux losses by their coefficients
             edl = energy_descent_loss * self.energy_descent_loss_coef if self.energy_descent_loss_coef > 0 else None
+            eal = energy_action_loss * self.energy_action_loss_coef if self.energy_action_loss_coef > 0 else None
 
             return BaseModelOutputWithPast(
                 last_hidden_state=hidden_states,
                 past_key_values=past_key_values,
                 energy_descent_loss=edl,
+                energy_action_loss=eal,
             )
 
 
