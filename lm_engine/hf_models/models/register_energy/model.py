@@ -160,6 +160,76 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                 "Use standard padded inputs."
             )
 
+        # Capture caller-supplied position_ids before _prepare_a_bunch_of_stuff
+        # overwrites them with cumsum-derived defaults.  Used below for the
+        # persistent_cache decode path.
+        _caller_position_ids = position_ids
+        _gen_mode = getattr(self.config, 'register_generation_mode', 'bypass')
+        _register_start = getattr(self.config, 'register_start_layer', 0)
+
+        # Fast-path detection: cached single-token decode with full registers.
+        # When dolomite-engine's generate() (and lm-eval-harness's HFLM
+        # dispatching through it) does a decode step, it passes:
+        #   input_ids = next_token        (shape [B, 1])
+        #   attention_mask = full content amask (shape [B, T+k])    (no R-pad)
+        #   past_key_values = populated cache (R + T + k-1 entries)
+        # The default _prepare_a_bunch_of_stuff path then computes
+        #   key_length = past_length + 1 = R+T+k
+        #   position_ids = position_ids[:, past_length:key_length]   # OOB slice!
+        # Slicing an amask of length T+k by [past_length:past_length+1] when
+        # past_length > T+k gives an empty tensor, and the subsequent
+        # cos[position_ids] gather goes OOB on CUDA.
+        #
+        # To avoid this entirely, when we detect cached single-token decode with
+        # full-registers (register_start == 0), extend the attention_mask BEFORE
+        # calling _prepare_a_bunch_of_stuff so positions line up.  Then we
+        # short-circuit into super().forward() with the correct content-space
+        # position_id supplied explicitly.
+        if (self.n_registers > 0 and _register_start == 0
+                and not self.training
+                and past_key_values is not None
+                and input_ids is not None and input_ids.shape[-1] == 1
+                and attention_mask is not None):
+            try:
+                if hasattr(past_key_values, 'get_seq_length'):
+                    _kv_len = past_key_values.get_seq_length()
+                elif hasattr(past_key_values, 'key_cache') and past_key_values.key_cache:
+                    _kv_len = past_key_values.key_cache[0].shape[2]
+                else:
+                    _kv_len = past_key_values[0][0].shape[2]
+            except Exception:
+                _kv_len = None
+            if _kv_len is not None and _kv_len >= self.n_registers:
+                _target_len = _kv_len + 1
+                if attention_mask.shape[-1] < _target_len:
+                    _pad = torch.ones(
+                        attention_mask.shape[0],
+                        _target_len - attention_mask.shape[-1],
+                        dtype=attention_mask.dtype,
+                        device=attention_mask.device,
+                    )
+                    attention_mask = torch.cat([_pad, attention_mask], dim=1)
+                # Compute correct content-space position_id (T+k = kv_len - R).
+                _pos_to_use = None
+                if _gen_mode in ('persistent_cache', 'no_cache') and _caller_position_ids is None:
+                    _content_pos = _kv_len - self.n_registers
+                    _pos_to_use = torch.tensor(
+                        [[_content_pos]], dtype=torch.long, device=input_ids.device
+                    ).expand(input_ids.shape[0], 1).contiguous()
+                elif _gen_mode == 'persistent_cache' and _caller_position_ids is not None:
+                    _pos_to_use = _caller_position_ids
+                # bypass: leave _pos_to_use = None → super computes from cumsum
+                # (off-by-R buggy behaviour, kept for backward compat).
+                return super().forward(
+                    input_ids=input_ids,
+                    past_key_values=past_key_values,
+                    attention_mask=attention_mask,
+                    position_ids=_pos_to_use,
+                    use_cache=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
+
         # ----------------------------------------------------------------
         # 1. Standard prepare: embed input_ids, build causal mask, rope
         # ----------------------------------------------------------------
@@ -182,7 +252,7 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
 
         # During cached generation (use_cache=True, not training), registers create a
         # KV-cache length mismatch: prefill caches R+T entries, decode expects T.
-        # Two options controlled by config.register_generation_mode:
+        # Three options controlled by config.register_generation_mode:
         #   "bypass" (default, BUGGY for backward compat): cached-decode path runs
         #     super().forward() (no register re-prepend). The new token attends to
         #     cached register KVs but its own position_id is R+T+k (off-by-R vs.
@@ -190,42 +260,36 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         #     causing catastrophic generation degradation (hop_r256: BBH=0.0738,
         #     GSM8K=0.0). avg10_norm (logp scoring) is unaffected because logp uses
         #     a single prefill forward, not cached decode. See REGISTER_DECODE_BUG.md.
-        #   "no_cache" (CORRECT): force use_cache=False below. Each decode step
-        #     re-prefills the full R+T sequence from scratch. ~50x slower for typical
-        #     BBH but produces training-consistent hidden states. Recommended.
-        #   "persistent_cache": NOT YET IMPLEMENTED — would require restructuring the
-        #     decode path to override position_ids and use the extended attention mask.
+        #   "no_cache" / "persistent_cache" (CORRECT, identical implementation):
+        #     Keep cached register KVs from prefill, decode one token at a time, and
+        #     manually compute content-space position_id = T+k for the new token so
+        #     RoPE matches training. Extend the attention_mask by R ones so the new
+        #     token attends to all cached registers.  Both modes resolve to this same
+        #     code path here (the legacy "no_cache" name is preserved for config
+        #     compatibility).  See REGISTER_DECODE_BUG.md.
         effective_use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         register_start = getattr(self.config, 'register_start_layer', 0)
         R = self.n_registers  # convenience alias
 
         # --------------------------------------------------------------
-        # register_generation_mode: validate, and provide a model-level safety
-        # net for callers that don't go through HF generate().
+        # register_generation_mode: validate.
         # --------------------------------------------------------------
-        # The primary "no_cache" wiring is in prepare_inputs_for_generation
-        # (CausalLM wrapper), which discards past_kv each step so HF passes
-        # the full input_ids back into forward.  Here we add a belt-and-braces
-        # check: if a non-HF caller invokes forward() directly with
-        # use_cache=True but input_ids covers the full sequence (T_q > 1),
-        # we honour no_cache by simply dropping the cache and recomputing.
-        # We never silently drop the cache when input_ids is a single token
-        # (would lose all context).
+        # Both "no_cache" and "persistent_cache" share the same correct decode
+        # path below (extended mask + content-space position_ids).  The old
+        # "no_cache" implementation that dropped the cache each step relied on
+        # HF's prepare_inputs_for_generation re-feeding the full input_ids; but
+        # dolomite-engine's CausalLMModelMixin.generate() (which lm-evaluation-
+        # harness's HFLM dispatches to) only passes the NEW token at each decode
+        # step, so re-prefilling is impossible without the original prompt.
+        # Using persistent_cache-style decode is correct, fast, and works for
+        # both HF .generate() and dolomite generate().
         gen_mode = getattr(self.config, 'register_generation_mode', 'bypass')
         if gen_mode not in ('bypass', 'no_cache', 'persistent_cache'):
             raise ValueError(
                 f"register_generation_mode='{gen_mode}' not recognized. "
                 "Valid options: 'bypass', 'no_cache', 'persistent_cache'."
             )
-        if (gen_mode == 'no_cache' and not self.training and effective_use_cache
-                and input_ids is not None and input_ids.shape[-1] > 1):
-            # Full-sequence call (e.g. someone re-feeding the whole prompt each
-            # step): safe to drop cache; the prefill branch below re-prepends
-            # registers and recomputes correctly.
-            past_key_values = None
-            use_cache = False
-            effective_use_cache = False
 
         # ── Cached-decode step (T=1, past_kv already populated from prefill) ──
         if (effective_use_cache and not self.training
@@ -235,10 +299,16 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
 
             if register_start == 0:
                 # Standard full-register decode: single mask extended by R covers all layers.
+                # Always extend amask by R for bypass / no_cache / persistent_cache
+                # (registers occupy positions 0..R-1 in the KV cache).
                 if attention_mask is not None:
                     try:
-                        kv_len = past_key_values.key_cache[0].shape[2] if hasattr(past_key_values, 'key_cache') \
-                                 else past_key_values[0][0].shape[2]
+                        if hasattr(past_key_values, 'key_cache'):
+                            kv_len = past_key_values.key_cache[0].shape[2]
+                        elif hasattr(past_key_values, 'get_seq_length'):
+                            kv_len = past_key_values.get_seq_length()
+                        else:
+                            kv_len = past_key_values[0][0].shape[2]
                         target_len = kv_len + 1
                         if attention_mask.shape[-1] < target_len:
                             pad = torch.ones(attention_mask.shape[0], target_len - attention_mask.shape[-1],
@@ -246,11 +316,33 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                             attention_mask = torch.cat([pad, attention_mask], dim=1)
                     except Exception:
                         pass
-                # persistent_cache: caller (prepare_inputs_for_generation) supplies
-                # position_ids = content-position (T+k) so RoPE matches training.
-                # bypass: position_ids=None → super computes from cumsum(mask) →
-                # ends up at R+T+k (off by R; the documented bug).
-                pos_to_use = position_ids if gen_mode == 'persistent_cache' else None
+
+                # no_cache / persistent_cache: explicitly compute content-space
+                # position_id for the new token so RoPE rotation matches training.
+                # The KV cache holds R register rows at positions 0..R-1 plus
+                # content_so_far rows at positions 0..content_so_far-1.  The new
+                # content token's position is content_so_far = kv_len - R.
+                # bypass: pass position_ids=None so super computes from cumsum(mask),
+                # which gives the off-by-R buggy position (kept for backward compat).
+                pos_to_use = None
+                if gen_mode in ('persistent_cache', 'no_cache'):
+                    try:
+                        if hasattr(past_key_values, 'get_seq_length'):
+                            kv_len = past_key_values.get_seq_length()
+                        elif hasattr(past_key_values, 'key_cache'):
+                            kv_len = past_key_values.key_cache[0].shape[2]
+                        else:
+                            kv_len = past_key_values[0][0].shape[2]
+                        content_pos = kv_len - R  # next content position = T+k
+                        pos_to_use = torch.tensor(
+                            [[content_pos]], dtype=torch.long, device=input_ids.device
+                        ).expand(input_ids.shape[0], 1).contiguous()
+                    except Exception:
+                        pos_to_use = None
+                # If caller supplied an explicit position_ids (HF prepare_inputs_for_generation
+                # in persistent_cache mode does this), respect it.
+                if gen_mode == 'persistent_cache' and _caller_position_ids is not None:
+                    pos_to_use = _caller_position_ids
                 return super().forward(
                     input_ids=input_ids, past_key_values=past_key_values,
                     attention_mask=attention_mask, position_ids=pos_to_use,
