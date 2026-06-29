@@ -161,15 +161,27 @@ class FFEnergyBase(nn.Module):
 
 
 class W1W2FFEnergy(FFEnergyBase):
-    """E_FF(h) = -gelu(W1 h)·(W2 h) — unbounded below (legacy ``Energy_MLP`` form).
+    """E_FF(h) = (1/√d_int) · -gelu(W1 h)·(W2 h) — W1/W2 form with init-normalised energy.
+
+    **Init-scale convention.** A ``1/√d_int`` prefactor is folded into the
+    energy itself so ``E ~ O(1)`` at init regardless of ``intermediate_size``.
+    For random W1, W2 (std ~ 1/√d_hidden), the dot product ``gelu(W1 h)·(W2 h)``
+    sums d_int near-independent O(1) terms → magnitude ~√d_int; the prefactor
+    cancels that. ``∇_h E`` is scaled by the same factor. This unifies the
+    W1/W2 line with the Hopfield line (which uses 1/d_int because it sums
+    d_int squares of O(1) values) so the BoltzmannMoEFFEnergy wrapper does
+    NOT need its own routing scale and ``temperature=1`` is the natural
+    default for both. Relative E_FF↔E_AT magnitude is set by the learnable
+    ``scale_ff`` parameter, not by the operator definition.
+
+    Relation to legacy: the legacy ``BoltzmannMoE_Energy_MLP`` applied
+    ``1/√expert_I`` at the routing layer (``_routing_scale``); the legacy
+    ``Energy_MLP`` had no scale. This class moves the factor into the
+    energy. Old checkpoints (Energy_MLP / BoltzmannMoE_Energy_MLP) load
+    unchanged via the legacy path.
 
     ``forward(x)`` returns ``∇_h E_FF``:
-        ∇_h E_FF = W2ᵀ gelu(W1 h) + W1ᵀ (φ'(W1 h) ⊙ (W2 h))
-
-    Numerical equivalence with ``Energy_MLP`` (in ``mlp.py``) at identical
-    weights is part of the test suite. The ``gelu_grad_method`` argument
-    matches ``BoltzmannMoE_Energy_MLP``'s; default ``sigmoid`` reproduces every
-    pre-2026-06 checkpoint bit-for-bit.
+        ∇_h E_FF = (1/√d_int) · [ W2ᵀ gelu(W1 h) + W1ᵀ (φ'(W1 h) ⊙ (W2 h)) ]
     """
 
     def __init__(
@@ -206,14 +218,16 @@ class W1W2FFEnergy(FFEnergyBase):
         W2x = self.W2(x)
         phi, phi_prime = _gelu_and_grad(W1x, self.gelu_grad_method)
 
-        # ∇_h E = W2ᵀ phi(W1h) + W1ᵀ [phi'(W1h) ⊙ (W2h)]
-        # Use @ self.Wi.weight (shape [intermediate, hidden]) to project back.
+        # ∇_h E = (1/√d_int) · [ W2ᵀ phi(W1h) + W1ᵀ (phi'(W1h) ⊙ (W2h)) ]
+        # The (1/√d_int) prefactor lives in the energy definition itself —
+        # see class docstring for the init-scale rationale.
+        inv_sqrt_d = self.intermediate_size ** -0.5
         term1 = phi @ self.W2.weight
         term2 = (phi_prime * W2x) @ self.W1.weight
-        out = term1 + term2
+        out = inv_sqrt_d * (term1 + term2)
 
         if self.training and self._capture_energy:
-            self._last_energy_per_token = -(phi * W2x).sum(dim=-1)
+            self._last_energy_per_token = -inv_sqrt_d * (phi * W2x).sum(dim=-1)
         else:
             self._last_energy_per_token = None
 
@@ -225,7 +239,8 @@ class W1W2FFEnergy(FFEnergyBase):
         W1x = self.W1(x)
         W2x = self.W2(x)
         phi, _ = _gelu_and_grad(W1x, self.gelu_grad_method)
-        return -(phi * W2x).sum(dim=-1)
+        inv_sqrt_d = self.intermediate_size ** -0.5
+        return -inv_sqrt_d * (phi * W2x).sum(dim=-1)
 
     # --- private ---------------------------------------------------------- #
 
@@ -513,15 +528,19 @@ class _W1W2Expert(FFEnergyBase):
         self._W2_slice = W2_slice
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1/√expert_I prefactor — see W1W2FFEnergy class docstring. Folded
+        # into the energy itself so the MoE wrapper doesn't need to know
+        # about routing-scale conventions; τ=1 is the natural default.
         W1 = self._W1_slice()  # callable that returns the current view
         W2 = self._W2_slice()
         W1x = x @ W1.t()
         W2x = x @ W2.t()
         phi, phi_prime = _gelu_and_grad(W1x, self.gelu_grad_method)
-        out = phi @ W2 + (phi_prime * W2x) @ W1
+        inv_sqrt_d = self.intermediate_size ** -0.5
+        out = inv_sqrt_d * (phi @ W2 + (phi_prime * W2x) @ W1)
 
         if self._capture_energy:
-            self._last_energy_per_token = -(phi * W2x).sum(dim=-1)
+            self._last_energy_per_token = -inv_sqrt_d * (phi * W2x).sum(dim=-1)
         else:
             self._last_energy_per_token = None
         return out
@@ -532,7 +551,8 @@ class _W1W2Expert(FFEnergyBase):
         W1x = x @ W1.t()
         W2x = x @ W2.t()
         phi, _ = _gelu_and_grad(W1x, self.gelu_grad_method)
-        return -(phi * W2x).sum(dim=-1)
+        inv_sqrt_d = self.intermediate_size ** -0.5
+        return -inv_sqrt_d * (phi * W2x).sum(dim=-1)
 
 
 class _HopfieldExpert(FFEnergyBase):
