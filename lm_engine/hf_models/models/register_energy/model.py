@@ -183,14 +183,54 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         # During cached generation (use_cache=True, not training), registers create a
         # KV-cache length mismatch: prefill caches R+T entries, decode expects T.
         # Two options controlled by config.register_generation_mode:
-        #   "bypass" (default): skip registers entirely during generation — fast but
-        #     registers are inactive at test time (train-test mismatch).
-        #   "no_cache": force use_cache=False, recomputing the full R+T sequence each
-        #     decode step — slow but registers are always active (correct behaviour).
+        #   "bypass" (default, BUGGY for backward compat): cached-decode path runs
+        #     super().forward() (no register re-prepend). The new token attends to
+        #     cached register KVs but its own position_id is R+T+k (off-by-R vs.
+        #     training where content positions are 0..T-1). RoPE rotations are wrong,
+        #     causing catastrophic generation degradation (hop_r256: BBH=0.0738,
+        #     GSM8K=0.0). avg10_norm (logp scoring) is unaffected because logp uses
+        #     a single prefill forward, not cached decode. See REGISTER_DECODE_BUG.md.
+        #   "no_cache" (CORRECT): force use_cache=False below. Each decode step
+        #     re-prefills the full R+T sequence from scratch. ~50x slower for typical
+        #     BBH but produces training-consistent hidden states. Recommended.
+        #   "persistent_cache": NOT YET IMPLEMENTED — would require restructuring the
+        #     decode path to override position_ids and use the extended attention mask.
         effective_use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         register_start = getattr(self.config, 'register_start_layer', 0)
         R = self.n_registers  # convenience alias
+
+        # --------------------------------------------------------------
+        # register_generation_mode: validate, and provide a model-level safety
+        # net for callers that don't go through HF generate().
+        # --------------------------------------------------------------
+        # The primary "no_cache" wiring is in prepare_inputs_for_generation
+        # (CausalLM wrapper), which discards past_kv each step so HF passes
+        # the full input_ids back into forward.  Here we add a belt-and-braces
+        # check: if a non-HF caller invokes forward() directly with
+        # use_cache=True but input_ids covers the full sequence (T_q > 1),
+        # we honour no_cache by simply dropping the cache and recomputing.
+        # We never silently drop the cache when input_ids is a single token
+        # (would lose all context).
+        gen_mode = getattr(self.config, 'register_generation_mode', 'bypass')
+        if gen_mode not in ('bypass', 'no_cache', 'persistent_cache'):
+            raise ValueError(
+                f"register_generation_mode='{gen_mode}' not recognized. "
+                "Valid options: 'bypass' (default, buggy), 'no_cache' (correct, slow)."
+            )
+        if (gen_mode == 'no_cache' and not self.training and effective_use_cache
+                and input_ids is not None and input_ids.shape[-1] > 1):
+            # Full-sequence call (e.g. someone re-feeding the whole prompt each
+            # step): safe to drop cache; the prefill branch below re-prepends
+            # registers and recomputes correctly.
+            past_key_values = None
+            use_cache = False
+            effective_use_cache = False
+        if gen_mode == 'persistent_cache':
+            raise NotImplementedError(
+                "register_generation_mode='persistent_cache' is not implemented. "
+                "Use 'no_cache' for correct generation behaviour."
+            )
 
         # ── Cached-decode step (T=1, past_kv already populated from prefill) ──
         if (effective_use_cache and not self.training
