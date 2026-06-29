@@ -42,7 +42,7 @@ model_args:
   pretrained_config:
     model_type: register_energy
     n_registers: 256
-    register_generation_mode: bypass
+    register_generation_mode: no_cache
     register_start_layer: 0
     num_iterations: 1
     num_pre_layers: 0

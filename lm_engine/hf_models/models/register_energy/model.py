@@ -216,7 +216,7 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         if gen_mode not in ('bypass', 'no_cache', 'persistent_cache'):
             raise ValueError(
                 f"register_generation_mode='{gen_mode}' not recognized. "
-                "Valid options: 'bypass' (default, buggy), 'no_cache' (correct, slow)."
+                "Valid options: 'bypass', 'no_cache', 'persistent_cache'."
             )
         if (gen_mode == 'no_cache' and not self.training and effective_use_cache
                 and input_ids is not None and input_ids.shape[-1] > 1):
@@ -226,11 +226,6 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
             past_key_values = None
             use_cache = False
             effective_use_cache = False
-        if gen_mode == 'persistent_cache':
-            raise NotImplementedError(
-                "register_generation_mode='persistent_cache' is not implemented. "
-                "Use 'no_cache' for correct generation behaviour."
-            )
 
         # ── Cached-decode step (T=1, past_kv already populated from prefill) ──
         if (effective_use_cache and not self.training
@@ -251,9 +246,14 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                             attention_mask = torch.cat([pad, attention_mask], dim=1)
                     except Exception:
                         pass
+                # persistent_cache: caller (prepare_inputs_for_generation) supplies
+                # position_ids = content-position (T+k) so RoPE matches training.
+                # bypass: position_ids=None → super computes from cumsum(mask) →
+                # ends up at R+T+k (off by R; the documented bug).
+                pos_to_use = position_ids if gen_mode == 'persistent_cache' else None
                 return super().forward(
                     input_ids=input_ids, past_key_values=past_key_values,
-                    attention_mask=attention_mask, position_ids=None,
+                    attention_mask=attention_mask, position_ids=pos_to_use,
                     use_cache=use_cache, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
                 )
             else:
