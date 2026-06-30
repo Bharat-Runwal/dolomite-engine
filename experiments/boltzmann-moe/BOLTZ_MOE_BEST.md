@@ -99,6 +99,7 @@ is included as the structurally-different reference.
 | **gptswitchmoe-680M** @ 48k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 25.2 B | 54.17 | 25.66 | 24.08 | 1.86 | structural ablation, gap closing |
 | **gptswitchmoe-680M** @ 81k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 42.5 B | 54.95 | 22.52 | 23.96 | 1.90 | structural ablation, ~40B mid; PPL nearly matches Boltz |
 | **gptswitchmoe-680M** @ 88k | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 46.1 B | 56.02 | 21.90 | 25.04 | 2.69 | structural ablation, 46B mid; PPL passes Boltz @ 40B but Boltz interp at 46B still wins |
+| **gptswitchmoe-680M** @ 124k FINAL | 11 GPT + 1 GPT-Switch×6 (K=8 I=4096) | ~730 / -- | 65.0 B | **57.82** | **19.81** | 25.80 | 1.97 | 🏁 final — matched-structure ablation; Boltz wins by just +0.65pp avg / -0.48 PPL |
 | **680M Boltz** @ 30k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 15.7 B | **53.66** | **26.84** | 25.42 | 1.90 | iso-tokens vs gptswitchmoe-680M |
 | **680M Boltz** @ 76k (energy-attn + Boltz-MoE, recursive) | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 39.8 B | 55.93 | 22.41 | 25.30 | 2.39 | iso-tokens vs gptmoe trio at ~30-40B |
 | **680M Boltz** @ 124k FINAL | 11 GPT + 1 EGPT×6 (K=8 I=4096) | 679 / 679 | 65.0 B | **58.47** | **19.33** | 26.33 | 2.08 | 🏆 final — best on every metric in our table |
@@ -132,8 +133,12 @@ Story (updated with all four 65B-token FINAL snapshots):
 - **Structural ablation (gptswitchmoe-680M)** progression:
   - 15.2B: -1.6pp avg / +0.9 PPL behind 680M Boltz
   - 25.2B: ~-0.4pp avg / -1.0 PPL (gap closing)
-  - 42.5B: ~-1.0pp avg / +0.1 PPL (gap stable around 1pp avg, PPL essentially tied)
-  - Same scaffold w/o energy-attn; PPL nearly matches Boltz; avg-acc gap persists.
+  - 42.5B: ~-1.0pp avg / +0.1 PPL (gap stable around 1pp avg)
+  - 46.1B: ~-0.9pp avg / -0.5 PPL (Boltz still wins ~1pp/0.5)
+  - **65.0B FINAL: -0.65pp avg / -0.48 PPL behind 680M Boltz**
+  - Same scaffold w/o energy-attn; FINAL energy-attn contribution is **~0.5-0.7pp avg / ~0.5 PPL** —
+    real but small. The biggest per-task wins for Boltz are **boolq +3.79pp** and **sciq +1.50pp**;
+    gptswitch wins **copa +2.00pp** and **openbookqa +1.40pp**.
 - **Honest conclusion**: at iso-tokens (65B), the architecture advantages are
   **real but modest** — Boltz-MoE wins by 0.4-2.4pp avg / 0.4-2.3 PPL across
   matched MoE baselines. The +4.4pp / -6.9 PPL vs scale_v9 was inflated by

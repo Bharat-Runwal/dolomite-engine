@@ -89,6 +89,7 @@ MODELS = [
     ("gptswitchmoe-680M @ 25.2B", 730, 730, 0.5417, 25.66, 1.86, 25.17, "switch+boltz", "H-series"),
     ("gptswitchmoe-680M @ 42.5B", 730, 730, 0.5495, 22.52, 1.90, 42.47, "switch+boltz", "H-series"),
     ("gptswitchmoe-680M @ 46.1B", 730, 730, 0.5602, 21.90, 2.69, 46.13, "switch+boltz", "H-series"),
+    ("gptswitchmoe-680M @ 65.0B FINAL", 730, 730, 0.5782, 19.81, 1.97, 65.01, "switch+boltz", "H-series"),
 ]
 
 SHORT_NAMES = {
@@ -134,6 +135,7 @@ SHORT_NAMES = {
     "gptswitchmoe-680M @ 25.2B": "gptswitch-680M @25B",
     "gptswitchmoe-680M @ 42.5B": "gptswitch-680M @42B",
     "gptswitchmoe-680M @ 46.1B": "gptswitch-680M @46B",
+    "gptswitchmoe-680M @ 65.0B FINAL": "gptswitch-680M @65B (final)",
 }
 
 # ── Style ──────────────────────────────────────────────────────────────────────
