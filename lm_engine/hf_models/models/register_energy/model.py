@@ -451,14 +451,32 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         mamba_mask_computed = False
 
         # Register attention-balance auxiliary loss bookkeeping. Active only when
-        # training AND coef > 0. We set the per-attention-module capture flag on
-        # each block whose layer index >= register_start before iterating, then
-        # read the cached mean mass after each block forward and accumulate the
-        # per-layer hinge max(0, mass_l - threshold).
+        # training AND coef > 0. The capture flag on each block's attention
+        # module is set ONCE up front (before the block loop) and left in place
+        # for the full forward pass — this matters under gradient checkpointing,
+        # where the block recompute pass must see the SAME capture state as the
+        # original forward; otherwise the saved-vs-recomputed tensor counts
+        # disagree (CheckpointError). The leaf module's own self.training and
+        # (self.layer_idx >= self._register_start_layer) checks gate per-layer.
         reg_balance_coef = float(getattr(self.config, 'register_attn_balance_coef', 0.0))
         reg_balance_thr = float(getattr(self.config, 'register_attn_balance_threshold', 0.5))
         do_reg_balance = self.training and reg_balance_coef > 0 and self.n_registers > 0
         reg_balance_loss = torch.tensor(0.0, device=device) if do_reg_balance else None
+
+        block_attns: list = [None] * len(self.layer_iterations)
+        if do_reg_balance:
+            for i in range(len(self.layer_iterations)):
+                ba = self._get_block_attn(self.h[i])
+                if ba is not None and hasattr(ba, '_capture_register_attn_mass'):
+                    ba._capture_register_attn_mass = True
+                    ba._n_registers = self.n_registers
+                    # Drive the per-layer gate inside the attention module:
+                    # the module compares its own self.layer_idx to
+                    # self._register_start_layer. Layers below register_start
+                    # therefore skip the side compute on their own.
+                    ba._register_start_layer = register_start
+                    ba._register_attn_mass = None
+                    block_attns[i] = ba
 
         layer_id = 0
         for i, num_iter in enumerate(self.layer_iterations):
@@ -486,21 +504,8 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                           getattr(block, 'sequence_mixer_type', '') == 'energy_attention')
             prev_energy = None
 
-            # Set register attn-balance capture flag on this block's attention
-            # module before its iterations. Only active for layers where
-            # registers are actually injected (i >= register_start).
-            block_attn = self._get_block_attn(block) if do_reg_balance else None
-            capture_this_block = (
-                do_reg_balance
-                and block_attn is not None
-                and i >= register_start
-                and hasattr(block_attn, '_capture_register_attn_mass')
-            )
-            if capture_this_block:
-                block_attn._capture_register_attn_mass = True
-                block_attn._n_registers = self.n_registers
-                block_attn._register_start_layer = 0  # already gated by i>=register_start
-                block_attn._register_attn_mass = None
+            block_attn = block_attns[i] if do_reg_balance else None
+            capture_this_block = (do_reg_balance and block_attn is not None and i >= register_start)
 
             for j in range(effective_iter):
                 if self.halt_thresholds is not None and j > 0 and i in self.halt_thresholds:
@@ -527,8 +532,10 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                 layer_id += 1
 
                 # Accumulate per-iteration register attn-balance hinge.
+                # Reading mass via getattr because the attention attribute may
+                # not exist on non-softmax sequence mixers (mamba, rnn, gru).
                 if capture_this_block:
-                    mass = block_attn._register_attn_mass
+                    mass = getattr(block_attn, '_register_attn_mass', None)
                     if mass is not None:
                         # per-iter hinge: max(0, mass - threshold)
                         reg_balance_loss = reg_balance_loss + torch.clamp(
@@ -548,14 +555,21 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                     noise_scale = (2 * self.iter_noise_eta) ** 0.5
                     hidden_states = hidden_states + noise_scale * torch.randn_like(hidden_states)
 
-            # Clear the capture flag now that we're done with this block, to
-            # avoid leaking the manual-attn path into subsequent eval/forward calls.
-            if capture_this_block:
-                block_attn._capture_register_attn_mass = False
-                block_attn._register_attn_mass = None
-
             if effective_iter < num_iter:
                 layer_id += (num_iter - effective_iter)
+
+        # NOTE: we DO NOT clear the capture flag at the end of forward.
+        # Under non-reentrant gradient checkpointing, backward triggers a
+        # recompute of the block forward; that recompute runs with whatever
+        # state the attention module currently has. Clearing the flag here
+        # would cause the recompute to take a different code path (side compute
+        # skipped) than the original forward, producing a CheckpointError
+        # about mismatched saved-vs-recomputed tensor counts.
+        # The side path inside the attention module is itself gated by
+        # `self.training`, so it stays inert during eval/generate even with
+        # the flag still True. The `_register_attn_mass` attribute is
+        # overwritten on each forward and not relied upon externally between
+        # calls, so leaving the flag True between training steps is safe.
 
         # ----------------------------------------------------------------
         # 6. Strip register positions, then final layer norm

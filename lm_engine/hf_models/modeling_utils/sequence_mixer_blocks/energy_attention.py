@@ -234,45 +234,37 @@ class EnergyAttention_QK(nn.Module):
 
         W_Q = self._get_q_weight_for_output()
 
-        # ---- register attention-balance capture path ------------------------
+        # ---- register attention-balance capture (side measurement) ----------
+        # Side softmax over (content_queries × all_keys) only — does not touch
+        # the main attention output, so checkpoint recompute sees identical
+        # tensor metadata. Gradient still flows through Q, K to train the loss.
         _capture_reg = (
             getattr(self, '_capture_register_attn_mass', False)
             and getattr(self, '_n_registers', 0) > 0
             and self.layer_idx >= getattr(self, '_register_start_layer', 0)
             and not self.use_padding_free_transformer
+            and self.training
         )
         if _capture_reg:
             R = self._n_registers
-            scale = 1.0 / math.sqrt(self.head_dim)
-            # query/key currently [B, H, T, d_h] (pre-transpose).
-            scores = torch.matmul(query, key.transpose(-2, -1)) * scale  # [B, H, T_q, T_k]
-            T_q = scores.shape[-2]
-            T_k = scores.shape[-1]
-            if attention_mask is not None:
-                scores = scores + attention_mask
-            elif self.causal:
-                row = torch.arange(T_q, device=scores.device).unsqueeze(-1)
-                col = torch.arange(T_k, device=scores.device).unsqueeze(0)
-                causal_mask = (col > (row + (T_k - T_q)))
-                scores = scores.masked_fill(causal_mask, float('-inf'))
-            attn_probs = F.softmax(scores, dim=-1)
+            # query/key here are [B, H, T, d_h] (energy attention always pre-transposes).
+            T_q = query.shape[-2]
+            T_k = key.shape[-2]
             if T_q > R and T_k >= R:
-                content_to_reg = attn_probs[..., R:, :R].sum(dim=-1)
-                self._register_attn_mass = content_to_reg.mean()
+                scale = 1.0 / math.sqrt(self.head_dim)
+                q_content = query[..., R:, :]
+                scores = torch.matmul(q_content, key.transpose(-2, -1)) * scale  # [B, H, T_q-R, T_k]
+                if attention_mask is not None:
+                    scores = scores + attention_mask[..., R:, :]
+                elif self.causal:
+                    row = torch.arange(R, T_q, device=scores.device).unsqueeze(-1)
+                    col = torch.arange(T_k, device=scores.device).unsqueeze(0)
+                    causal_mask = (col > (row + (T_k - T_q)))
+                    scores = scores.masked_fill(causal_mask, float('-inf'))
+                probs = F.softmax(scores, dim=-1)
+                self._register_attn_mass = probs[..., :R].sum(-1).mean()
             else:
                 self._register_attn_mass = None
-            if self.training and self.softmax_dropout_p > 0:
-                attn_probs = self.softmax_dropout(attn_probs)
-            attn_output = torch.matmul(attn_probs, value)            # [B, H, T_q, d_h]
-
-            if self.add_wv_wo:
-                hidden_states = self.W_O(attn_output.reshape(batch_size, query_length, self.hidden_size))
-            else:
-                hidden_states = torch.einsum("bhts,hcs->btc", attn_output, W_Q)
-            hidden_states = self.dropout(hidden_states)
-            if not torch.compiler.is_compiling():
-                self._log_norms(hidden_states, W_Q)
-            return hidden_states
 
         if use_flash_attention_2 or use_flash_attention_3:
             assert accelerator == Accelerator.cuda
