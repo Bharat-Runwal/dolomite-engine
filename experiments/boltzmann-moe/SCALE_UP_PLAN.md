@@ -52,13 +52,16 @@ not iterated), K=8 experts, GPT FFN at 4·d width.
 
 ### 3B pick: `h2_boltz_moe_3b_d2560_18gpt_4egpt_8x4096.yml`
 
-- **d=2560, 18 GPT + 4 EGPT, K=8, I_e=4096 → 2.92B**
-- 18 GPT layers covers the user-requested 12-24 range comfortably; 4 EGPT
-  blocks hits the low end of the 4-6 requested range. We pick 4 over 6 to
-  keep the FFN:Attn balance closer to GPT-side (the 680M imbalance hurt
-  every B-series MoE — see CLAUDE.md).
+- **d=2560, 14 GPT + 4 EGPT, K=16, I_e=4096 → 3.17B** (revised from initial
+  K=8 design; bumped to K=16 to follow modern MoE scaling).
+- 14 GPT layers covers the user-requested 12-24 range; 4 EGPT blocks
+  hits the low end of the 4-6 requested range. Dropping 4 GPT layers
+  from the initial 18 GPT compensates for the extra ~670M in expanded
+  MoE params from K=8→16, keeping total close to 3B.
 - head_dim=128, num_heads=20 (d/head_dim = 20, divides cleanly).
 - Attention multiplier = 1/sqrt(128) ≈ 0.0884.
+- 4 EGPT blocks each iterated 3× with `iter_dropout_range=1` →
+  12 effective EGPT passes, training samples [2, 4] iters per block.
 
 ---
 
@@ -78,11 +81,15 @@ not iterated), K=8 experts, GPT FFN at 4·d width.
 
 ### 7B pick: `h3_boltz_moe_7b_d4096_20gpt_4egpt_8x4096.yml`
 
-- **d=4096, 20 GPT + 4 EGPT, K=8, I_e=4096 → 7.12B**
-- 20 GPT layers, 4 EGPT, K=8 experts. Hits target almost exactly.
+- **d=4096, 16 GPT + 4 EGPT, K=16, I_e=4096 → 7.12B** (revised from initial
+  K=8 design; bumped to K=16 to follow modern MoE scaling).
+- 16 GPT layers, 4 EGPT, K=16 experts. Trading 4 GPT layers for K=8→16
+  happens to leave total exactly at 7.12B.
 - head_dim=128, num_heads=32 — matches Llama-2-7B / Mistral-7B head config.
-- Same FFN:Attn ratio reasoning as 3B: 4 EGPT > 6 to keep MoE total mass in
-  check (EGPT block is heavier on FFN than GPT).
+- 4 EGPT blocks each iterated 3× with `iter_dropout_range=1` →
+  12 effective EGPT passes, training samples [2, 4] iters per block.
+- EGPT-block compute ~2× vs K=8 because Boltzmann soft routing
+  activates all K experts per token.
 
 ---
 
