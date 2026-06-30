@@ -98,6 +98,7 @@ class CausalLMModelMixin(PreTrainedModelMixin):
         past_key_values = transformer_outputs.past_key_values
         energy_descent_loss = transformer_outputs.energy_descent_loss
         energy_action_loss = transformer_outputs.energy_action_loss
+        register_attn_balance_loss = getattr(transformer_outputs, 'register_attn_balance_loss', None)
         del transformer_outputs
 
         lm_logits = None
@@ -147,6 +148,12 @@ class CausalLMModelMixin(PreTrainedModelMixin):
         if loss is not None and energy_action_loss is not None:
             loss = loss + energy_action_loss
 
+        # Register attention-balance auxiliary loss: penalises content→register
+        # attention mass exceeding the configured threshold. Passed via model
+        # output for compile safety.
+        if loss is not None and register_attn_balance_loss is not None:
+            loss = loss + register_attn_balance_loss
+
         return CausalLMOutputWithPast(
             loss=loss,
             aux_loss=aux_loss,
@@ -155,6 +162,7 @@ class CausalLMModelMixin(PreTrainedModelMixin):
             last_hidden_state=hidden_states,
             energy_descent_loss=energy_descent_loss,
             energy_action_loss=energy_action_loss,
+            register_attn_balance_loss=register_attn_balance_loss,
         )
 
     def get_lm_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

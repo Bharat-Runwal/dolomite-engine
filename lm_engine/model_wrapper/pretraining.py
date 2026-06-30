@@ -378,6 +378,9 @@ class ModelWrapperForPretraining(ModelWrapper):
         energy_action_loss = getattr(model_outputs, "energy_action_loss", None)
         if energy_action_loss is not None:
             energy_aux = energy_action_loss if energy_aux is None else energy_aux + energy_action_loss
+        register_attn_balance_loss = getattr(model_outputs, "register_attn_balance_loss", None)
+        if register_attn_balance_loss is not None:
+            energy_aux = register_attn_balance_loss if energy_aux is None else energy_aux + register_attn_balance_loss
 
         aux_loss = getattr(model_outputs, "aux_loss", 0)
 
@@ -400,6 +403,8 @@ class ModelWrapperForPretraining(ModelWrapper):
             output["energy_action_loss"] = energy_action_loss
         if energy_descent_loss is not None:
             output["energy_descent_loss"] = energy_descent_loss
+        if register_attn_balance_loss is not None:
+            output["register_attn_balance_loss"] = register_attn_balance_loss
 
         return output
 

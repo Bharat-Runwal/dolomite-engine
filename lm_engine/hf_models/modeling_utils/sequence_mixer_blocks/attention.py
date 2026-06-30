@@ -138,6 +138,18 @@ class Attention(nn.Module):
         mark_parameter_as_mup_learning_rate(self.c_attn.weight)
         mark_parameter_as_mup_learning_rate(self.c_proj.weight)
 
+        # ----- register attention-balance aux loss hooks ---------------------
+        # Set externally by RegisterEnergyModel.forward() before each block forward.
+        # When _capture_register_attn_mass is True (and _n_registers > 0 and
+        # self.layer_idx >= _register_start_layer), the forward will fall back to
+        # a manual Q @ K^T / sqrt(d_h) path so the attention probabilities are
+        # available, and cache mean content→register attention mass on
+        # _register_attn_mass. Otherwise the regular fused path runs (zero cost).
+        self._capture_register_attn_mass: bool = False
+        self._n_registers: int = 0
+        self._register_start_layer: int = 0
+        self._register_attn_mass: torch.Tensor | None = None
+
 
     def extra_repr(self):
         return f"sliding_window={self.sliding_window}, {super().extra_repr()}"
@@ -195,6 +207,67 @@ class Attention(nn.Module):
         if past_key_values is not None:
             cache_idx = layer_id if layer_id is not None else self.layer_idx
             key, value = past_key_values.update(key_states=key, value_states=value, layer_idx=cache_idx)
+
+        # ---- register attention-balance capture path ------------------------
+        # If asked to capture content→register attention mass on this layer,
+        # take the manual matmul path so attn_probs is materialised. This doubles
+        # this layer's attention compute, so it's gated by an explicit flag set
+        # by the outer wrapper only when training with the aux loss enabled.
+        _capture_reg = (
+            getattr(self, '_capture_register_attn_mass', False)
+            and getattr(self, '_n_registers', 0) > 0
+            and self.layer_idx >= getattr(self, '_register_start_layer', 0)
+            and not self.use_padding_free_transformer
+        )
+        if _capture_reg:
+            R = self._n_registers
+            scale = (
+                1.0 / math.sqrt(self.head_dim)
+                if self.attention_multiplier is None
+                else self.attention_multiplier
+            )
+            # key/value are [B, H_kv, T_k, d_h]; broadcast over query groups via GQA-style repeat.
+            qheads_per_kv = self.num_heads // self.num_key_value_heads
+            if qheads_per_kv > 1:
+                k_full = key.repeat_interleave(qheads_per_kv, dim=1)
+            else:
+                k_full = key
+            # scores: [B, H, T_q, T_k]
+            scores = torch.matmul(query, k_full.transpose(-2, -1)) * scale
+            T_q = scores.shape[-2]
+            T_k = scores.shape[-1]
+            # Apply attention_mask (additive float mask of shape [B, 1, T_q, T_k]) if provided.
+            if attention_mask is not None:
+                scores = scores + attention_mask
+            elif self.causal:
+                # Build a causal mask aligned to the bottom-right of the [T_q, T_k] block.
+                # T_k >= T_q in the prefill-with-cache case; otherwise T_k == T_q.
+                row = torch.arange(T_q, device=scores.device).unsqueeze(-1)
+                col = torch.arange(T_k, device=scores.device).unsqueeze(0)
+                causal_mask = (col > (row + (T_k - T_q)))
+                scores = scores.masked_fill(causal_mask, float('-inf'))
+            attn_probs = F.softmax(scores, dim=-1)
+            # Content queries are rows R..T_q-1; register keys are cols 0..R-1.
+            # If T_q == 1 (decode), there are no content queries to score over →
+            # skip capture for safety (this path is training-only anyway).
+            if T_q > R and T_k >= R:
+                content_to_reg = attn_probs[..., R:, :R].sum(dim=-1)  # [B, H, T_q-R]
+                self._register_attn_mass = content_to_reg.mean()
+            else:
+                self._register_attn_mass = None
+            if self.training and self.softmax_dropout_p > 0:
+                attn_probs = self.softmax_dropout(attn_probs)
+            # value: [B, H_kv, T_k, d_h]; repeat to align H heads
+            if qheads_per_kv > 1:
+                v_full = value.repeat_interleave(qheads_per_kv, dim=1)
+            else:
+                v_full = value
+            attn_out = torch.matmul(attn_probs, v_full)  # [B, H, T_q, d_h]
+            attn_out = attn_out.transpose(1, 2).contiguous()
+            attn_out = attn_out.reshape(batch_size, query_length, self.num_heads * self.head_dim)
+            attn_out = self.c_proj(attn_out)
+            attn_out = self.dropout(attn_out)
+            return attn_out
 
         if use_flash_attention_2 or use_flash_attention_3:
             assert accelerator == Accelerator.cuda

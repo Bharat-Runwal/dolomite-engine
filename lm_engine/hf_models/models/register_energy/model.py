@@ -73,6 +73,18 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                 torch.randn(self.n_registers, config.hidden_size) * config.initializer_range
             )
 
+    def _get_block_attn(self, block):
+        """Return the attention sub-module on a block, or None.
+
+        EnergyBlocks expose attention either as `self.attn` (energy_attention or
+        parallel_gpt path) or `self.sequence_mixer` (standard GPT-style path,
+        constructed in the else branch of EnergyBlock.__init__).
+        """
+        attn = getattr(block, 'attn', None)
+        if attn is not None:
+            return attn
+        return getattr(block, 'sequence_mixer', None)
+
     def _extend_attention_mask_for_registers(
         self,
         causal_mask: torch.Tensor | None,
@@ -438,6 +450,16 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         energy_descent_loss = torch.tensor(0.0, device=device)
         mamba_mask_computed = False
 
+        # Register attention-balance auxiliary loss bookkeeping. Active only when
+        # training AND coef > 0. We set the per-attention-module capture flag on
+        # each block whose layer index >= register_start before iterating, then
+        # read the cached mean mass after each block forward and accumulate the
+        # per-layer hinge max(0, mass_l - threshold).
+        reg_balance_coef = float(getattr(self.config, 'register_attn_balance_coef', 0.0))
+        reg_balance_thr = float(getattr(self.config, 'register_attn_balance_threshold', 0.5))
+        do_reg_balance = self.training and reg_balance_coef > 0 and self.n_registers > 0
+        reg_balance_loss = torch.tensor(0.0, device=device) if do_reg_balance else None
+
         layer_id = 0
         for i, num_iter in enumerate(self.layer_iterations):
             # Selective injection: prepend registers at layer register_start
@@ -464,6 +486,22 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                           getattr(block, 'sequence_mixer_type', '') == 'energy_attention')
             prev_energy = None
 
+            # Set register attn-balance capture flag on this block's attention
+            # module before its iterations. Only active for layers where
+            # registers are actually injected (i >= register_start).
+            block_attn = self._get_block_attn(block) if do_reg_balance else None
+            capture_this_block = (
+                do_reg_balance
+                and block_attn is not None
+                and i >= register_start
+                and hasattr(block_attn, '_capture_register_attn_mass')
+            )
+            if capture_this_block:
+                block_attn._capture_register_attn_mass = True
+                block_attn._n_registers = self.n_registers
+                block_attn._register_start_layer = 0  # already gated by i>=register_start
+                block_attn._register_attn_mass = None
+
             for j in range(effective_iter):
                 if self.halt_thresholds is not None and j > 0 and i in self.halt_thresholds:
                     h_norm = hidden_states.norm(dim=-1).mean()
@@ -488,6 +526,15 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                 )
                 layer_id += 1
 
+                # Accumulate per-iteration register attn-balance hinge.
+                if capture_this_block:
+                    mass = block_attn._register_attn_mass
+                    if mass is not None:
+                        # per-iter hinge: max(0, mass - threshold)
+                        reg_balance_loss = reg_balance_loss + torch.clamp(
+                            mass - reg_balance_thr, min=0.0
+                        )
+
                 if has_energy:
                     curr_energy = block.energy_per_token(
                         hidden_states, rope_cos_sin=extended_rope_cos_sin
@@ -501,6 +548,12 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                     noise_scale = (2 * self.iter_noise_eta) ** 0.5
                     hidden_states = hidden_states + noise_scale * torch.randn_like(hidden_states)
 
+            # Clear the capture flag now that we're done with this block, to
+            # avoid leaking the manual-attn path into subsequent eval/forward calls.
+            if capture_this_block:
+                block_attn._capture_register_attn_mass = False
+                block_attn._register_attn_mass = None
+
             if effective_iter < num_iter:
                 layer_id += (num_iter - effective_iter)
 
@@ -511,9 +564,11 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         hidden_states = self.ln_f(hidden_states)
 
         edl = energy_descent_loss * self.energy_descent_loss_coef if self.energy_descent_loss_coef > 0 else None
+        rabl = (reg_balance_loss * reg_balance_coef) if (do_reg_balance and reg_balance_loss is not None) else None
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             energy_descent_loss=edl,
+            register_attn_balance_loss=rabl,
         )

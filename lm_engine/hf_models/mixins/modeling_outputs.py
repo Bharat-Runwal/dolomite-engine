@@ -14,6 +14,7 @@ class BaseModelOutputWithPast(ModelOutput):
     past_key_values: tuple[tuple[torch.Tensor]] | None = None
     energy_descent_loss: torch.Tensor | None = None
     energy_action_loss: torch.Tensor | None = None
+    register_attn_balance_loss: torch.Tensor | None = None
 
 
 @dataclass
@@ -25,6 +26,7 @@ class CausalLMOutputWithPast(ModelOutput):
     last_hidden_state: torch.Tensor | None = None
     energy_descent_loss: torch.Tensor | None = None
     energy_action_loss: torch.Tensor | None = None
+    register_attn_balance_loss: torch.Tensor | None = None
 
 
 @dataclass
