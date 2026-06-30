@@ -50,7 +50,7 @@ not iterated), K=8 experts, GPT FFN at 4·d width.
 | **2560** | **18** | **4** | **10240** | **4096** | **257M** | **1887M** | **776M** | **2.92B** ★ |
 | 2560 | 16 | 6 | 10240 | 4096 | 257M | 1678M | 1164M | 3.10B |
 
-### 3B pick: `h2_boltz_moe_3b_d2560_18gpt_4egpt_8x4096.yml`
+### 3B pick: `h2_boltz_moe_3b_d2560_14gpt_4egpt_16x4096.yml`
 
 - **d=2560, 14 GPT + 4 EGPT, K=16, I_e=4096 → 3.17B** (revised from initial
   K=8 design; bumped to K=16 to follow modern MoE scaling).
@@ -79,7 +79,7 @@ not iterated), K=8 experts, GPT FFN at 4·d width.
 | 4096 | 18 | 6 | 16384 | 4096 | 411M | 4832M | 2013M | 7.26B |
 | 4096 | 16 | 6 | 16384 | 4096 | 411M | 4295M | 2013M | 6.72B |
 
-### 7B pick: `h3_boltz_moe_7b_d4096_20gpt_4egpt_8x4096.yml`
+### 7B pick: `h3_boltz_moe_7b_d4096_16gpt_4egpt_16x4096.yml`
 
 - **d=4096, 16 GPT + 4 EGPT, K=16, I_e=4096 → 7.12B** (revised from initial
   K=8 design; bumped to K=16 to follow modern MoE scaling).
@@ -179,8 +179,8 @@ Rationale:
 ## Files written
 
 ```
-configs/boltzmann_moe/h2_boltz_moe_3b_d2560_18gpt_4egpt_8x4096.yml
-configs/boltzmann_moe/h3_boltz_moe_7b_d4096_20gpt_4egpt_8x4096.yml
+configs/boltzmann_moe/h2_boltz_moe_3b_d2560_14gpt_4egpt_16x4096.yml
+configs/boltzmann_moe/h3_boltz_moe_7b_d4096_16gpt_4egpt_16x4096.yml
 experiments/boltzmann-moe/SCALE_UP_PLAN.md                          # this file
 ```
 
@@ -200,7 +200,7 @@ bsub -q preemptable -G grp_preemptable \
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=$REPO:${PYTHONPATH:-}
 bash $REPO/scripts/common/pretrain.sh \
-    $REPO/configs/boltzmann_moe/h2_boltz_moe_3b_d2560_18gpt_4egpt_8x4096.yml
+    $REPO/configs/boltzmann_moe/h2_boltz_moe_3b_d2560_14gpt_4egpt_16x4096.yml
 EOF
 ```
 

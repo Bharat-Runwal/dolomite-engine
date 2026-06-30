@@ -1,21 +1,22 @@
-# h2_boltz_moe_3b: BoltzmannMoE scaled to ~3.17B params
-# Architecture: d=2560, 14 GPT + 4 EGPT (distinct, each iterated 3×), 16 experts × I_e=4096
+# h3_boltz_moe_7b: BoltzmannMoE scaled to ~7.12B params
+# Architecture: d=4096, 16 GPT + 4 EGPT (distinct, each iterated 3×), 16 experts × I_e=4096
 #
-# Layers 1-14:  softmax_attention + SwiGLU MLP (I_gpt=10240 = 4×d)              — GPT prefix
-# Layers 15-18: energy_attention  + BoltzmannMoE_Energy_MLP (4 distinct, ×3)    — EGPT tail
+# Layers 1-16:  softmax_attention + SwiGLU MLP (I_gpt=16384 = 4×d)              — GPT prefix
+# Layers 17-20: energy_attention  + BoltzmannMoE_Energy_MLP (4 distinct, ×3)    — EGPT tail
 #                16 experts × 4096 per expert = 65536 total intermediate
 #                Each block iterated 3× → 12 effective EGPT passes
 #                Iteration dropout: training samples 2-4 iterations per block, test=3.
 #
 # Param breakdown (exact, recurrence adds compute not params):
-#   Embedding (tied):  257M  (100352 × 2560)
-#   14 GPT layers:    1468M  (14 × (4×2560² + 3×2560×10240))
-#   4 EGPT blocks:    1447M  (4  × (4×2560² + 2×2560×65536))
-#   TOTAL:            3172M  (3.17B)
+#   Embedding (tied):  411M  (100352 × 4096)
+#   16 GPT layers:    4295M  (16 × (4×4096² + 3×4096×16384))
+#   4 EGPT blocks:    2416M  (4  × (4×4096² + 2×4096×65536))
+#   TOTAL:            7122M  (7.12B)
 #
 # Note: K bumped from 8 (at 680M) to 16 here to follow modern MoE scaling
 # (more experts at larger scale). EGPT-block compute ≈ 2× vs K=8 because
-# Boltzmann soft routing activates all K experts per token.
+# Boltzmann soft routing activates all K experts per token. Trading 4 GPT
+# layers for K=8→16 happens to keep the total at exactly 7.12B.
 #
 # ── PATHS TO EDIT FOR YOUR ENVIRONMENT ────────────────────────────────────────
 # data_cache_path:   per-user megatron cache (any writable dir)
@@ -26,19 +27,25 @@
 #                    on a different filesystem.
 # ──────────────────────────────────────────────────────────────────────────────
 #
-# Attention: head_dim=128, num_heads=20, rope_dim=96 (same fraction as 680M).
+# Attention: head_dim=128, num_heads=32, rope_dim=96 (same fraction as 680M).
 #
 # Recurrence knob: layer_iterations sets each EGPT block to iterate 3× and
 # enables iter_dropout_range=1 (training samples [2, 4] iterations per block).
 # To disable recurrence: set the last 4 entries to 1 and iter_dropout_range=0.
 #
-# Training: ~80B tokens (~152k steps × 32 GPUs × µbs=2 × accum=8 × seq=4096
-# = 524288 tokens/step; 80B ÷ 524288 ≈ 152600 steps).
-# Recommended hardware: 4 nodes × 8 H100 = 32 GPUs.
-# Wall-clock estimate with 3× EGPT recurrence: ~4.5× slower than 680M → ~4 days
-# for 80B tokens on 32 H100s.
+# Training: ~140B tokens (~133k steps × 32 GPUs × µbs=2 × accum=8 × seq=4096
+# = 1.05M tokens/step; 140B ÷ 1048576 ≈ 133500 steps).
+# Recommended hardware: 4 nodes × 8 H100 = 32 GPUs (consider 8 nodes for speed).
+# Wall-clock estimate with 3× EGPT recurrence: ~9× slower than 680M → ~12 days
+# for 140B tokens on 32 GPUs, or ~6 days on 64 GPUs. Use save_interval=2000 +
+# checkpointed auto-resume.
 #
-# LR: 6e-4 (Chinchilla-style scaling from 1e-3 at 680M).
+# LR: 3e-4 (Chinchilla-style scaling from 1e-3 at 680M).
+#
+# Memory caveat: 7B with d=4096 in bf16 needs ~14GB for weights + ~14GB grads
+# + ~28GB optimizer state = ~56GB/GPU before activations. FSDP-2 shards across
+# 32 GPUs → ~1.75GB sharded per GPU + activations. µbs=2 should fit on H100 80GB
+# with block gradient checkpointing.
 
 datasets:
   - class_name: MegatronDataset
@@ -65,8 +72,8 @@ model_args:
     num_iterations: 1
     num_pre_layers: 0
     num_post_layers: 0
-    # 14 GPT layers (×1) + 4 EGPT-Boltz blocks (each ×3 = recurrent).
-    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3]
+    # 16 GPT layers (×1) + 4 EGPT-Boltz blocks (each ×3 = recurrent).
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3]
     # Iteration dropout: training samples per-block iters from [max(1, T - 1), T + 1].
     # For T=3 this gives {2, 3, 4}. Enables test-time compute scaling.
     iter_dropout_range: 1
@@ -75,8 +82,8 @@ model_args:
     normalization_function: rmsnorm
     position_embedding_type: rope
     rope_dim: 96
-    hidden_size: 2560
-    num_layers: 18
+    hidden_size: 4096
+    num_layers: 20
     init_method: normal
     tie_word_embeddings: true
     energy_proj_type: dual_unconstrained
@@ -86,7 +93,7 @@ model_args:
     vocab_size: 100352
     max_position_embeddings: 4096
     sequence_mixer_blocks:
-      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 20, num_key_value_heads: 20, add_bias: false, attention_multiplier: 0.08838834764831845}
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 32, num_key_value_heads: 32, add_bias: false, attention_multiplier: 0.08838834764831845}
       - *gpt_attn
       - *gpt_attn
       - *gpt_attn
@@ -100,12 +107,16 @@ model_args:
       - *gpt_attn
       - *gpt_attn
       - *gpt_attn
-      - &egpt_attn {sequence_mixer_type: energy_attention, num_attention_heads: 20, num_key_value_heads: 20, add_bias: false, attention_multiplier: 0.08838834764831845}
+      - *gpt_attn
+      - *gpt_attn
+      - &egpt_attn {sequence_mixer_type: energy_attention, num_attention_heads: 32, num_key_value_heads: 32, add_bias: false, attention_multiplier: 0.08838834764831845}
       - *egpt_attn
       - *egpt_attn
       - *egpt_attn
     mlp_blocks:
-      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 10240, add_bias: false}
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 16384, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
       - *gpt_ffn
       - *gpt_ffn
       - *gpt_ffn
@@ -140,7 +151,7 @@ tuning_args:
 save_args:
   # Relative to dolomite-engine repo root. pretrain.sh should be invoked from
   # the repo root for this to resolve correctly.
-  save_path: experiments/boltzmann-moe/results/h2_boltz_moe_3b_d2560_18gpt_4egpt_8x4096
+  save_path: experiments/boltzmann-moe/results/h3_boltz_moe_7b_d4096_16gpt_4egpt_16x4096
   save_interval: 2000
   max_to_keep: 2
 
@@ -149,10 +160,10 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: h2_boltz_moe_3b_d2560_18gpt_4egpt_8x4096
+    name: h3_boltz_moe_7b_d4096_16gpt_4egpt_16x4096
 
 training_parameters:
-  num_training_steps: 152000
+  num_training_steps: 134000
   eval_interval: 10000
   micro_batch_size: 2
   gradient_accumulation_steps: 8
@@ -162,7 +173,7 @@ training_parameters:
 optimizer_args:
   class_name: TorchAdamW
   class_args:
-    lr: 6e-4
+    lr: 3e-4
     weight_decay: 0.1
     betas: [0.9, 0.95]
     eps: 1.0e-8
@@ -172,7 +183,7 @@ lr_scheduler_args:
   lr_decay_factor: 0.1
   num_warmup_steps: 2000
   num_constant_steps: 0
-  num_decay_steps: 150000
+  num_decay_steps: 132000
 
 mixed_precision_args:
   dtype: bf16
@@ -184,4 +195,4 @@ distributed_args:
   stage: 0
 
 load_args:
-  load_path: experiments/boltzmann-moe/results/h2_boltz_moe_3b_d2560_18gpt_4egpt_8x4096
+  load_path: experiments/boltzmann-moe/results/h3_boltz_moe_7b_d4096_16gpt_4egpt_16x4096
