@@ -1,0 +1,172 @@
+# Hopfield-MEAN + 128 register tokens, EGPT-only placement, SOFT-BAND attn-balance aux loss.
+#
+# Sibling of the strong-ceiling (strongbal) run, but with the NEW soft-band
+# register attention-balance loss instead of the ceiling hinge. Same backbone
+# (8 GPT + 1 EGPT×6, d=1536, PSD-anti + Rayleigh + FET), same data/steps/LR.
+#
+# The ceiling variants (register_attn_balance_threshold hinge) only penalise
+# register mass ABOVE a threshold — they can drive registers toward disuse
+# (the floor is unprotected). The soft-band instead keeps the mean per-key
+# register attention on the SAME ORDER as the mean per-key content attention:
+#
+#   per content query i, with R register keys and n_ctx_i visible content keys,
+#     a_reg_i = reg_mass_i / R          (mean attention per register key)
+#     a_ctx_i = ctx_mass_i / n_ctx_i    (mean attention per content key)
+#     rho_i   = a_reg_i / a_ctx_i        (rho=1 ⇔ parity)
+#     lr_i    = log(rho_i)
+#   loss_per_iter = softplus(beta*(log(rho_lo) - lr)) + hi_weight*softplus(beta*(lr - log(rho_hi)))
+#                   |------ floor: encourage usage ------|   |------ ceiling: discourage bypass ------|
+#
+# With rho_lo=1 (parity floor) and rho_hi=4 (registers may draw up to 4x the
+# per-key content attention before the anti-bypass arm engages), this both
+# ENCOURAGES register usage and softly caps content bypass — unlike the pure
+# ceiling hinge which only does the latter.
+#
+# register_attn_balance_coef still scales the overall aux weight in BOTH modes;
+# natural coef for softband is ~1.0.
+#
+# Iso-data with Hopfield-MEAN base + strongbal (33.5B tokens, 32k steps, lr 1.5e-3 cosine).
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: register_energy
+    n_registers: 128
+    register_start_layer: 8                  # only EGPT block sees registers
+    register_generation_mode: no_cache
+    register_attn_balance_coef: 1.0          # softband: natural coef ~1.0
+    register_balance_mode: softband          # NEW: soft floor+ceiling band
+    register_balance_rho_lo: 1.0             # parity floor target (rho=1)
+    register_balance_rho_hi: 4.0             # soft ceiling target (4x parity)
+    register_balance_beta: 1.0               # softness / BT-like sharpness
+    register_balance_hi_weight: 1.0          # gamma, weight on upper (anti-bypass) arm
+    register_attn_balance_threshold: 0.10    # ignored in softband mode (harmless)
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 6]
+    iter_dropout_range_per_block: [0, 0, 0, 0, 0, 0, 0, 0, 3]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1536
+    num_layers: 9
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    energy_proj_rank: 0
+    energy_antisym_rank: 32
+    energy_apply_rayleigh: true
+    energy_full_per_token_grad: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 24
+        num_key_value_heads: 24
+        add_bias: false
+        attention_multiplier: 0.125
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 24
+        num_key_value_heads: 24
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - mlp_type: Hopfield_Energy_MLP
+        activation_function: gelu
+        intermediate_size: 8192
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_fet_hopfield_mean_r128_start8_softband_8gpt_1egpt6x_d1536_int8k_lra32_itd3_lr1p5e3_33b_8gpu1node
+  save_interval: 2000
+  max_to_keep: 5
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: EGPT-action
+    name: math_fet_hopfield_mean_r128_start8_softband_8gpt_1egpt6x_d1536_int8k_lra32_itd3_lr1p5e3_33b_8gpu1node
+
+training_parameters:
+  num_training_steps: 32000          # 32k × 1.05M tok/step = 33.5B (matches base)
+  eval_interval: 8000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 8     # 8 GPU x mb=4 x ga=8 = 1.05M tok/step (iso-batch w/ 16gpu run)
+  eval_during_training: false
+  gradient_clipping: 0.5
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.0015                       # iso with Hopfield-MEAN base
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 30000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: false
+  stage: 0
