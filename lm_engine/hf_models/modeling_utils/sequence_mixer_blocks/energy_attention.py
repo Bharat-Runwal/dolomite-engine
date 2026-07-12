@@ -263,8 +263,24 @@ class EnergyAttention_QK(nn.Module):
                     scores = scores.masked_fill(causal_mask, float('-inf'))
                 probs = F.softmax(scores, dim=-1)
                 self._register_attn_mass = probs[..., :R].sum(-1).mean()
+                # ---- soft-band per-key log-ratio (RegisterEnergyModel) --------
+                # Per content query i: a_reg_i = (attn on register keys)/R,
+                # a_ctx_i = (attn on content keys)/n_ctx_i, rho_i = a_reg_i/a_ctx_i.
+                # Cache mean_i log(rho_i) (scalar tensor with grad); rho=1 ⇔ parity.
+                # Visible content keys read from masked scores (additive -inf /
+                # finfo.min fill is below the -1e30 threshold ⇒ excluded).
+                _eps = 1e-8
+                reg_mass = probs[..., :R].sum(-1)                  # [B, H, T_q-R]
+                ctx_mass = probs[..., R:].sum(-1)                 # [B, H, T_q-R]
+                visible = (scores > -1e30)                        # [B, H, T_q-R, T_k]
+                n_ctx = visible[..., R:].to(probs.dtype).sum(-1)  # [B, H, T_q-R]
+                a_reg = reg_mass / float(R)
+                a_ctx = ctx_mass / n_ctx.clamp(min=1.0)
+                rho = a_reg / a_ctx.clamp(min=_eps)
+                self._register_logratio = torch.log(rho.clamp(min=_eps)).mean()
             else:
                 self._register_attn_mass = None
+                self._register_logratio = None
 
         if use_flash_attention_2 or use_flash_attention_3:
             assert accelerator == Accelerator.cuda

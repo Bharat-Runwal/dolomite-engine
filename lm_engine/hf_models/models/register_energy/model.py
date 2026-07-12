@@ -33,8 +33,11 @@ from N(0, init_std) matching the token embedding initializer.
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ...cache import GenerationCache
 from ...utils import is_generation_cache_enabled
@@ -460,6 +463,13 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
         # (self.layer_idx >= self._register_start_layer) checks gate per-layer.
         reg_balance_coef = float(getattr(self.config, 'register_attn_balance_coef', 0.0))
         reg_balance_thr = float(getattr(self.config, 'register_attn_balance_threshold', 0.5))
+        # Soft-band mode selector + params (back-compat: default "ceiling").
+        reg_balance_mode = str(getattr(self.config, 'register_balance_mode', 'ceiling'))
+        reg_balance_beta = float(getattr(self.config, 'register_balance_beta', 1.0))
+        reg_balance_hi_weight = float(getattr(self.config, 'register_balance_hi_weight', 1.0))
+        # Precompute band edges in log-space from python floats (log(1)=0).
+        _log_rho_lo = math.log(max(float(getattr(self.config, 'register_balance_rho_lo', 1.0)), 1e-8))
+        _log_rho_hi = math.log(max(float(getattr(self.config, 'register_balance_rho_hi', 4.0)), 1e-8))
         do_reg_balance = self.training and reg_balance_coef > 0 and self.n_registers > 0
         reg_balance_loss = torch.tensor(0.0, device=device) if do_reg_balance else None
 
@@ -476,6 +486,7 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                     # therefore skip the side compute on their own.
                     ba._register_start_layer = register_start
                     ba._register_attn_mass = None
+                    ba._register_logratio = None
                     block_attns[i] = ba
 
         layer_id = 0
@@ -535,12 +546,25 @@ class RegisterEnergyModel(RegisterEnergyPreTrainedModel, EnergyModel):
                 # Reading mass via getattr because the attention attribute may
                 # not exist on non-softmax sequence mixers (mamba, rnn, gru).
                 if capture_this_block:
-                    mass = getattr(block_attn, '_register_attn_mass', None)
-                    if mass is not None:
-                        # per-iter hinge: max(0, mass - threshold)
-                        reg_balance_loss = reg_balance_loss + torch.clamp(
-                            mass - reg_balance_thr, min=0.0
-                        )
+                    if reg_balance_mode == "softband":
+                        # Soft band on the per-key log attention-ratio lr=log(rho).
+                        # Lower (floor) arm pushes lr up to log(rho_lo)=parity;
+                        # upper (anti-bypass) arm pushes lr down below log(rho_hi).
+                        lr = getattr(block_attn, '_register_logratio', None)
+                        if lr is not None:
+                            band = (
+                                F.softplus(reg_balance_beta * (_log_rho_lo - lr))
+                                + reg_balance_hi_weight
+                                * F.softplus(reg_balance_beta * (lr - _log_rho_hi))
+                            )
+                            reg_balance_loss = reg_balance_loss + band
+                    else:
+                        mass = getattr(block_attn, '_register_attn_mass', None)
+                        if mass is not None:
+                            # per-iter hinge: max(0, mass - threshold)
+                            reg_balance_loss = reg_balance_loss + torch.clamp(
+                                mass - reg_balance_thr, min=0.0
+                            )
 
                 if has_energy:
                     curr_energy = block.energy_per_token(

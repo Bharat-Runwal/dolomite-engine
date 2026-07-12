@@ -257,8 +257,30 @@ class Attention(nn.Module):
                 probs = F.softmax(scores, dim=-1)
                 # Mass on register keys (columns 0..R-1):
                 self._register_attn_mass = probs[..., :R].sum(-1).mean()
+                # ---- soft-band per-key log-ratio (RegisterEnergyModel) --------
+                # Per content query i:
+                #   reg_mass_i = attn mass on register keys (cols 0..R-1)
+                #   ctx_mass_i = attn mass on content keys  (cols R..T_k-1)
+                #   n_ctx_i    = number of *visible* content keys for query i
+                #   a_reg_i = reg_mass_i / R          (mean attn per register key)
+                #   a_ctx_i = ctx_mass_i / n_ctx_i    (mean attn per content key)
+                #   rho_i   = a_reg_i / a_ctx_i        (per-key attention ratio)
+                # We cache mean_i log(rho_i) (a scalar tensor with grad); rho=1
+                # ⇔ parity. Visible content keys are read from the (already
+                # masked) scores: additive causal/pad fill is -inf / finfo.min,
+                # well below the -1e30 threshold, so masked keys are excluded.
+                _eps = 1e-8
+                reg_mass = probs[..., :R].sum(-1)                  # [B, H, T_q-R]
+                ctx_mass = probs[..., R:].sum(-1)                 # [B, H, T_q-R]
+                visible = (scores > -1e30)                        # [B, H, T_q-R, T_k]
+                n_ctx = visible[..., R:].to(probs.dtype).sum(-1)  # [B, H, T_q-R]
+                a_reg = reg_mass / float(R)
+                a_ctx = ctx_mass / n_ctx.clamp(min=1.0)
+                rho = a_reg / a_ctx.clamp(min=_eps)
+                self._register_logratio = torch.log(rho.clamp(min=_eps)).mean()
             else:
                 self._register_attn_mass = None
+                self._register_logratio = None
 
         if use_flash_attention_2 or use_flash_attention_3:
             assert accelerator == Accelerator.cuda
