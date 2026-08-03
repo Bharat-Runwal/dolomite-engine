@@ -14,9 +14,9 @@ CHECKPOINT="${1:?Usage: submit_eval.sh <checkpoint_path> <job_name>}"
 JOB_NAME="${2:-eval}"
 REPO=/proj/dmfexp/nima/Code/dolomite-engine
 
-TASKS="arc_challenge,arc_easy,boolq,copa,hellaswag,openbookqa,piqa,sciq,wikitext,winogrande,mmlu,gsm8k,gsm8k_cot"
-# lambada_openai excluded: Arrow parquet "Repetition level histogram size mismatch" on this cluster
-# race excluded: same Arrow parquet corruption (EleutherAI/race high, test split 1045)
+TASKS="arc_challenge,arc_easy,boolq,copa,hellaswag,openbookqa,piqa,race,sciq,wikitext,winogrande,lambada_openai,mmlu,gsm8k,gsm8k_cot"
+# race + lambada_openai RE-ENABLED 2026-08-03: the "Repetition level histogram size mismatch" was a
+# pyarrow<20 reader bug (their parquet is written by pyarrow>=20); fixed by the pyarrow>=20 pin below.
 # bbh_fewshot excluded: SaylorTwift/bbh not cached; use submit_bbh_eval.sh after pre-downloading dataset
 
 bsub \
@@ -35,7 +35,7 @@ source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=$REPO:\$PYTHONPATH
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
-uv pip install accelerate lm-eval -q
+uv pip install accelerate lm-eval 'pyarrow>=20' -q   # pyarrow>=20 required to read race/lambada parquet (else 'Repetition level histogram size mismatch')
 cd $REPO
 python experiments/energy-inference/scripts/structured-proj/eval_harness.py \\
     --model hf \\

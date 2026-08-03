@@ -14,7 +14,7 @@
 # Tasks (13): arc_challenge, arc_easy, boolq, copa, hellaswag, openbookqa,
 #             piqa, sciq, wikitext, winogrande, mmlu, gsm8k, gsm8k_cot.
 # Excluded by default (cluster-specific):
-#   lambada_openai, race  — Arrow parquet corruption on this cluster
+#   race, lambada_openai — re-enabled 2026-08-03 via pyarrow>=20 pin (was a pyarrow<20 reader bug)
 #   bbh_fewshot           — separate path, run via --with-bbh
 #
 # Aggregates: after results land, run
@@ -36,7 +36,7 @@ SCRIPTS_DIR="${REPO}/experiments/eval_scripts"
 mkdir -p "${HOME}/bsub_logs"
 
 # 1. Main 13-task LM-harness job
-TASKS="arc_challenge,arc_easy,boolq,copa,hellaswag,openbookqa,piqa,sciq,wikitext,winogrande,mmlu,gsm8k,gsm8k_cot"
+TASKS="arc_challenge,arc_easy,boolq,copa,hellaswag,openbookqa,piqa,race,sciq,wikitext,winogrande,lambada_openai,mmlu,gsm8k,gsm8k_cot"
 bsub \
     -q preemptable -G grp_preemptable -J "${JOB_NAME}" \
     -gpu "num=1/task:mode=exclusive_process" -n 1 -M 48G -W 02:00 \
@@ -49,7 +49,7 @@ source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
-uv pip install accelerate lm-eval -q
+uv pip install accelerate lm-eval 'pyarrow>=20' -q   # pyarrow>=20 required to read race/lambada parquet (else 'Repetition level histogram size mismatch')
 cd ${REPO}
 python ${SCRIPTS_DIR}/eval_harness.py \\
     --model hf \\
