@@ -80,7 +80,18 @@ def track_metrics(
             for param_name, param in module.named_parameters(recurse=False):
                     # recurse=False gets only direct parameters, not from submodules
                     if 'scale_ff' in param_name:
-                        scale_ff_values[f"{name}.{param_name}"] = param.item()
+                        # scale_ff is a 1-element parameter. Under FSDP-2 it is a
+                        # DTensor sharded across ranks, so on all but one rank the
+                        # LOCAL shard is EMPTY and .item() raises
+                        #   RuntimeError: _local_scalar_dense: Empty tensor not supported
+                        # (crashed a 16-GPU run at step 10; an 8-GPU run happened to
+                        # survive). Read the local shard and skip when this rank holds
+                        # no elements -- the rank that owns it still logs the value.
+                        local = param.to_local() if hasattr(param, "to_local") else param
+                        if local.numel() == 1:
+                            scale_ff_values[f"{name}.{param_name}"] = local.item()
+                        elif local.numel() > 1:
+                            scale_ff_values[f"{name}.{param_name}"] = local.flatten()[0].item()
 
             # Track Energy_MLP metrics
             if isinstance(module, (Energy_MLP, Compositional_Energy_MLP)):
