@@ -20,6 +20,9 @@ REPO="/proj/dmfexp/bishwajit/Code/dolomite-engine"
 CFG_DIR="$REPO/configs/boltzman-moe-configs"
 LOG_DIR="${LOG_DIR:-/proj/dmfexp/energy-gpt/logs/boltzmoe-smoketest}"
 mkdir -p "$LOG_DIR"
+# the trainer does not create save_path's parent; a missing parent only fails at
+# the first checkpoint, long after launch, so make it up front.
+mkdir -p /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzman-moe-configs
 
 NODES="${NODES:-1}"
 QUEUE="${QUEUE:-normal}"

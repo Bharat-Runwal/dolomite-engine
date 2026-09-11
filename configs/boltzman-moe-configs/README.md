@@ -69,9 +69,18 @@ bjobs -w | grep smoke_
 grep -a 'step = ' /proj/dmfexp/energy-gpt/logs/boltzmoe-smoketest/*.err | head
 ```
 
-Already verified on this branch (CPU, before submitting anything): both configs
-build and run a forward pass, with parameter counts matching the paper --
-baseline **1,096,934,400** and BoltzMoE **1,101,091,844**.
+### Verified on this branch (no GPU needed for any of this)
+
+- both configs instantiate and run a forward pass with loss:
+  baseline **1,096,934,400** params, BoltzMoE **1,101,091,844** -- matching the
+  1097M / 1101M in the paper; loss ~11.7 = ln(100352), correct for random init
+- `BoltzmannMoE_Energy_MLP` is present and registered in
+  `lm_engine/hf_models/modeling_utils/mlp_blocks/__init__.py`
+- `dfca716` (FSDP-2 `scale_ff` empty-shard fix) is in the history
+- all four Megatron dataset shards resolve, and the data cache dir exists
+- the tokenizer loads (vocab 100352, matching `vocab_size`)
+- `helpers.so` is built and `lm_engine.data` imports
+- the `STEPS` rewrite produces a config the trainer's own arg parser accepts
 
 ## Two things that will bite whoever runs these
 

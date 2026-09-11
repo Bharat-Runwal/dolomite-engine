@@ -295,7 +295,7 @@ save_args:
   save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzman-moe-configs/s8e4_fh2_boltzmoe_topk2_400m_30k_2e-3
 tokenizer_args:
   additional_special_tokens: null
-  tokenizer_name: /proj/dmfexp/energy-gpt/data/granite-4.0-tiktoken
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
 training_parameters:
   eval_during_training: false
   eval_interval: 2000
