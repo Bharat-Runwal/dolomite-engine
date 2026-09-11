@@ -6,13 +6,18 @@ trained head-to-head, copied unmodified from that directory except for one fix
 
 | Config | Attention | MLP blocks | Active / Total |
 |---|---|---|---|
-| `s8e4_stdmoe_fh2_boltz_topk2.yml` | 8 softmax + 4 energy | 8 std MoE + 4 **fh2** (`BoltzmannMoE_Energy_MLP`) | ~387M / ~1101M |
-| `s12_stdmoe_only_topk2.yml`       | 12 softmax           | 12 std MoE (ipe=3200, top-2) | ~389M / ~1097M |
-| `s8e4_stdmoe_only_topk2.yml`      | 8 softmax + 4 energy | 12 std MoE (ipe=3200, top-2) | ~389M / ~1097M |
+| `s8e4_stdmoe_fh2_boltz_topk2.yml` | 8 softmax + 4 energy | 8 std MoE (ipe=1664) + 4 **fh2** (`BoltzmannMoE_Energy_MLP`, ipe=76288 = 9536×8) | 387M / **1,101,091,844** |
+| `s12_stdmoe_only_topk2.yml`       | 12 softmax           | 12 std MoE (ipe=3200, top-2) | 389M / **1,096,934,400** |
+| `s8e4_stdmoe_only_topk2.yml`      | 8 softmax + 4 energy | 12 std MoE (ipe=3200, top-2) | 389M / **1,092,736,004** |
 
 All three: 12 layers, `d=1024`, 16 heads × 64 head_dim, 8 experts top-2, no
-looping (`num_iterations: 1`), 30k steps × 1.05M tok/step = **31.5B tokens**,
-lr 2e-3, micro_batch 1, grad accum 4.
+looping (`num_iterations: 1`), seq len 4096, 30k steps × 1.05M tok/step =
+**31.5B tokens** (at 64 GPUs: mb 1 × ga 4 × 4096 × 64), lr 2e-3, micro_batch 1,
+grad accum 4, AdamW (0.9, 0.95) wd 0.1, cosine 2k warmup / 28k decay, bf16, FSDP-2.
+
+Note the fh2 config keeps its std-MoE blocks narrower (ipe 1664 vs 3200) to pay for
+the energy blocks, so all three land within 1% of each other on total params. Do not
+"normalize" that to 3200 when scaling or the comparison stops being iso-param.
 
 **Why 3 configs?** `s12_stdmoe_only_topk2` is the baseline reported in the paper.
 `s8e4_stdmoe_only_topk2` is the cleaner ablation — it shares the attention layout

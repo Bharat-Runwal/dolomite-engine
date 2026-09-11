@@ -92,19 +92,18 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/s8e4_stdmoe_only_topk2_400m_30k
+  save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzman_moe/s8e4_stdmoe_only_topk2
   save_interval: 2000
 
 load_args:
-  load_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/s8e4_stdmoe_only_topk2_400m_30k
+  load_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzman_moe/s8e4_stdmoe_only_topk2
 
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: dolomite
-    name: s8e4_stdmoe_only_topk2_400m_30k
-
+    name: s8e4_stdmoe_only_topk2
 training_parameters:
   num_training_steps: 30000
   eval_interval: 2000
