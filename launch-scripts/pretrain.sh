@@ -3,9 +3,16 @@
 # to /u/bsaha3/miniconda3/bin/torchrun (Python 3.13) and imports crash with:
 #   undefined symbol: _PyThreadState_UncheckedGet
 _PRETRAIN_REPO_ROOT="/proj/dmfexp/bishwajit/Code/dolomite-engine"
-if [ -f "${_PRETRAIN_REPO_ROOT}/.venv/bin/activate" ]; then
+# Override with PRETRAIN_VENV=/path/to/venv. IMPORTANT for the BoltzMoE configs in
+# configs/boltzman-moe-configs/: those models use tie_word_embeddings: true, and
+# transformers 5.1.0 (which .venv has) silently clobbers the tied wte. Use
+# .venv-nima (transformers 4.57.1) for anything in that directory.
+_PRETRAIN_VENV="${PRETRAIN_VENV:-${_PRETRAIN_REPO_ROOT}/.venv}"
+if [ -f "${_PRETRAIN_VENV}/bin/activate" ]; then
     # shellcheck disable=SC1091
-    source "${_PRETRAIN_REPO_ROOT}/.venv/bin/activate"
+    source "${_PRETRAIN_VENV}/bin/activate"
+else
+    echo "WARNING: venv not found at ${_PRETRAIN_VENV}" >&2
 fi
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID # Recommended
