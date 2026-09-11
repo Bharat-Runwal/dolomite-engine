@@ -30,7 +30,7 @@ submit_one () {
     blaunch bash launch-scripts/pretrain.sh "$CFG"
 }
 
-submit_one "h1_boltz_680m_8x4096_d1536_nemo"    "configs/boltzmann_moe/h1_boltz_680m_8x4096_d1536_nemo.yml"
-submit_one "h1_boltz_680m_8x4096_d1536_mathmix" "configs/boltzmann_moe/h1_boltz_680m_8x4096_d1536_mathmix.yml"
+submit_one "h1_boltz_680m_8x4096_d1536_nemo"    "configs/boltzman_moe_all/h1_boltz_680m_8x4096_d1536_nemo.yml"
+submit_one "h1_boltz_680m_8x4096_d1536_mathmix" "configs/boltzman_moe_all/h1_boltz_680m_8x4096_d1536_mathmix.yml"
 
 echo "Submitted both. Watch with: bjobs -w | grep h1_boltz_680m"

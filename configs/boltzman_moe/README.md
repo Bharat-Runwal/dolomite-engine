@@ -1,6 +1,6 @@
 # Boltzmann TopK Energy MoE — head-to-head with vanilla switch-routed MoE
 
-Adapted from `configs/boltzmann_moe/README.md`. Three configs designed to be
+Adapted from `configs/boltzman_moe_all/README.md`. Three configs designed to be
 trained head-to-head, copied unmodified from that directory except for one fix
 (tokenizer path, see below).
 
@@ -35,9 +35,9 @@ expert_grad = phi · W2_e^T  +  (phi' ⊙ W2 x) · W1_e^T
 **There is no learned router.** Routing comes from the expert energies
 themselves — `E_i = <x, phi · W2_e^T> / sqrt(expert_I)` and
 `p = softmax(E/tau)` — which is what makes this the Boltzmann variant. Contrast
-`fh1` (`TopK_Energy_MoE_MLP`) in the parent directory, which uses the *same*
+`fh1` (`TopK_Energy_MoE_MLP`) in `configs/boltzman_moe_all/`, which uses the *same*
 energy-gradient experts but selects them with a learned `nn.Linear` gate; fh1 is
-**not** a Boltzmann router, despite what the parent README says.
+**not** a Boltzmann router, despite what the `boltzman_moe_all` README says.
 
 Two `fh2` details that matter and are easy to miss:
 
@@ -69,35 +69,51 @@ outside that bound); the real loss is MMLU (−0.9 pp). Per-task it is 7 wins / 
 losses. The claim the data supports is *matches standard MoE while removing the
 learned router entirely*, not *beats standard MoE*. Single seed.
 
-## Quick check that they run
+## How to submit
+
+The repo-root launcher already covers these three (it points at
+`configs/boltzman_moe_all/`, the same files):
 
 ```bash
-./configs/boltzman-moe-configs/submit_smoketest.sh              # all three, 1 node x 8 GPU, 50 steps
-./configs/boltzman-moe-configs/submit_smoketest.sh fh2          # just the Boltzmann one
-NODES=2 STEPS=20 ./configs/boltzman-moe-configs/submit_smoketest.sh
+bash submit_boltzmann_sweep.sh          # all three, 8 nodes x 8 H100 each, full 30k steps
 ```
 
-`STEPS` (default 50) rewrites `num_training_steps` into a temp config so a smoke
-test cannot silently become a 30k-step run; it also rescales warmup/decay, pushes
-`save_interval` past the end, and sets `log_interval: 1`. `STEPS=0` runs as-is.
-
-**Passing** = the log reaches `step = 10` with a finite train-loss and non-zero
-`billion_tokens_per_day`.
+To launch one directly from this directory:
 
 ```bash
-bjobs -w | grep smoke_
-grep -a 'step = ' /proj/dmfexp/energy-gpt/logs/boltzmoe-smoketest/*.err | head
+LOG_DIR=/proj/dmfexp/energy-gpt/logs/boltzman_moe
+mkdir -p "$LOG_DIR"
+mkdir -p /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzman_moe   # save_path parent is NOT auto-created
+
+NAME=s8e4_stdmoe_fh2_boltz_topk2         # or s12_stdmoe_only_topk2 | s8e4_stdmoe_only_topk2
+export PRETRAIN_VENV=$PWD/.venv-nima     # REQUIRED, see below
+bsub -r -q normal -G grp_ebm -M 2000G -hl -n 8 \
+  -J "${NAME}" \
+  -gpu "num=8/task:mode=exclusive_process" \
+  -oo "${LOG_DIR}/${NAME}.out" \
+  -eo "${LOG_DIR}/${NAME}.err" \
+  blaunch bash launch-scripts/pretrain.sh "configs/boltzman_moe/${NAME}.yml"
 ```
+
+**Sanity check that a launch is healthy**: the log should reach `step = 10` with a
+finite train-loss and non-zero `billion_tokens_per_day`. For a cheap check without
+committing to 30k steps, copy a config and set `num_training_steps` (and
+`num_decay_steps`) to ~50.
+
+All three were verified to build and run a forward pass on this branch:
+**1,096,934,400** (s12) / **1,092,736,004** (s8e4) / **1,101,091,844** (fh2) params,
+loss ~11.7-12.1 = ln(100352), correct for random init.
 
 ## Two things that will bite whoever runs these
 
 1. **Venv.** Use `.venv-nima` (transformers 4.57.1). This repo's `.venv` is
    transformers 5.1.0, which silently clobbers the tied `wte` — and all three
-   configs set `tie_word_embeddings: true`. `submit_smoketest.sh` exports
-   `PRETRAIN_VENV` for you; `launch-scripts/pretrain.sh` honours it (it used to
+   configs set `tie_word_embeddings: true`. Export
+   `PRETRAIN_VENV=/proj/dmfexp/bishwajit/Code/dolomite-engine/.venv-nima` before
+   launching; `launch-scripts/pretrain.sh` honours that variable (it used to
    hardcode `.venv`).
 
-2. **Tokenizer path was stale.** The originals in `configs/boltzmann_moe/` point at
+2. **Tokenizer path was stale.** The originals in `configs/boltzman_moe_all/` point at
    `/proj/dmfexp/energy-gpt/data/granite-4.0-tiktoken`, which no longer exists.
    The copies here point at `/proj/datasets/tokenizers/granite-4.0-tiktoken`
    (verified: loads, vocab 100352 = `vocab_size`). This is the **only** change

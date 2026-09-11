@@ -9,7 +9,7 @@ LOG_DIR="/proj/dmfexp/energy-gpt/logs/boltzmann_sweep"
 mkdir -p "$LOG_DIR"
 
 NAME="h1_boltz_680m_8x4096_d1536_mathmix"
-CFG="configs/boltzmann_moe/h1_boltz_680m_8x4096_d1536_mathmix.yml"
+CFG="configs/boltzman_moe_all/h1_boltz_680m_8x4096_d1536_mathmix.yml"
 NODES=4   # 4 nodes x 8 GPUs = 32 GPUs (matches Nima's setup exactly)
 
 echo "Submitting ${NAME} (config=${CFG}, nodes=${NODES} -> 32 GPUs)"

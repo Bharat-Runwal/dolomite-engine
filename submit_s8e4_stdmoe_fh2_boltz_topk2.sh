@@ -10,7 +10,7 @@ LOG_DIR="/proj/dmfexp/energy-gpt/logs/boltzmann_sweep"
 mkdir -p "$LOG_DIR"
 
 NAME="s8e4_stdmoe_fh2_boltz_topk2_400m_30k"
-CFG="configs/boltzmann_moe/s8e4_stdmoe_fh2_boltz_topk2.yml"
+CFG="configs/boltzman_moe_all/s8e4_stdmoe_fh2_boltz_topk2.yml"
 NODES=8
 
 echo "Submitting ${NAME} (config=${CFG}, nodes=${NODES})"

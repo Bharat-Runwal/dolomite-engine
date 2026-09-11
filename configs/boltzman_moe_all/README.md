@@ -58,10 +58,10 @@ LOG_DIR=/proj/dmfexp/energy-gpt/logs/boltzmann_sweep
 mkdir -p "$LOG_DIR"
 
 # Pattern: <NAME> = s8e4_stdmoe_fh1_topk2 | s12_stdmoe_only_topk2 | s8e4_stdmoe_only_topk2
-# Pattern: <CFG>  = configs/boltzmann_moe/<NAME>.yml
+# Pattern: <CFG>  = configs/boltzman_moe_all/<NAME>.yml
 
 NAME=s8e4_stdmoe_fh1_topk2
-CFG=configs/boltzmann_moe/${NAME}.yml
+CFG=configs/boltzman_moe_all/${NAME}.yml
 bsub -r -q preemptable -G grp_preemptable -M 2000G -hl -n 8 \
   -J "${NAME}" \
   -gpu "num=8/task:mode=exclusive_process" \

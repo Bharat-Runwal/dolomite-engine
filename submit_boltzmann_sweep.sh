@@ -43,13 +43,13 @@ submit_variant() {
 # At ~1.1B total / mb=1 ga=4 the top-2 group needs 8 nodes for memory headroom.
 # Effective batch = 1 x 4 x 64 = 256 = 1.05M tok/step.
 submit_variant "s8e4_stdmoe_fh1_topk2" \
-  "configs/boltzmann_moe/s8e4_stdmoe_fh1_topk2.yml" 8
+  "configs/boltzman_moe_all/s8e4_stdmoe_fh1_topk2.yml" 8
 
 submit_variant "s12_stdmoe_only_topk2" \
-  "configs/boltzmann_moe/s12_stdmoe_only_topk2.yml" 8
+  "configs/boltzman_moe_all/s12_stdmoe_only_topk2.yml" 8
 
 submit_variant "s8e4_stdmoe_only_topk2" \
-  "configs/boltzmann_moe/s8e4_stdmoe_only_topk2.yml" 8
+  "configs/boltzman_moe_all/s8e4_stdmoe_only_topk2.yml" 8
 
 echo ""
 echo "All 3 jobs submitted. Watch with: bjobs -w | grep -E 'stdmoe_fh1_topk2|stdmoe_only_topk2'"

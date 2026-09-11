@@ -1,26 +1,21 @@
-# fh2_boltz_680m — EXACT rerun of Nima Dehmamy's h1_boltz_moe_580m_8x4096_d1536.
+# h1_boltz_moe_580m: BoltzmannMoE scaled to 580M params
+# Architecture: d=1536, 11 GPT + 1 EGPT×6, 8 full-size experts × int=4096
 #
-# Vendored verbatim from his fork (configs/boltzmann_moe/h1_boltz_moe_580m_8x4096_d1536.yml).
-# ONLY machine-specific paths changed from his original:
-#   - data_cache_path : his /proj/dmfexp/nima/.cache/megatron  -> your cache-bsaha
-#   - save_path       : his results dir                        -> your checkpoints-bsaha
-#   - wandb project/name                                       -> your dolomite / fh2_boltz
-# Everything affecting the result (data_path, tokenizer, model, optimizer, steps,
-# batch, seq, scheduler, precision) is IDENTICAL to his.
+# Layers 1-11: softmax_attention + MLP (int=6144 = 4×d)    — GPT prefix
+# Layer 12:    energy_attention  + BoltzmannMoE_Energy_MLP (×6 recurrent)
+#                8 experts × 4096 per expert = 32768 total intermediate
 #
-# Architecture: d=1536, 11 GPT + 1 EGPT(x6 recurrent), 8 full-size experts x int=4096.
-# Uses the vendored BoltzmannMoE_Energy_MLP (1/sqrt(expert_I) routing scale in code).
+# Training: 130B tokens (~62k steps at 32 GPUs × batch=4 × accum=4 × seq=4096)
+# Eval: automatic at end of each 6h chunk (intermediate + final)
 #
-# NOTE on size: the name says "580m" (his label) but this config actually
-# instantiates ~677M params (verified). His ~580M estimate undercounted the 11
-# swiglu MLPs (3 matrices @ int=6144 -> 311M, not the 2-matrix ~217M he assumed).
-# This file reproduces HIS config exactly, so you get the same ~677M model he did;
-# the "580m" in the name is his misnomer, kept for traceability to his filename.
+# Param breakdown (approx):
+#   Embedding:  154M  (100352 × 1536, tied)
+#   GPT layers: 242M  (11 × (4×1536² + 2×1536×6144))
+#   EGPT block: ~63M  (attn+proj + 2×1536×32768)
+#   Total:     ~580M
 #
-# EXACT token budget: 124000 steps x mb4 x accum4 x seq4096 x 32 GPUs = ~260B tokens.
-#   (His header comment says "130B/62k" but his num_training_steps=124000 -> 260B at
-#    32 GPUs; the training_parameters below are the source of truth, copied verbatim.)
-# Run on 4 nodes x 8 GPUs = 32 GPUs to match his exact token count.
+# Multi-node: 4 nodes × 8 GPUs = 32 GPUs
+# LR: 1e-3 (scaled down from 2e-3 for larger model width d=1536 vs d=768)
 
 datasets:
   - class_name: MegatronDataset
@@ -38,7 +33,7 @@ datasets:
       sequence_length: 4096
 
 tokenizer_args:
-  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+  tokenizer_name: /proj/dmfexp/energy-gpt/data/granite-4.0-tiktoken
 
 model_args:
   model_class: AutoModelForCausalLM
@@ -92,7 +87,7 @@ model_args:
       - *gpt_ffn
       - *gpt_ffn
       - *gpt_ffn
-      # Full-size BoltzmannMoE: 8 experts x 4096 per expert = 32768 total
+      # Full-size BoltzmannMoE: 8 experts × 4096 per expert = 32768 total
       - mlp_type: BoltzmannMoE_Energy_MLP
         intermediate_size: 32768
         n_experts: 8
@@ -106,24 +101,19 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/fh2_boltz_680m_8x4096_d1536
-  save_interval: 2000
-  # NOTE: his config had `max_to_keep: 3`, but your repo's save_args schema does
-  # not support it (pydantic extra_forbidden). Removed — retention-only, no effect
-  # on training results. All checkpoints kept instead.
-
-load_args:
-  load_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/fh2_boltz_680m_8x4096_d1536
+  save_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/s11e1_egpt6_boltz_nemo_680m_31k_2e-3_679m_679m_4node
+  save_interval: 1000
+  max_to_keep: 3
 
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: dolomite
-    name: s11e1_mlp_fh2_boltz_600m_124k_1e-3_680m_680m
+    name: s11e1_egpt6_boltz_nemo_680m_31k_2e-3_679m_679m_4node
 
 training_parameters:
-  num_training_steps: 124000
+  num_training_steps: 31000
   eval_interval: 10000
   micro_batch_size: 4
   gradient_accumulation_steps: 4
@@ -133,7 +123,7 @@ training_parameters:
 optimizer_args:
   class_name: TorchAdamW
   class_args:
-    lr: 1e-3
+    lr: 2e-3
     weight_decay: 0.1
     betas: [0.9, 0.95]
     eps: 1.0e-8
@@ -143,7 +133,7 @@ lr_scheduler_args:
   lr_decay_factor: 0.1
   num_warmup_steps: 2000
   num_constant_steps: 0
-  num_decay_steps: 122000
+  num_decay_steps: 29000
 
 mixed_precision_args:
   dtype: bf16
@@ -153,3 +143,6 @@ distributed_args:
   gradient_checkpointing_method: block
   torch_compile: false
   stage: 0
+
+load_args:
+  load_path: /proj/dmfexp/energy-gpt/checkpoints-bsaha/boltzmann_sweep/s11e1_egpt6_boltz_nemo_680m_31k_2e-3_679m_679m_4node

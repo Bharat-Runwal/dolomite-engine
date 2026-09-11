@@ -34,13 +34,13 @@ submit_variant() {
 }
 
 submit_variant "s8e4_stdmoe_fh1_topk2_1b_30k" \
-  "configs/boltzmann_moe/s8e4_stdmoe_fh1_topk2_1b_30k.yml" 16
+  "configs/boltzman_moe_all/s8e4_stdmoe_fh1_topk2_1b_30k.yml" 16
 
 submit_variant "s8e4_stdmoe_only_topk2_1b_30k" \
-  "configs/boltzmann_moe/s8e4_stdmoe_only_topk2_1b_30k.yml" 16
+  "configs/boltzman_moe_all/s8e4_stdmoe_only_topk2_1b_30k.yml" 16
 
 submit_variant "s12_stdmoe_only_topk2_1b_30k" \
-  "configs/boltzmann_moe/s12_stdmoe_only_topk2_1b_30k.yml" 16
+  "configs/boltzman_moe_all/s12_stdmoe_only_topk2_1b_30k.yml" 16
 
 echo ""
 echo "All 3 jobs submitted. Watch with: bjobs -w | grep _1b_30k"
