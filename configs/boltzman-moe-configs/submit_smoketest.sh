@@ -1,9 +1,10 @@
 #!/bin/bash
-# Smoke test: launch both reference models to confirm they train on this branch.
+# Smoke test: launch the three head-to-head models to confirm they train on this
+# branch. s12 = baseline, s8e4 = attention-only ablation, fh2 = Boltzmann MoE.
 #
-#   ./configs/boltzman-moe-configs/submit_smoketest.sh              # both, 1 node (8 GPU)
-#   ./configs/boltzman-moe-configs/submit_smoketest.sh baseline     # just the baseline
-#   ./configs/boltzman-moe-configs/submit_smoketest.sh boltzmoe     # just the BoltzMoE
+#   ./configs/boltzman-moe-configs/submit_smoketest.sh              # all 3, 1 node (8 GPU)
+#   ./configs/boltzman-moe-configs/submit_smoketest.sh fh2          # just the Boltzmann one
+#   ./configs/boltzman-moe-configs/submit_smoketest.sh s12 s8e4     # just the two baselines
 #   NODES=2 QUEUE=normal GROUP=grp_ebm ./..../submit_smoketest.sh   # override placement
 #
 # What "passing" looks like: the log reaches `step = 10` with a finite train-loss
@@ -34,8 +35,9 @@ STEPS="${STEPS:-50}"
 export PRETRAIN_VENV="${PRETRAIN_VENV:-$REPO/.venv-nima}"
 
 declare -A CFG=(
-  [baseline]="s12_stdmoe_topk2_400m_30k_2e-3"
-  [boltzmoe]="s8e4_fh2_boltzmoe_topk2_400m_30k_2e-3"
+  [s12]="s12_stdmoe_only_topk2"          # baseline: 12 softmax, 12 std MoE
+  [s8e4]="s8e4_stdmoe_only_topk2"        # ablation: 8 softmax + 4 energy attn, 12 std MoE
+  [fh2]="s8e4_stdmoe_fh2_boltz_topk2"    # ours: + BoltzmannMoE_Energy_MLP on last 4
 )
 
 submit_one () {
@@ -79,11 +81,12 @@ PYEOF
 
 cd "$REPO"
 if [ "$#" -eq 0 ]; then
-  submit_one baseline
-  submit_one boltzmoe
+  submit_one s12
+  submit_one s8e4
+  submit_one fh2
 else
   for k in "$@"; do
-    [ -n "${CFG[$k]:-}" ] || { echo "FATAL: unknown target '$k' (use baseline|boltzmoe)" >&2; exit 1; }
+    [ -n "${CFG[$k]:-}" ] || { echo "FATAL: unknown target '$k' (use s12|s8e4|fh2)" >&2; exit 1; }
     submit_one "$k"
   done
 fi

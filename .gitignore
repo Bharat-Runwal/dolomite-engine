@@ -18,3 +18,7 @@ wandb/
 
 # Bishwajit's local tools/scripts/data
 tools/bs/
+
+# Overleaf clone (its .git/config holds an access token) and local paper drafts
+iclr_2027/
+paper/
