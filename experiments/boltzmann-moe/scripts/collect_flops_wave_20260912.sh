@@ -123,8 +123,14 @@ for a,K,tk,kk,learned,hop,avg,ppl in rows:
 print()
 print("FLOPratio = k/K = mixture-block cost vs dense soft, assuming the cheap proxy")
 print("router (0.21% of exact). With the EXACT energy router it is 0.5+0.5*k/K instead.")
-print("Reference points already banked: h1 w1w2 K=4 dense avg 50.10 ppl 36.48;")
-print("h1 w1w2 K=4 top2 avg 48.56 ppl 36.37; h1 learned K=4 top2 avg 49.90 ppl 39.79.")
+print("avg% here is avg10_norm (10 tasks, MMLU INCLUDED). The h1 reference points below")
+print("are RESTATED onto avg10 -- do NOT use the avg9 figures printed in PROGRESS.md /")
+print("CLAUDE.md (0.501 etc.), which are ~1.5pp higher. See AVG10_RESTATED.md.")
+print("  h1 w1w2 K=4 I_e=2048 dense : avg10 48.32  ppl 36.48")
+print("  h1 w1w2 K=4 I_e=2048 top-2 : avg10 47.14  ppl 36.37")
+print("  h1 learned K=4      top-2  : avg10 48.17  ppl 39.79")
+print("NOTE those h1 arms use I_e=2048; the arms above use I_e=512-1024, so they are")
+print("NOT iso-expert-width with h1 -- compare within this table, not across.")
 PY
     ;;
 
