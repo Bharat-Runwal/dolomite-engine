@@ -36,3 +36,70 @@
 [2026-09-12 12:40:04] training: 6/8 arms DONE
 [2026-09-12 12:50:06] training: 6/8 arms DONE
 [2026-09-12 13:00:09] training: 6/8 arms DONE
+[2026-09-12 13:10:11] training: 6/8 arms DONE
+[2026-09-12 13:20:11] training: 6/8 arms DONE
+[2026-09-12 13:30:12] training: 6/8 arms DONE
+[2026-09-12 13:40:12] training: 6/8 arms DONE
+[2026-09-12 13:50:16] training: 6/8 arms DONE
+[2026-09-12 14:00:17] training: 6/8 arms DONE
+[2026-09-12 14:10:17] training: 6/8 arms DONE
+[2026-09-12 14:20:19] training: 6/8 arms DONE
+[2026-09-12 14:30:19] training: 6/8 arms DONE
+[2026-09-12 14:40:20] training: 6/8 arms DONE
+[2026-09-12 14:50:21] training: 6/8 arms DONE
+[2026-09-12 15:00:21] training: 6/8 arms DONE
+[2026-09-12 15:10:24] training: 6/8 arms DONE
+[2026-09-12 15:20:26] training: 6/8 arms DONE
+[2026-09-12 15:30:27] training: 6/8 arms DONE
+[2026-09-12 15:40:30] training: 6/8 arms DONE
+[2026-09-12 15:50:32] training: 6/8 arms DONE
+[2026-09-12 16:00:35] training: 7/8 arms DONE
+[2026-09-12 16:10:38] training: 7/8 arms DONE
+[2026-09-12 16:20:41] training: 7/8 arms DONE
+[2026-09-12 16:30:41] training: 7/8 arms DONE
+[2026-09-12 16:40:44] training: 7/8 arms DONE
+[2026-09-12 16:50:47] training: 7/8 arms DONE
+[2026-09-12 17:00:54] training: 7/8 arms DONE
+[2026-09-12 17:10:55] training: 7/8 arms DONE
+[2026-09-12 17:20:57] training: 7/8 arms DONE
+[2026-09-12 17:31:00] training: 7/8 arms DONE
+[2026-09-12 17:41:01] training: 8/8 arms DONE
+[2026-09-12 17:41:01] all arms done -> submitting evals
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_hop_K16_dense
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_hop_K16_top2_nofix
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_hop_K16_top2
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_hop_K32_top1
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_hop_K32_top2
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_learn_K16_top2
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_pure_hop_K16_top2_1blk
+GPU mode=exclusive_process specified. No change
+submitted ev_iclr_w1w2_K16_top2
+[2026-09-12 19:11:05] evals finished -> writing frontier table
+W0912 19:11:41.180000 168448 torch/utils/cpp_extension.py:140] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+[2026-09-12 19:12:14] frontier table -> /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/router_analysis/frontier_table.txt
+[2026-09-12 19:12:14] submitting proxy-router fits
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_hop_K16_dense
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_hop_K16_top2_nofix
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_hop_K16_top2
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_hop_K32_top1
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_hop_K32_top2
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_learn_K16_top2
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_pure_hop_K16_top2_1blk
+GPU mode=exclusive_process specified. No change
+submitted px_iclr_w1w2_K16_top2
+[2026-09-12 19:37:18] proxy fits finished. ALL FOLLOW-UP COMPLETE.
+W0912 19:37:59.977000 1366853 torch/utils/cpp_extension.py:140] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'

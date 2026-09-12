@@ -211,6 +211,47 @@ def main() -> None:
 
         legacy.forward = types.MethodType(patched, legacy)
 
+    else:
+        # COMPOSABLE class (EnergyFF_BoltzmannMoE). Without this branch the proxy was
+        # never actually wired in and every d_ppl came out as exactly +0.0000 -- a
+        # no-op masquerading as a perfect result. Patch the MoE wrapper's forward to
+        # take its routing logits from the proxy instead of the exact energies.
+        import types as _t
+        _moe = block.ffwd.moe
+        _orig_moe_fwd = _moe.forward
+
+        def moe_patched(self, x):
+            if getattr(legacy, "_proxy", None) is None:
+                return _orig_moe_fwd(x)
+            outs = []
+            for e in self.experts:
+                prev = e._capture_energy
+                e._capture_energy = False
+                try:
+                    outs.append(e(x))
+                finally:
+                    e._capture_energy = prev
+            grads = torch.stack(outs, dim=-2)                 # [..., K, hidden]
+            E = legacy._proxy(x)                              # <-- PROXY energies
+            logits = (-E if self.e_sign == "neg" else E) / self.temperature
+            p_ = F.softmax(logits, dim=-1)
+            if self.top_k is not None and self.top_k < self.n_experts:
+                idx = logits.topk(self.top_k, dim=-1).indices
+                m = torch.zeros_like(p_, dtype=torch.bool).scatter_(-1, idx, True)
+                p_ = p_ * m
+            self._last_energy_per_token = None
+            return torch.einsum("...e,...eh->...h", p_.to(grads.dtype), grads)
+
+        _moe.forward = _t.MethodType(moe_patched, _moe)
+
+        # top_k lives on the inner wrapper for this class, not on ffwd
+        class _TopKShim:
+            def __init__(self, m): self._m = m
+            def __setattr__(self, k, v):
+                if k == "top_k": self._m.top_k = v
+                else: object.__setattr__(self, k, v)
+        _shim = _TopKShim(_moe)
+
     res = {"run": tag, "fit": stats, "exact_router_macs": exact_macs}
     rows = []
     for label, proxy_on, k in [("exact router (baseline)", False, None),
@@ -219,13 +260,16 @@ def main() -> None:
                                ("PROXY router + top-2", True, 2),
                                ("PROXY router + top-1", True, 1)]:
         set_proxy(proxy_on)
-        legacy.top_k = k
+        if is_legacy: legacy.top_k = k
+        else: block.ffwd.moe.top_k = k
         nll, ntok = nll_over_prompts(model, tok, prompts, args.max_len, args.device)
         rows.append(dict(variant=label, nll=nll, ppl=math.exp(nll)))
         base = rows[0]["ppl"]
         print(f"  {label:26s} NLL {nll:.6f}  ppl {math.exp(nll):8.4f}  "
               f"d_ppl {math.exp(nll)-base:+7.4f}   ({ntok} tok)")
-    set_proxy(False); legacy.top_k = None
+    set_proxy(False)
+    if is_legacy: legacy.top_k = None
+    else: block.ffwd.moe.top_k = None
     res["eval"] = rows
 
     OUT.mkdir(parents=True, exist_ok=True)
