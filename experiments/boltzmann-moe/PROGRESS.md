@@ -1,5 +1,25 @@
 # BoltzmannMoE Experiments — Progress & Results
 
+> ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
+>
+> Every "Avg" / "Avg acc" figure below is **`avg9`**: the mean over **nine** tasks
+> with **MMLU EXCLUDED**, and `acc_norm` used on all six tasks that report it
+> (including `sciq`). MMLU was left out of the average because of a dataset
+> installation problem at the time; `race` and `lambada_openai` were also absent
+> (an Arrow/parquet reader bug, fixed 2026-08-03 by pinning `pyarrow>=20`).
+>
+> The **current** convention (`compute_aggregates.py`, and the FET series in
+> `~/Code/GPT-experiments/projects/EGPT-action/RESULTS.md`) is **`avg10`**: ten tasks
+> with **MMLU INCLUDED**, `acc_norm` on five (`sciq` uses plain `acc`).
+>
+> **`avg10` is 1.2–2.7pp LOWER than `avg9`** because MMLU sits near chance (~24–28%)
+> at these scales. **Do not put avg9 and avg10 numbers in the same table** — doing so
+> flatters every pre-2026-06 run by roughly 1.5pp.
+>
+> Restated values for every run with a stored eval:
+> `python experiments/eval_scripts/restate_avg9_to_avg10_20260912.py --md`
+> Corrected headline numbers are in `AVG10_RESTATED.md`.
+
 ## Overview
 
 This series tests Mixture-of-Experts (MoE) routing inside the Energy GPT (EGPT)
