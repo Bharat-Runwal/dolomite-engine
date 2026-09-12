@@ -29,9 +29,13 @@ source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
-uv pip install accelerate lm-eval -q
+# NO lm-eval install: vendored pinned harness via PYTHONPATH
+uv pip install accelerate -q
+source /proj/dmfexp/nima/Code/dolomite-engine/experiments/eval_scripts/eval_tasks.sh
+eval_env
+eval_assert_pin
 
-TASKS="arc_challenge,arc_easy,boolq,copa,hellaswag,openbookqa,piqa,sciq,wikitext,winogrande,mmlu,gsm8k,gsm8k_cot"
+TASKS="\$EVAL_TASKS"
 
 if [ ! -f "${UNSHARDED}/model.safetensors" ] && [ ! -f "${UNSHARDED}/pytorch_model.bin" ]; then
     echo "=== Unsharding ${SAVE_PATH} step ${STEP} ==="

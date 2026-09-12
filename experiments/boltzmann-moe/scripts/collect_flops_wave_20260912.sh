@@ -64,7 +64,11 @@ source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=$REPO:\${PYTHONPATH:-}
 export HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1
 export TMPDIR=/proj/dmfexp/nima/.cache/tmp && mkdir -p "\$TMPDIR"
-uv pip install accelerate lm-eval "pyarrow>=20" -q
+# NO lm-eval install: we use the vendored pinned harness via PYTHONPATH
+uv pip install accelerate "pyarrow>=20" -q
+source /proj/dmfexp/nima/Code/dolomite-engine/experiments/eval_scripts/eval_tasks.sh
+eval_env
+eval_assert_pin
 cd $REPO
 if [ ! -f "$U/model.safetensors" ]; then
   C=/tmp/unshard_${a}_\$\$.yml
@@ -74,7 +78,7 @@ if [ ! -f "$U/model.safetensors" ]; then
 fi
 python experiments/energy-inference/scripts/structured-proj/eval_harness.py \
   --model hf --model_args "pretrained=$U,dtype=bfloat16,trust_remote_code=True" \
-  --tasks arc_challenge,arc_easy,boolq,copa,hellaswag,openbookqa,piqa,sciq,wikitext,winogrande,mmlu \
+  --tasks \$EVAL_TASKS \
   --device cuda:0 --batch_size 4 --trust_remote_code \
   --output_path "$U/harness_results.json"
 EOF

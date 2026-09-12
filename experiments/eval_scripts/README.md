@@ -168,3 +168,96 @@ The old scripts at
 and `experiments/energy-inference/scripts/multi-block-ablation/submit_bbh_eval.sh`
 are kept for now — older `run_*.sh` launchers reference them. New work should
 prefer `experiments/eval_scripts/`.
+
+---
+
+# SWITCH TO THE SHARED HARNESS (2026-09-12)
+
+**We now evaluate with a vendored, version-pinned copy of the same
+lm-evaluation-harness our colleagues use**, so that every number in the ICLR
+submission is produced by identical code.
+
+    experiments/eval_scripts/lm-evaluation-harness/     <- vendored, USE THIS
+    experiments/eval-scripts -> eval_scripts            <- symlink for the hyphen path
+
+Source: `/proj/dmfexp/energy-gpt/lm-evaluation-harness` (colleague bsaha3), copied
+without `.git`. Provenance is recorded in
+`lm-evaluation-harness/VENDORED_FROM.txt`:
+
+| | |
+|---|---|
+| upstream | `github.com/EleutherAI/lm-evaluation-harness` |
+| commit | `ad3f4d0cad1cfcdb815f1e795f7947e49ed9f2e9` ("increment version", #3433) |
+| version | **0.4.9.2** |
+| local modifications | **none** — stock upstream, detached HEAD |
+
+To use it, prepend it to `PYTHONPATH`; do **not** `pip install lm-eval`, which would
+pull a different version into site-packages:
+
+    export PYTHONPATH=/proj/dmfexp/nima/Code/dolomite-engine/experiments/eval_scripts/lm-evaluation-harness:$PYTHONPATH
+
+## What we were doing before, and what actually differs
+
+We were calling a floating `uv pip install lm-eval`, which had resolved to
+**0.4.11**. Diffing 0.4.11 against 0.4.9.2 over everything that can affect a score:
+
+- **Task YAMLs for all 15 tasks we run: identical except `dataset_path`.** 0.4.11
+  uses the newer namespaced Hub names (`allenai/sciq`, `allenai/openbookqa`,
+  `allenai/winogrande`, `aps/super_glue`, `openai/gsm8k`); 0.4.9.2 uses the older bare
+  names (`sciq`, `openbookqa`, ...). **No differences in prompts, `num_fewshot`,
+  filters, metrics, stop sequences, or aggregation.**
+- `lm_eval/tasks/mmlu/`: 0 differing files.
+- `lm_eval/api/metrics.py`: 0.4.11 adds a `likelihood` passthrough metric we do not
+  use. `lm_eval/api/model.py`: typing imports and docstring indentation.
+  `lm_eval/filters/__init__.py`: PEP-585 typing modernisation. **All cosmetic.**
+
+**Conclusion: the switch should not move any number.** It buys reproducibility (a
+pinned commit instead of whatever pip resolves that day) and cross-person
+comparability, not a correction.
+
+### One operational gotcha the switch introduces
+
+The older bare dataset names **miss our HF cache**, which is keyed by the newer
+namespaced names. Under `HF_DATASETS_OFFLINE=1` this made `sciq`, `openbookqa`,
+`winogrande`, `super_glue/boolq` and `race/high` fail outright. Fixed with cache
+aliases pointing at the *same underlying data* (so this is not a data change):
+
+    C=~/.cache/huggingface/datasets
+    ln -s allenai___sciq        $C/sciq
+    ln -s allenai___openbookqa  $C/openbookqa
+    ln -s allenai___winogrande  $C/winogrande
+    ln -s allenai___ai2_arc     $C/ai2_arc
+    ln -s ../aps___super_glue/boolq  $C/super_glue/boolq
+    mkdir -p $C/race && ln -s ../ehovy___race/all $C/race/all \
+                     && ln -s ../EleutherAI___race/high $C/race/high
+
+Verified: all 15 tasks load offline through the vendored harness after this.
+
+## Task list was inconsistent across our own scripts — now unified
+
+Before the switch there were **three different task lists** in this repo, so "Avg"
+was not necessarily over the same tasks between tables:
+
+| script | tasks |
+|---|---|
+| `submit_eval.sh` | 15 (incl. `race`, `lambada_openai`, `gsm8k`, `gsm8k_cot`) |
+| `unshard_eval_progression.sh` | 13 (no `race`, no `lambada_openai`) |
+| `collect_flops_wave_20260912.sh` | 11 (also no gsm8k) |
+
+All three now use `EVAL_TASKS` defined in `eval_tasks.sh` (single source of truth).
+
+**The reported aggregate is `avg10` / `avg10_norm` from `compute_aggregates.py`**, a
+mean over exactly ten tasks: `arc_challenge, arc_easy, boolq, copa, hellaswag,
+openbookqa, piqa, sciq, winogrande, mmlu`. `avg10_norm` substitutes `acc_norm` for
+the five tasks where it is standard (`arc_challenge, arc_easy, hellaswag, openbookqa,
+piqa`) and uses `acc` for the other five. `race` and `lambada_openai` are evaluated
+but are **not** in the average, despite a commit message that says "11-task Avg%".
+
+## BBH remains a deliberate local deviation
+
+`bbh_fewshot` upstream ships **without a `filter_list`**, so `exact_match` is a
+verbatim string compare and every model scores 0.0000 (the continuation carries a
+leading space from `target_delimiter`). We rescore post hoc with `bbh_rescore.py`,
+porting the per-subtask `flexible-extract` regexes from `bbh_zeroshot/*.yaml`. See
+`BBH_FIX.md`. This is unchanged by the switch and **must be disclosed** whenever BBH
+numbers are compared to stock-harness results elsewhere.
