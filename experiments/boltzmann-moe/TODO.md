@@ -1,5 +1,64 @@
 # Boltzmann MoE — TODO
 
+## 2026-09-12: inference-FLOPs work (see HANDOFF.md §7 for all evidence)
+
+**Done**
+- [x] Exact per-token FLOP model for `math_fet_boltz_hopfield_rep_*`
+      (`scripts/analyze_moe_router_flops_20260912.py`). 603.59M MACs/token;
+      MoE is 25.0%, lm_head 25.5%, GPT prefix 37.5%.
+- [x] Measured real routing + branch magnitudes + paired-NLL ablation on 3 FET
+      checkpoints (`scripts/measure_moe_routing_20260912.py`, job 1559723).
+- [x] Answered the standing open question *"why does truncating to top-2 cost 6 PPL?"*
+      — for the Hopfield-MEAN MoE it costs **nothing**, because routing is uniform
+      (`eff_n = 7.999/8`) and the FF branch is inert. The 6 PPL belongs to the
+      **w1w2** line, where routing carries real information (~3.9 PPL).
+- [x] `train_utils.py:73` — `FFEnergyBase` added to the metrics isinstance gate.
+      No `EnergyFF_*` run had ever logged routing-collapse metrics.
+- [x] `head_dim` decoupled from `hidden_size/num_heads` in `EnergyAttention_QK`,
+      enabling over-complete heads (`num_heads*head_dim > d`). Default unchanged;
+      forward+backward verified, partial RoPE already supported (`rope.py:118`).
+- [x] Single-block all-MoE architecture family + FLOP/param calculator
+      (`scripts/design_single_block_moe_20260912.py`), 7 configs emitted to
+      `configs/single_block_moe/`.
+- [x] Grouped (sort-by-expert) sparse inference path + throughput benchmark
+      (`scripts/bench_moe_throughput_20260912.py`) — closes the TODO below about
+      needing a real dispatch to measure anything.
+
+**Next**
+- [ ] **Fit the rank-r proxy router** on the cached `(x, E_k)` pairs in
+      `results/router_analysis/router_fit_cache__*.pt` (frozen backbone). For
+      Hopfield the ceiling is 96.7% top-1 at r=16; for w1w2 the projection-based
+      ceiling estimate plateaus near 0.5 and is **non-monotone in r**, which is not
+      a credible ceiling curve — extend r up to d (=768) to validate the estimator,
+      and prefer fitting a head directly on `(x, E_k)` over projecting x.
+- [x] **Repulsion loss was mis-specified** — FIXED (`repulsion_form`, default
+      `squared`). `L_rep = λ·E[cos]` is minimised at cos = −1 and rewards
+      anti-alignment: both FET-rep and h1 sit within ~3% of the geometric floor
+      `−1/(K−1)`. **But it is NOT the cause of the dead branch** — h1 runs λ=0.1
+      (10× FET's) and is 86% load-bearing. Use `abs` to preserve the existing λ
+      sweeps; `squared` is ~3× weaker at the same λ. Re-sweep λ either way.
+- [ ] **The real root cause: the Hopfield output prefactor `4/I_e`.**
+      `mean ‖g_k‖` = 0.019 (Hopfield) vs 155.66 (legacy w1w2) — 8,200×, of which
+      256× is the bare constant (`energy_ff.py:644` `4/I_e` = 0.0039 vs
+      `mlp.py:693` no prefactor at all). `scale_ff` = 1.52 cannot bridge that.
+      Change `4/I_e → 1/√I_e` on the Hopfield output and re-run. Fixing repulsion
+      alone will NOT revive this line.
+- [x] Scale-free routing — DONE (`routing_norm ∈ {none, zscore, sqrt_width}` on
+      `BoltzmannMoEFFEnergy._logits`). `zscore` normalises to unit std across
+      experts, so pair it with `temperature ≈ 0.35` to reach `eff_n ≈ 2`; plain
+      z-score alone only reaches `eff_n` 5.6–6.4 of 8.
+- [ ] Re-check the FF-branch strength of the remaining `math_fet_hopfield_mean_r*`
+      register variants — the whole Hopfield-MEAN line measures 1.6–10.9% FF share
+      vs 85.8% for w1w2, so published deltas in that family may be comparing
+      near-inert branches.
+- [ ] DROPPED: "route once at iteration 0, reuse for 1..T". Iteration-to-iteration
+      argmax agreement is 0.27–0.30 on the w1w2 line (TV 0.24–0.27) — routing
+      genuinely changes with depth. The 0.87–0.90 agreement on the Hopfield model
+      was an artefact of its degenerate uniform routing.
+- [ ] Train one `configs/single_block_moe/` point once the throughput numbers justify
+      it. Note the recurrence tax: k/K must be ≲ 1/T to stay at parity with a
+      conventional dense transformer at iso-total-params.
+
 ## After Mon 2026-06-01 talk
 
 ### A/B test: tanh_exact φ' (DONE — surprising negative result, follow-up needed)

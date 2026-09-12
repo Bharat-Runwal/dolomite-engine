@@ -73,6 +73,111 @@ from ..linear import ParameterizedLinear
 _SIGMOID_SCALE: float = (2.0 / math.pi) ** 0.5
 
 
+
+_HOPFIELD_GRAD_SCALES = ("mean", "inv_sqrt", "sqrt_consistent")
+
+
+def _hopfield_grad_prefactor(intermediate_size: int, mode: str) -> float:
+    """Prefactor on the Hopfield descent gradient ``W^T(gelu(Wh) . gelu'(Wh))``.
+
+    ==========================================================================
+    REVERT NOTE (2026-09-12) — IF A RUN DIVERGES, SET ``hopfield_grad_scale:
+    "mean"`` IN THE CONFIG. That is the pre-2026-09-12 behaviour, bit-for-bit.
+    ==========================================================================
+
+    Why this knob exists. Measured on
+    ``math_fet_boltz_hopfield_rep_8gpt_1egpt6x_d1536_int8k_K8_lra32_itd3_lr1p5e3_33b_16gpu``:
+    ``||ffwd_out|| = 0.0050`` against ``||attn_out|| = 18.53``, i.e. the energy-FF
+    branch supplied 0.04% of ``grad_E`` and deleting it entirely moved perplexity by
+    +0.0003 over 87,997 tokens. The branch was inert.
+
+    WHAT THE "mean" FORM ACTUALLY DOES TO SCALING. For W with iid entries of std
+    sigma and ||h|| = sqrt(d):
+        ||gated||        ~ sigma sqrt(I_e d)
+        ||gated @ W||    ~ sigma^2 d sqrt(I_e)
+    so the *descent step* scales as ``prefactor * sqrt(I_e)``:
+
+        prefactor      step vs I_e        status
+        2/I_e (mean)   ~ 1/sqrt(I_e)      DECAYS with width   <- current default
+        1/sqrt(I_e)    ~ const            width-INVARIANT
+        2   (sum)      ~ sqrt(I_e)        GROWS with width     <- this diverged
+
+    So "mean" makes the ENERGY width-invariant (correct: E sums I_e positive
+    squares, so 1/I_e is the right O(1) normalisation) but over-corrects the
+    GRADIENT, which then decays as 1/sqrt(I_e).
+
+    SAFETY MARGIN VS THE KNOWN DIVERGENCE. Run 1714840 went NaN at step 3710 using
+    the SUM form (no 1/d_int at all) at d_int=8192, LR 7.5e-4 — see the
+    ``Hopfield_Energy_MLP`` docstring in mlp.py:153 and the header of
+    ``configs/multi_block_ablation/math_fet_hopfield_mean_*.yml``. At the MoE's
+    per-expert width I_e=1024 the sum-form prefactor would be 4.0. Relative to that:
+        "mean"            4/1024  = 0.0039   1024x below sum
+        "inv_sqrt"        1/32    = 0.03125   128x below sum   (8x above mean)
+        "sqrt_consistent" 4/32    = 0.125      32x below sum  (32x above mean)
+    Both new options keep a large margin below the configuration that diverged, and
+    both restore the width-invariance the original fix was reaching for. This is
+    NOT a revert of that fix.
+
+    WHAT THIS KNOB DOES NOT FIX. It does not touch the ENERGY, deliberately:
+    ``E = (1/I_e)||gelu(Wh)||^2`` sums I_e positive terms, so 1/I_e is the correct
+    O(1) scale and inflating it to 1/sqrt(I_e) would make E grow as sqrt(I_e) —
+    the same direction as the router saturation that commit 16500e8 ("scale E_i by
+    1/sqrt(expert_I)") was introduced to cure. The flat routing
+    (effective_n_experts 7.999/8, E ~ 0.0126 against tau=1) is a SEPARATE defect and
+    is fixed by ``routing_norm``, which is scale-free and therefore immune to the
+    weight-norm drift that caused it (||W||_F fell 70.9 -> 20.5 over training).
+
+    CONSISTENCY CAVEAT. With "inv_sqrt" or "sqrt_consistent" the returned vector is
+    no longer exactly ``grad`` of the ``E`` that ``energy_per_token`` reports — it is
+    that gradient times sqrt(I_e)/4 or sqrt(I_e) respectively. Harmless while
+    ``energy_descent_loss_coef`` and ``energy_action_loss_coef`` are 0 (as in every
+    current config), but it MATTERS if either is switched on, because those losses
+    assume ffwd_out == grad_h E.
+
+    MAGNITUDE EXPECTATION — READ BEFORE ASSUMING THIS IS SUFFICIENT. "inv_sqrt" is
+    only 8x and "sqrt_consistent" only 32x above the current default. Applied to the
+    measured checkpoint that lifts the FF share of grad_E from 0.04% to roughly 0.3%
+    or 1.3% — i.e. to about the level of the (also weak) non-MoE hopfield_mean
+    sibling at 1.57%, NOT to the 85.8% of the healthy w1w2 line. The remaining ~32x
+    sits in the weight norms, which shrank under weight decay precisely BECAUSE the
+    branch was inert. Whether a from-scratch run escapes that feedback loop with 8-32x
+    more gradient signal is an empirical question — hence the smoke tests.
+    """
+    if mode == "mean":
+        return 4.0 / intermediate_size          # PRE-2026-09-12 DEFAULT; revert here
+    if mode == "inv_sqrt":
+        return intermediate_size ** -0.5
+    if mode == "sqrt_consistent":
+        return 4.0 * intermediate_size ** -0.5
+    raise ValueError(f"unknown hopfield_grad_scale ({mode})")
+
+
+def _repulsion_penalty(cos: torch.Tensor, form: str) -> torch.Tensor:
+    """Scalar penalty from pairwise expert-output cosines.
+
+    "signed" is minimised at cos = -1 and therefore rewards ANTI-alignment, not
+    diversity. Under near-uniform routing the anti-aligned expert gradients then
+    cancel in sum_k p_k g_k and the whole FF branch collapses (measured: 271x
+    smaller ||ffwd_out|| than the no-repulsion sibling). Prefer "squared".
+
+    LAMBDA CALIBRATION: the existing repulsion_coef sweeps (B4/B5 found 0.1 good,
+    the FET runs used 0.01) were tuned under "signed". At |cos| ~ 0.3 the squared
+    form is ~3x weaker than signed/abs for the same lambda, since cos^2 vanishes
+    quadratically near orthogonality. So "abs" is the drop-in replacement that
+    preserves those lambda values, while "squared" is smoother but wants lambda
+    scaled up correspondingly. Re-sweep lambda when switching.
+    """
+    if form == "squared":
+        return (cos ** 2).mean()
+    if form == "abs":
+        return cos.abs().mean()
+    if form == "hinge":
+        return F.relu(cos).mean()
+    if form == "signed":
+        return cos.mean()          # LEGACY, mis-specified; see docstring
+    raise ValueError(f"unknown repulsion_form ({form})")
+
+
 def _get_std_for_linear(initializer_range: float, init_method: str, m_width: float | None) -> float:
     std = initializer_range
     if init_method == "mup":
@@ -280,13 +385,16 @@ class HopfieldFFEnergy(FFEnergyBase):
         add_bias: bool = False,
         gelu_grad_method: str = "sigmoid",
         layer_idx: int | None = None,
+        hopfield_grad_scale: str = "mean",
         **_unused: object,
     ) -> None:
         super().__init__()
         assert gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
+        assert hopfield_grad_scale in _HOPFIELD_GRAD_SCALES
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.gelu_grad_method = gelu_grad_method
+        self.hopfield_grad_scale = hopfield_grad_scale
         self.layer_idx = layer_idx
 
         std = _get_std_for_linear(initializer_range, init_method, m_width)
@@ -303,9 +411,11 @@ class HopfieldFFEnergy(FFEnergyBase):
         # provide a faithful 0.5-scaled phi' that matches the W1W2 case AND
         # adjust the (2/d_int) constant to (4/d_int) so the gradient magnitude
         # is the same as legacy. See ``_HOPFIELD_LEGACY_FACTOR`` for context.
-        inv_d = 1.0 / self.intermediate_size
+        # PREFACTOR: was hardcoded (4.0 / intermediate_size) before 2026-09-12.
+        # REVERT by setting hopfield_grad_scale="mean". See _hopfield_grad_prefactor.
+        pref = _hopfield_grad_prefactor(self.intermediate_size, self.hopfield_grad_scale)
         gated = gelu_Wx * gelu_prime  # phi' has its own 0.5 factor inside _gelu_and_grad
-        out = (4.0 * inv_d) * (gated @ self.W.weight)
+        out = pref * (gated @ self.W.weight)
 
         if self.training and self._capture_energy:
             self._last_energy_per_token = (gelu_Wx ** 2).mean(dim=-1)
@@ -372,6 +482,8 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         top_k: int | None = None,
         e_sign: str = "neg",
         layer_idx: int | None = None,
+        repulsion_form: str = "squared",
+        routing_norm: str = "none",
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -384,6 +496,10 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         self.temperature = float(temperature)
         self.repulsion_coef = float(repulsion_coef)
         self.n_repulsion_pairs = int(n_repulsion_pairs)
+        assert repulsion_form in ("squared", "abs", "hinge", "signed")
+        self.repulsion_form = repulsion_form
+        assert routing_norm in ("none", "zscore", "sqrt_width")
+        self.routing_norm = routing_norm
         self.top_k = top_k
         self.e_sign = e_sign
         self.layer_idx = layer_idx
@@ -423,7 +539,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # "lower energy = better"). ``e_sign="pos"`` matches the validated
         # W1W2-MoE class which computed softmax(+E_k/τ) on its (negative)
         # routing energy — same effect, different sign convention.
-        logits = (-E_k if self.e_sign == "neg" else E_k) / self.temperature
+        logits = self._logits(E_k)
         p = F.softmax(logits, dim=-1)
         if self.top_k is not None and self.top_k < self.n_experts:
             _, topk_idx = logits.topk(self.top_k, dim=-1)
@@ -453,21 +569,53 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
         e_list = [expert.energy_per_token(x) for expert in self.experts]
         E_k = torch.stack(e_list, dim=-1)
-        logits = (-E_k if self.e_sign == "neg" else E_k) / self.temperature
+        logits = self._logits(E_k)
         return -self.temperature * torch.logsumexp(logits, dim=-1)
 
     # --- private ---------------------------------------------------------- #
 
+    def _logits(self, E_k: torch.Tensor) -> torch.Tensor:
+        """Routing logits from per-expert energies.
+
+        WHY THIS EXISTS. In this class the routing logit and the energy are the SAME
+        object, so a single normalisation has to serve two incompatible jobs: keeping
+        the descent gradient stable, and keeping softmax(E/tau) informative.
+
+        The Hopfield form uses a MEAN, E = (1/d_int)||gelu(Wh)||^2, which is required
+        for gradient stability (without it the descent step grows with d_int and
+        training NaNs). But a mean over d_int units puts E ~ 1e-2, which against
+        tau=1 is 100x too small to separate experts: measured on
+        math_fet_boltz_hopfield_rep, E_mean = 0.0134 with per-token spread across
+        experts of 0.0129, giving effective_n_experts = 7.999 / 8 -- routing is
+        EXACTLY uniform, and top-k is then a pure loss rather than a trade.
+
+        The w1w2 line escaped this because it carries a 1/sqrt(expert_I) routing
+        scale, leaving E_mean = 0.109 with spread 0.437 -- commensurate with tau=1,
+        giving effective_n_experts 3.55/4 and genuinely informative routing.
+
+          "none"        logits = +-E/tau                     (as-trained; legacy)
+          "sqrt_width"  logits = +-E*sqrt(expert_I)/tau      (matches the w1w2 line)
+          "zscore"      logits = +-(E - mean_k)/std_k/tau    (scale-free: immune to
+                        the energy magnitude drifting as weight decay shrinks W,
+                        which is what happened here over training)
+        """
+        s = -E_k if self.e_sign == "neg" else E_k
+        if self.routing_norm == "sqrt_width":
+            s = s * (self.experts[0].intermediate_size ** 0.5)
+        elif self.routing_norm == "zscore":
+            s = (s - s.mean(-1, keepdim=True)) / s.std(-1, keepdim=True).clamp_min(1e-12)
+        return s / self.temperature
+
     def _add_repulsion_loss(self, expert_grads: torch.Tensor) -> None:
-        """Cosine-similarity repulsion on random expert output pairs."""
+        """Repulsion on random expert output pairs. See ``repulsion_form``."""
         eg = expert_grads.reshape(-1, self.n_experts, self.hidden_size)
         eg_norm = F.normalize(eg, dim=-1)
         k = min(self.n_repulsion_pairs, len(self._all_pairs))
         sampled = random.sample(self._all_pairs, k)
         i_idx = [p[0] for p in sampled]
         j_idx = [p[1] for p in sampled]
-        cos_sim = (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1).mean()
-        add_aux_loss(self.repulsion_coef * cos_sim)
+        cos = (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1)
+        add_aux_loss(self.repulsion_coef * _repulsion_penalty(cos, self.repulsion_form))
 
     def _log_metrics(self, p: torch.Tensor, out: torch.Tensor) -> None:
         with torch.no_grad():
@@ -564,20 +712,25 @@ class _HopfieldExpert(FFEnergyBase):
         intermediate_size: int,
         W_slice,  # callable
         gelu_grad_method: str,
+        hopfield_grad_scale: str = "mean",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.gelu_grad_method = gelu_grad_method
+        assert hopfield_grad_scale in _HOPFIELD_GRAD_SCALES
+        self.hopfield_grad_scale = hopfield_grad_scale
         self._W_slice = W_slice
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         W = self._W_slice()
         Wx = x @ W.t()
         gelu_Wx, gelu_prime = _gelu_and_grad(Wx, self.gelu_grad_method)
-        inv_d = 1.0 / self.intermediate_size
+        # PREFACTOR: was hardcoded (4.0 / intermediate_size) before 2026-09-12.
+        # REVERT by setting hopfield_grad_scale="mean". See _hopfield_grad_prefactor.
+        pref = _hopfield_grad_prefactor(self.intermediate_size, self.hopfield_grad_scale)
         gated = gelu_Wx * gelu_prime
-        out = (4.0 * inv_d) * (gated @ W)
+        out = pref * (gated @ W)
 
         if self._capture_energy:
             self._last_energy_per_token = (gelu_Wx ** 2).mean(dim=-1)
@@ -654,6 +807,7 @@ class _FusedHopfieldHolder(nn.Module):
         m_width: float | None,
         add_bias: bool,
         gelu_grad_method: str,
+        hopfield_grad_scale: str = "mean",
     ) -> None:
         super().__init__()
         assert intermediate_size % n_experts == 0
@@ -665,6 +819,7 @@ class _FusedHopfieldHolder(nn.Module):
         self.W = ParameterizedLinear(hidden_size, intermediate_size, bias=add_bias, std=std)
         mark_parameter_as_mup_learning_rate(self.W.weight)
         self.gelu_grad_method = gelu_grad_method
+        self.hopfield_grad_scale = hopfield_grad_scale
 
     def make_experts(self) -> list[FFEnergyBase]:
         experts: list[FFEnergyBase] = []
@@ -677,6 +832,7 @@ class _FusedHopfieldHolder(nn.Module):
                     intermediate_size=self.expert_I,
                     W_slice=W_slice,
                     gelu_grad_method=self.gelu_grad_method,
+                    hopfield_grad_scale=self.hopfield_grad_scale,
                 )
             )
         return experts
@@ -725,11 +881,14 @@ def build_boltzmann_moe(
     repulsion_coef: float = 0.0,
     n_repulsion_pairs: int = 4,
     top_k: int | None = None,
+    repulsion_form: str = "squared",
+    routing_norm: str = "none",
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
     add_bias: bool = False,
     gelu_grad_method: str = "sigmoid",
+    hopfield_grad_scale: str = "mean",
     layer_idx: int | None = None,
 ) -> FusedMoEContainer:
     """Factory: composable Boltzmann-MoE over W1W2 or Hopfield experts.
@@ -752,6 +911,7 @@ def build_boltzmann_moe(
             n_experts=n_experts, init_method=init_method,
             initializer_range=initializer_range, m_width=m_width,
             add_bias=add_bias, gelu_grad_method=gelu_grad_method,
+            hopfield_grad_scale=hopfield_grad_scale,
         )
         e_sign = "neg"
     else:
@@ -766,5 +926,7 @@ def build_boltzmann_moe(
         top_k=top_k,
         e_sign=e_sign,
         layer_idx=layer_idx,
+        repulsion_form=repulsion_form,
+        routing_norm=routing_norm,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)

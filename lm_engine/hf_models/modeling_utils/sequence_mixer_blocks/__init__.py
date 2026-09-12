@@ -215,6 +215,7 @@ def get_sequence_mixer(
             use_padding_free_transformer=use_padding_free_transformer,
             stop_grad_key=getattr(config, "energy_stop_grad_key", False),
             add_wv_wo=getattr(config, "energy_attn_add_wv_wo", False),
+            head_dim=getattr(block, "head_dim", None),
         )
     elif sequence_mixer_type == "boltzmann_moe_energy_attention":
         return BoltzmannMoE_Energy_Attention(

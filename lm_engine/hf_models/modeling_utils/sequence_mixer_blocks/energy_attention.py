@@ -58,6 +58,7 @@ class EnergyAttention_QK(nn.Module):
         use_padding_free_transformer: bool,
         stop_grad_key: bool = False,
         add_wv_wo: bool = False,
+        head_dim: int | None = None,
     ) -> EnergyAttention_QK:
         super().__init__()
 
@@ -72,11 +73,22 @@ class EnergyAttention_QK(nn.Module):
         self.use_padding_free_transformer = use_padding_free_transformer
         self.sliding_window = sliding_window
 
-        self.head_dim = divide_if_divisible(
-            self.hidden_size,
-            self.num_heads,
-            f"`hidden_size` ({self.hidden_size}) must be divisible by `num_heads` ({self.num_heads})",
-        )
+        # head_dim defaults to hidden_size / num_heads, but may be set explicitly to
+        # DECOUPLE the two. That allows OVER-COMPLETE heads, num_heads*head_dim > d
+        # (e.g. d=2048, head_dim=128, num_heads=64 -> D_qk = 4d), which is the only
+        # way to buy attention capacity in a single-block recurrent energy model
+        # where you cannot add layers. Q/K then live in R^{D_qk}; the output
+        # projection contracts back to R^d through the Q weights, which works for
+        # any head_dim (see _get_q_weight_for_output and the einsum in forward).
+        if head_dim is None:
+            self.head_dim = divide_if_divisible(
+                self.hidden_size,
+                self.num_heads,
+                f"`hidden_size` ({self.hidden_size}) must be divisible by `num_heads` ({self.num_heads})",
+            )
+        else:
+            self.head_dim = head_dim
+        self.qk_dim = self.num_heads * self.head_dim
 
         self.position_embedding_type = position_embedding_type
         self.attention_multiplier = attention_multiplier
@@ -87,10 +99,11 @@ class EnergyAttention_QK(nn.Module):
             std /= math.sqrt(m_width)
 
 
-        # c_attn projects to Q and K only (V = K in energy attention)
+        # c_attn projects to Q and K only (V = K in energy attention).
+        # Width is 2*qk_dim, which equals 2*hidden_size in the default coupled case.
         self.c_attn = ParameterizedLinear(
             self.hidden_size,
-            2 * self.hidden_size,
+            2 * self.qk_dim,
             bias=self.qkv_bias,
             std=initializer_range,
         )
@@ -99,6 +112,10 @@ class EnergyAttention_QK(nn.Module):
         # E(h_i) = (W_O * attn_weights * W_V * h_{<i})^T * h_i
         # grad = W_O * attn_weights * W_V * h_{<i}  (exact when KV stop-grad)
         if self.add_wv_wo:
+            assert self.qk_dim == self.hidden_size, (
+                "add_wv_wo reshapes attention output to hidden_size, so it requires "
+                f"num_heads*head_dim ({self.qk_dim}) == hidden_size ({self.hidden_size})"
+            )
             self.W_V = ParameterizedLinear(self.hidden_size, self.hidden_size, bias=add_bias, std=std)
             self.W_O = ParameterizedLinear(self.hidden_size, self.hidden_size, bias=add_bias, std=std)
             mark_parameter_as_mup_learning_rate(self.W_V.weight)
@@ -146,7 +163,7 @@ class EnergyAttention_QK(nn.Module):
         """Extract Q projection weights for energy attention output projection."""
         # c_attn.weight shape: (2*hidden_size, hidden_size)
         # Q portion is first hidden_size rows
-        q_weight = self.c_attn.weight[: self.hidden_size]  # (H*D, C)
+        q_weight = self.c_attn.weight[: self.qk_dim]  # (H*D, C)
         q_weight = q_weight.view(self.num_heads, self.head_dim, self.hidden_size)
         q_weight = q_weight.permute(0, 2, 1).contiguous()  # (H, C, D)
         # Normalize to unit norm per head to prevent weight growth from amplifying output
@@ -439,7 +456,7 @@ class EnergyAttention_QK(nn.Module):
         out = alpha_diag.unsqueeze(-1) * query                  # [B, H, T, d_h]
 
         # Project by W_K^T (second hidden_size rows of c_attn.weight).
-        k_weight = self.c_attn.weight[self.hidden_size:]
+        k_weight = self.c_attn.weight[self.qk_dim:]
         k_weight = k_weight.view(self.num_heads, self.head_dim, self.hidden_size)
         k_weight = k_weight.permute(0, 2, 1).contiguous()
         return torch.einsum("bhts,hcs->btc", out, k_weight)
@@ -487,7 +504,7 @@ class EnergyAttention_QK(nn.Module):
         out_K = torch.matmul(alpha.transpose(-2, -1), query)  # [B, H, Tk, d_h]
 
         # Project by W_K^T (second hidden_size rows of c_attn.weight reshaped to (H, hidden, d_h)).
-        k_weight = self.c_attn.weight[self.hidden_size:]                      # [H*d_h, hidden]
+        k_weight = self.c_attn.weight[self.qk_dim:]                           # [H*d_h, hidden]
         k_weight = k_weight.view(self.num_heads, self.head_dim, self.hidden_size)
         k_weight = k_weight.permute(0, 2, 1).contiguous()                     # [H, hidden, d_h]
         return torch.einsum("bhts,hcs->btc", out_K, k_weight)                  # [B, T, hidden]

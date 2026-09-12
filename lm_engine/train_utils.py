@@ -12,6 +12,7 @@ from .enums import GradientCheckpointingMethod
 from .hf_models import CommonConfig, is_custom_model
 from .hf_models.modeling_utils import is_glu
 from .hf_models.modeling_utils.mlp_blocks.mlp import Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP
+from .hf_models.modeling_utils.mlp_blocks.energy_ff import FFEnergyBase
 from .hf_models.modeling_utils.sequence_mixer_blocks.energy_attention import EnergyAttention_QK
 from .utils import (
     Accelerator,
@@ -69,8 +70,17 @@ def track_metrics(
                     if 'scale_ff' in param_name:
                         scale_ff_values[f"{name}.{param_name}"] = param.item()
 
-            # Track Energy_MLP metrics
-            if isinstance(module, (Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP)):
+            # Track Energy_MLP metrics.
+            # FFEnergyBase covers the 2026-06-28 composable family (EnergyFF_W1W2 /
+            # EnergyFF_Hopfield / EnergyFF_BoltzmannMoE). Without it, no EnergyFF_*
+            # run logged its routing-collapse metrics (effective_n_experts,
+            # max_expert_load, ...) — they were silently absent from wandb.
+            # FusedMoEContainer mirrors its inner BoltzmannMoEFFEnergy's metrics, so
+            # skip the inner ``.moe`` to avoid emitting each series twice.
+            if isinstance(
+                module,
+                (Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP, FFEnergyBase),
+            ) and name.rsplit(".", 1)[-1] != "moe":
                 metrics = module.get_metrics()
                 if metrics is not None:
                     for metric_name, value in metrics.items():

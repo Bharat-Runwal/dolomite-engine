@@ -10,6 +10,9 @@ from ...utils import BaseArgs
 class _EnergyAttentionArgs(BaseArgs):
     sequence_mixer_type: str = "energy_attention"
     num_attention_heads: int = 12
+    # None => hidden_size // num_attention_heads. Set explicitly to decouple the
+    # two and allow OVER-COMPLETE heads (num_heads*head_dim > hidden_size).
+    head_dim: int | None = None
     num_key_value_heads: int = 1
     softmax_dropout: float = 0
     dropout: float = 0

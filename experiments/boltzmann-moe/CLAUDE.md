@@ -4,6 +4,14 @@ This directory documents the **BoltzmannMoE Energy FFN** experiments (series B1�
 The goal was to replace the standard Energy\_MLP feedforward in deep EGPT with a
 Boltzmann-weighted mixture of experts and study whether the routing collapses.
 
+> **Recovered session dialogue** (2026-09-07): the original pre-June boltzmann-moe
+> Claude Code session was auto-purged (Claude Code's `cleanupPeriodDays`, default 30).
+> The surviving boltz discussion (h1 Boltzmann-MoE config, gradient-through-energy,
+> FPT scaling) was extracted to `recovered_boltz_sessions/`:
+> - `boltz_10073753_jun14-jul16.md` — 179 msgs, the substantive record (launched from `Code/GPT-experiments`)
+> - `boltz_c3ee2c6c_apr30-aug11.md` — 4 incidental mentions (paper baselines)
+> - `ADMIN_snapshot_recovery_request.md` — draft email for GPFS snapshot recovery of files purged today
+
 ---
 
 ## What is BoltzmannMoE?
@@ -28,14 +36,20 @@ params and FLOPs as one Energy\_MLP with the same `intermediate_size`.
 
 ## Key source files
 
+**Two lineages** — the B/C/H-series and all `h1_*` checkpoints use the *legacy*
+class; every `math_fet_*` / `EnergyFF_*` checkpoint uses the *composable* refactor
+(2026-06-28). See `HANDOFF.md` §3 for how to tell them apart and why it matters.
+
 | File | What it does |
 |------|-------------|
-| `lm_engine/hf_models/modeling_utils/mlp_blocks/mlp.py` | `BoltzmannMoE_Energy_MLP` class |
-| `lm_engine/hf_models/config/mlp.py` | `_BoltzmannMoEEnergyMLPArgs` config dataclass |
-| `lm_engine/hf_models/modeling_utils/mlp_blocks/__init__.py` | `get_mlp_block` dispatch |
+| `.../mlp_blocks/mlp.py:540` | **legacy** `BoltzmannMoE_Energy_MLP` (w1w2 experts) |
+| `.../mlp_blocks/energy_ff.py` | **composable** family: `FFEnergyBase`, `W1W2FFEnergy`, `HopfieldFFEnergy`, `BoltzmannMoEFFEnergy`, `FusedMoEContainer`, `build_boltzmann_moe` |
+| `lm_engine/hf_models/config/mlp.py` | `_BoltzmannMoEEnergyMLPArgs` (legacy) and `_EnergyFFBoltzmannMoEArgs` (composable) |
+| `.../mlp_blocks/__init__.py:113` / `:179` | `get_mlp_block` dispatch — legacy / composable |
 | `lm_engine/hf_models/config/__init__.py` | Registry entry (`_MLP_CONFIG_CLASSES`) |
-| `lm_engine/train_utils.py` | `get_metrics()` logging for routing collapse metrics |
+| `lm_engine/train_utils.py:73` | `get_metrics()` logging for routing collapse metrics |
 | `lm_engine/arguments.py` | `SaveArgs.max_to_keep: int | None` (pydantic fix) |
+| `.../sequence_mixer_blocks/energy_attention.py:75` | `head_dim` (optional; decouples from `d/num_heads` for over-complete heads) |
 
 ---
 
@@ -80,7 +94,7 @@ All located in `configs/boltzmann_moe/`.
 | `b4_boltz_moe_repulsion_strong_16x1024_d768_lr2e3.yml` | 0.1 | 0 | 0.1 | Strong repulsion (best load balance) |
 | `b5_boltz_moe_rep_strong_dropout_wd_16x1024_d768_lr2e3.yml` | 0.1 | 0.1 | 0.3 | Combined |
 
-All use: `d=768`, 12 blocks, 16 experts × 1024 = **~422M total params**. Note: all B variants underperform V1 EGPT d=768 (143M) due to 21:1 FFN:Attn imbalance.
+All use: `d=768`, 12 blocks, 16 experts × 1024 = **~422M total params**. Note: all B variants (original iso-param code) underperform V1 EGPT d=768 (143M) due to the 21:1 FFN:Attn imbalance — but see the revised results at the bottom: the 1/√I routing-scale fix lifts the B4 rerun to 0.494 (≈ V1-400M EGPT).
 
 ### C-series (design fixes, d=768):
 
@@ -97,9 +111,16 @@ All use: `d=768`, 12 blocks, 16 experts × 1024 = **~422M total params**. Note: 
 
 | Config | Description | Avg acc | WikiPPL |
 |--------|-------------|---------|---------|
-| `h1_topk_egpt_moe_d768.yml` | **BEST**: 4 full experts×2048, top-2 | **0.499** | 39.8 |
-| `h1_topk_egpt_moe_r128_d768.yml` | Same + 128 register tokens | 0.484 | 39.6 |
-| `h1_boltz_egpt_moe_d768.yml` | Boltzmann routing (iso-param, fails) | 0.464 | 46.1 |
+| `h1_boltz_moe_fullsize` | **BEST**: Boltzmann routing, 4 full experts×2048 + 1/√I routing scale | **0.501** | **36.5** |
+| `h1_topk_egpt_moe_d768.yml` | 4 full experts×2048, top-2 (learned router) | 0.499 | 39.8 |
+| `h1_gptmoe_boltz_egpt` | Switch-MoE GPT prefix + Boltzmann EGPT (full-size) | 0.486 | 35.5 |
+| `h1_boltz_topk2` | Sparse top-2 Boltzmann in EGPT (no learned router) | 0.486 | 36.4 |
+| `h1_topk_egpt_moe_r128_d768.yml` | h1_topk + 128 register tokens | 0.484 | 39.6 |
+| `h1_boltz_egpt_moe_d768.yml` | Boltzmann routing, **iso-param** (experts too small — fails) | 0.464 | 46.1 |
+
+**Update (2026-06-05)**: With **full-size experts** (not iso-param split) **and
+1/√(expert_I) routing-energy normalization**, Boltzmann routing (0.501) matches or
+slightly beats learned-router top-k (0.499). See the revised conclusion below.
 
 ---
 
@@ -169,18 +190,27 @@ To scale to more experts or larger hidden size, adjust `intermediate_size` and
 | 16 | 2048 | 32768 | ~723M |
 | 32 | 1024 | 32768 | ~723M |
 
-**Warning**: current experiments show the MoE is severely FFN-heavy (FFN:Attn
-≈ 21:1 at 422M). The V1 d=768 EGPT baseline (143M, FFN:Attn ≈ 2.7:1) scores
-higher (avg 0.481 vs 0.474). Before scaling up the MoE, consider using a
-balanced architecture where attention and FFN have comparable parameter counts
-(e.g., increase `d` while keeping `intermediate_size` moderate, or use fewer
-larger experts).
+**Warning (applies to the B-series iso-param design only)**: the *deep iso-param*
+B-series is severely FFN-heavy (FFN:Attn ≈ 21:1 at 422M), and there the V1 d=768 EGPT
+baseline (143M, FFN:Attn ≈ 2.7:1) scored higher (0.481 vs 0.474). **This has since
+been fixed — do not scale the iso-param design.** Use the H-series recipe instead:
+a GPT prefix + one recurrent EGPT block whose MoE uses **full-size experts**
+(int=2048 each; top-k or Boltzmann) with **1/√(expert_I) routing-energy
+normalization**. That keeps FFN:Attn balanced, and once applied the Boltzmann MoE
+matches/beats top-k and scales cleanly — a 679M model reaches 0.580 avg / 20.2 PPL at
+53.5B tokens (see updated results below).
 
 ---
 
 ## Routing collapse metrics (WandB)
 
-Logged every 10 steps under `model/energy_mlp/<block>.ffwd/`:
+Logged every 10 steps under `model/energy_mlp/<block>.ffwd/`.
+
+> **Caveat (fixed 2026-09-12)**: `train_utils.py:73` gated on the legacy classes
+> only, so **no `EnergyFF_*` run ever logged these** — every `math_fet_*` wandb run
+> has attention norms and nothing else. `FFEnergyBase` is now in the isinstance
+> tuple, but runs completed before this date have no routing metrics to plot, and
+> any claim about their routing collapse was inferred rather than measured.
 
 | Metric | Range | Meaning |
 |--------|-------|---------|
@@ -239,22 +269,51 @@ To collect new routing data for a new model (needs GPU):
 
 ---
 
-## Results summary (30k steps, 7.86B tokens)
+## Results summary
+
+### Initial B-series (30k steps, 7.86B tokens) — pre-fix, iso-param
 
 | Model | Params | Avg acc | WikiPPL | Notes |
 |-------|--------|---------|---------|-------|
 | V9 GPT d=1024 | 354M | **0.513** | **29.8** | Best baseline |
 | V1-400M EGPT d=1024 | 354M | 0.494 | 38.6 | |
-| V1 EGPT d=768 | 143M | 0.481 | 47.7 | Beats all MoE at 1/3 params |
-| B1 BoltzMoE (no reg.) | 407M | 0.474 | 51.9 | Best MoE variant |
+| V1 EGPT d=768 | 143M | 0.481 | 47.7 | Beat all *pre-fix* MoE at 1/3 params |
+| B1 BoltzMoE (no reg.) | 407M | 0.474 | 51.9 | Best pre-fix MoE variant |
 | B4 BoltzMoE (rep 0.1) | 407M | 0.466 | 51.9 | Best load balance |
 | V58 EGPT recurrent | 113M | 0.459 | 65.7 | |
 | B2 (rep 0.01) | 407M | 0.462 | 52.5 | |
 | B5 (rep+drop+WD) | 407M | 0.471 | 58.7 | |
 | B3 (drop+WD) | 407M | 0.450 | 58.0 | Worst |
 
-**Conclusion**: The MoE does not improve over the plain EGPT baseline at this scale.
-The architectural imbalance (302M in FFN, only 14M in attention) is the primary cause.
+### Updated results — after full-size experts + 1/√(expert_I) routing scale
+
+| Model | Params | Avg acc | WikiPPL | Notes |
+|-------|--------|---------|---------|-------|
+| **580M @ 102k (53.5B tok)** | 679M | **0.580** | **20.2** | best overall in this line |
+| scale_h3_boltz @ 120k (62.9B tok) | 620M | 0.569 | 21.9 | Boltzmann, scales cleanly |
+| `h1_boltz_moe_fullsize` | 145M | **0.501** | 36.5 | Boltzmann ≥ top-k |
+| h1_topk_egpt_moe | 145M | 0.499 | 39.8 | learned-router top-k |
+| h1_egpt (no MoE, iso-compute) | 145M | 0.489 | 39.6 | MoE now beats plain EGPT |
+| h1_boltz_topk2 (sparse) | 145M | 0.486 | 36.4 | no learned router; matches soft on PPL |
+| **B4 rerun (1/√I fix)** | 407M | **0.494** | 38.0 | was 0.466/51.9 → now matches V1-400M |
+| B1 rerun (1/√I fix) | 407M | 0.483 | 38.0 | was 0.474/51.9 |
+
+**Conclusion (revised 2026-06-05)**: The earlier "MoE does not beat plain EGPT"
+verdict was an artifact of two *fixable* B-series flaws — the iso-param design (tiny
+experts, FFN:Attn ≈ 21:1) and an **unnormalized routing-energy scale** that caused
+loss spikes. After (a) using **full-size experts** and (b) normalizing the routing
+energy by `1/√(expert_I)`:
+
+- Full-size **Boltzmann MoE (0.501 / 36.5)** ≥ learned-router **top-k (0.499 / 39.8)**
+  at 145M, and both beat the iso-compute plain-EGPT baseline (0.489 / 39.6).
+- The same fix rehabilitates the B-series: **B4-rerun 0.494 / 38.0** (was 0.466 / 51.9),
+  now matching V1-400M EGPT (0.494 / 38.6).
+- It scales: a 679M model reaches **0.580 avg / 20.2 PPL at 53.5B tokens**.
+
+Net: **Boltzmann energy routing is competitive with, and slightly ahead of, top-k**
+once experts are full-size and the routing scale is normalized. The energy
+landscape selects experts without a learned router and generalizes to sparse top-2.
+Full detail and the gelu_grad / h2 A/B studies are in `PROGRESS.md`.
 
 ---
 

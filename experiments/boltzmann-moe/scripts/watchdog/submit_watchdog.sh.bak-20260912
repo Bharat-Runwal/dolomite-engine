@@ -11,7 +11,7 @@ mkdir -p "$HOME/bsub_logs"
 # preemptable queue is fine (resubmit chain handles preemption); CPU-only.
 # We use grp_preemptable (matches preemptable queue requirement).
 out=$(bsub \
-    -q normal -G grp_ebm \
+    -q preemptable -G grp_preemptable \
     -J boltz_moe_watchdog \
     -n 1 -M 4G -W 24:00 \
     -o "$HOME/bsub_logs/boltz_moe_watchdog_%J.stdout" \

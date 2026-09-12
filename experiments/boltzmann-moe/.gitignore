@@ -5,3 +5,10 @@ paper/*.log
 paper/*.out
 paper/*.toc
 paper/wandb/
+
+# stray temp dirs when /tmp is unwritable in LSF jobs and tempfile falls back to cwd
+pymp-*/
+tmp*wandb-media/
+tmp*wandb-artifacts/
+torchelastic_*/
+torchinductor_*/

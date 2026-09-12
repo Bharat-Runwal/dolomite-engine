@@ -1,0 +1,58 @@
+# s7b_K64k8_d2560_w1w2 — single-block recurrent all-Boltzmann-MoE energy model.
+# CONTROL: w1w2 experts (2 matrices) at iso-params
+#
+# ALL parameters live in ONE energy block, applied 8x. No GPT prefix.
+# total params 6.97B | active/token 1.14B (6.1x sparsity)
+# experts are 95.6% of all parameters
+# D_qk = num_heads*head_dim = 8192 = 3.20x d
+#
+# NOT YET TRAINED — emitted by scripts/design_single_block_moe_20260912.py for
+# FLOPs/throughput benchmarking only. Set datasets/optimizer before training.
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    num_layers: 1
+    layer_iterations: [8]
+    iter_dropout_range_per_block: [0]
+    hidden_size: 2560
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    energy_proj_rank: 0
+    energy_antisym_rank: 32
+    energy_apply_rayleigh: true
+    energy_full_per_token_grad: true
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 64
+        num_key_value_heads: 64
+        head_dim: 128                       # REQUIRES head_dim decoupling patch
+        add_bias: false
+        attention_multiplier: 0.088388
+    mlp_blocks:
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: w1w2
+        intermediate_size: 1302528
+        n_experts: 64
+        top_k: 8
+        temperature: 1.0
+        repulsion_coef: 0.01
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        activation_function: gelu
+        add_bias: false

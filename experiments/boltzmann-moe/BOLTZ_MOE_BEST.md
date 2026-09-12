@@ -220,6 +220,6 @@ To reset a run that hit max_resubmits (see watchdog log under
 
 ## Source code
 
-- `BoltzmannMoE_Energy_MLP` class: `lm_engine/hf_models/modeling_utils/mlp_blocks/mlp.py:282`
+- `BoltzmannMoE_Energy_MLP` class: `lm_engine/hf_models/modeling_utils/mlp_blocks/mlp.py:540`
 - Config schema: `lm_engine/hf_models/config/mlp.py:_BoltzmannMoEEnergyMLPArgs`
-- Dispatch: `lm_engine/hf_models/modeling_utils/mlp_blocks/__init__.py:78`
+- Dispatch: `lm_engine/hf_models/modeling_utils/mlp_blocks/__init__.py:113`

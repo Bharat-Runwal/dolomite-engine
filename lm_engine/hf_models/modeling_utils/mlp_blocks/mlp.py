@@ -703,28 +703,25 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
     def _add_repulsion_loss(self, expert_grads: torch.Tensor) -> None:
         """Penalise cosine similarity between random expert output pairs.
 
-        Stochastic: only n_repulsion_pairs random pairs per step — cheap (K dot-products
-        of size hidden_size) relative to the main forward pass.  Functional: repulsion
-        is based on actual expert outputs for the current batch, not weight geometry.
-        """
-        # Flatten leading dims: (total_tokens, n_experts, hidden_size)
-        eg = expert_grads.reshape(-1, self.n_experts, self.hidden_size)
-        eg_norm = F.normalize(eg, dim=-1)  # (T, n_experts, hidden_size)
+        Stochastic: only n_repulsion_pairs random pairs per step. Functional:
+        based on actual expert outputs for the current batch, not weight geometry.
 
+        ``repulsion_form`` selects the penalty; see ``_repulsion_penalty`` in
+        energy_ff.py. The legacy "signed" form is minimised at cos = -1 and
+        rewards anti-alignment rather than diversity, which under near-uniform
+        routing collapses the FF branch. Default is now "squared" (minimised at
+        orthogonality); pass "signed" to reproduce pre-2026-09-12 runs.
+        """
+        from .energy_ff import _repulsion_penalty
+        eg = expert_grads.reshape(-1, self.n_experts, self.hidden_size)
+        eg_norm = F.normalize(eg, dim=-1)
         k = min(self.n_repulsion_pairs, len(self._all_pairs))
         sampled = random.sample(self._all_pairs, k)
-
-        i_idx = [p[0] for p in sampled]
-        j_idx = [p[1] for p in sampled]
-
-        # out_i / out_j: (T, k, hidden_size) — gather sampled expert outputs
-        out_i = eg_norm[:, i_idx, :]   # (T, k, hidden_size)
-        out_j = eg_norm[:, j_idx, :]
-
-        # Mean cosine similarity over tokens and sampled pairs → scalar
-        cos_sim = (out_i * out_j).sum(-1).mean()
-
-        add_aux_loss(self.repulsion_coef * cos_sim)
+        i_idx = [pr[0] for pr in sampled]
+        j_idx = [pr[1] for pr in sampled]
+        cos = (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1)
+        form = getattr(self, "repulsion_form", "squared")
+        add_aux_loss(self.repulsion_coef * _repulsion_penalty(cos, form))
 
     def _log_metrics(self, p: torch.Tensor, out: torch.Tensor) -> None:
         with torch.no_grad():

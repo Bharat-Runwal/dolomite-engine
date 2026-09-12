@@ -261,6 +261,20 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     temperature: float = 1.0
     repulsion_coef: float = 0.0
     n_repulsion_pairs: int = 4
+    # "squared"|"abs"|"hinge" are minimised at orthogonality. "signed" is the
+    # pre-2026-09-12 legacy form, minimised at cos=-1, which rewards
+    # anti-alignment and collapses the FF branch under near-uniform routing.
+    repulsion_form: str = "squared"
+    # "none" keeps softmax(+-E/tau) as trained. The Hopfield MEAN form leaves
+    # E ~ 1e-2 against tau=1 and routes uniformly; "zscore" (scale-free) or
+    # "sqrt_width" (matches the w1w2 line's 1/sqrt(expert_I)) fix that.
+    routing_norm: str = "none"
+    # Prefactor on the Hopfield descent gradient. "mean" = 4/I_e = the
+    # pre-2026-09-12 behaviour; SET THIS BACK TO "mean" TO REVERT if a run
+    # diverges. "inv_sqrt" = 1/sqrt(I_e) (8x), "sqrt_consistent" = 4/sqrt(I_e)
+    # (32x). Both keep >=32x margin below the sum form that NaN'd (run 1714840).
+    # See _hopfield_grad_prefactor in energy_ff.py for the full rationale.
+    hopfield_grad_scale: str = "mean"
     top_k: int | None = None
     gelu_grad_method: str = "sigmoid"
     activation_function: str = "gelu_pytorch_tanh"
@@ -276,6 +290,9 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
             f"n_experts ({self.n_experts})"
         )
         assert self.temperature > 0
+        assert self.repulsion_form in ("squared", "abs", "hinge", "signed")
+        assert self.routing_norm in ("none", "zscore", "sqrt_width")
+        assert self.hopfield_grad_scale in ("mean", "inv_sqrt", "sqrt_consistent")
         assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
 
 
