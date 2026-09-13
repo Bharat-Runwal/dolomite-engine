@@ -74,9 +74,16 @@ resubmit_job() {
     local x_flag=""
     if [ "$excl" = "1" ]; then
         gpu_arg="$gpu_arg/task:mode=exclusive_process"
-        if [ "$gpus_per_node" -ge 4 ]; then
-            x_flag="-x"
-        fi
+        # NO -x. It asks for the WHOLE NODE exclusively, which we never need:
+        # mode=exclusive_process already gives us the requested GPUs exclusively, and
+        # we only want 4 of each node's 8. Demanding two FULLY exclusive hosts at once
+        # left both 400M arms PEND for 45+ min --
+        #   PENDING REASONS: Not enough job slot(s): 1 host
+        # -- while 16 GPUs of our own quota sat idle. Every arm that is actually
+        # running was submitted WITHOUT -x, so it buys us nothing here either.
+        # (The repo's 24-GPU launcher does use -x, but it asks num=8/task, i.e. the
+        # entire node, where -x is consistent with the request. Ours is not.)
+        :
     fi
 
     # AUTO-RESUME. dolomite needs an explicit load_args.load_path; without it a
