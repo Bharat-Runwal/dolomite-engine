@@ -485,6 +485,8 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         repulsion_form: str = "squared",
         routing_norm: str = "none",
         renormalize_topk: bool = False,
+        track_load: bool = True,
+        balance_rate: float = 0.0,
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -502,6 +504,40 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         assert routing_norm in ("none", "zscore", "sqrt_width")
         self.routing_norm = routing_norm
         self.renormalize_topk = bool(renormalize_topk)
+
+        # ------------------------------------------------------------------ #
+        # ROUTING-LOAD TRACKING and AUX-LOSS-FREE BALANCING                  #
+        # ------------------------------------------------------------------ #
+        # Two problems this addresses, found 2026-09-13 by auditing checkpoints:
+        #
+        # (a) WE WERE FLYING BLIND. effective_n_experts / max_expert_load are computed in
+        #     _log_metrics behind `if not torch.compiler.is_compiling()`, because they use
+        #     .item(). Every arm trains with torch_compile: true, so that branch is traced
+        #     away and the metrics NEVER reached wandb. Collapse was therefore invisible
+        #     during training and only found by an offline probe.
+        # (b) REPULSION IS THE WRONG LEVER. It penalises expert-WEIGHT cosine similarity,
+        #     and it works: measured cos_mean <= 0.021 with zero dead experts on every arm.
+        #     Yet the pure single-block arms route 99% of inputs to ONE expert
+        #     (effective_n_experts 1.38 of 16, against 4.64 for the hybrids at identical
+        #     expert width). Diverse weights do not imply diverse routing.
+        #
+        # The buffers below are updated with pure tensor ops and no .item(), so they trace
+        # cleanly under torch.compile and give load statistics every step at negligible
+        # cost. The trainer reads and resets them outside the graph.
+        #
+        # `load_balance_bias` implements DeepSeek-V3-style AUX-LOSS-FREE balancing: a
+        # per-expert additive bias on the routing logits, nudged (under no_grad, outside
+        # autograd) toward whichever experts are under-loaded. It is NOT a loss term, adds
+        # no gradient pathway and no learned gate, so the paper's "no load-balancing loss
+        # and no gate parameters" claim survives it. DEFAULT OFF: enabling it changes the
+        # routing of every existing checkpoint, so it must be opted into per config.
+        self.track_load = bool(track_load)
+        self.balance_rate = float(balance_rate)
+        self.register_buffer("_load_sum", torch.zeros(self.n_experts), persistent=False)
+        self.register_buffer("_ent_sum", torch.zeros((), dtype=torch.float32), persistent=False)
+        self.register_buffer("_tok_sum", torch.zeros((), dtype=torch.float32), persistent=False)
+        # persistent: the bias is part of the trained routing rule and must survive a resume
+        self.register_buffer("load_balance_bias", torch.zeros(self.n_experts), persistent=True)
         self.top_k = top_k
         self.e_sign = e_sign
         self.layer_idx = layer_idx
@@ -558,6 +594,20 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             # it is a real asymmetry in the comparison, so expose the matched option.
             if self.renormalize_topk:
                 p = p / p.sum(-1, keepdim=True).clamp_min(1e-9)
+
+        # Traceable load accounting: tensor ops only, no .item(), no host sync, so this
+        # survives torch.compile where _log_metrics does not.
+        if self.track_load and self.training:
+            with torch.no_grad():
+                pf = p.detach().reshape(-1, self.n_experts).float()
+                self._load_sum += pf.sum(0)
+                self._ent_sum += -(pf * (pf + 1e-9).log()).sum(-1).sum()
+                self._tok_sum += pf.shape[0]
+                if self.balance_rate > 0.0:
+                    # Under-loaded experts get a positive nudge, over-loaded a negative one.
+                    share = pf.mean(0)
+                    target = share.new_full((), 1.0 / self.n_experts)
+                    self.load_balance_bias += self.balance_rate * torch.sign(target - share)
 
         # Aggregate gradients: ∇_h E_total = Σ_k w_k · ∇_h E_k.
         expert_grads = torch.stack(expert_outs, dim=-2)        # (..., n_experts, hidden)
@@ -616,6 +666,10 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             s = s * (self.experts[0].intermediate_size ** 0.5)
         elif self.routing_norm == "zscore":
             s = (s - s.mean(-1, keepdim=True)) / s.std(-1, keepdim=True).clamp_min(1e-12)
+        # Bias is added AFTER normalisation: zscore would otherwise rescale it away, and
+        # it is defined in the same (post-norm) space the temperature divides.
+        if self.balance_rate > 0.0:
+            s = s + self.load_balance_bias
         return s / self.temperature
 
     def _add_repulsion_loss(self, expert_grads: torch.Tensor) -> None:
@@ -628,6 +682,31 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         j_idx = [p[1] for p in sampled]
         cos = (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1)
         add_aux_loss(self.repulsion_coef * _repulsion_penalty(cos, self.repulsion_form))
+
+    def pop_load_metrics(self) -> dict[str, float] | None:
+        """Read and reset the traced load buffers. Call from the trainer, never in-graph.
+
+        Unlike _log_metrics this works under torch.compile, because the accumulation is
+        pure tensor arithmetic and only the final read (here) touches .item().
+        """
+        if not self.track_load:
+            return None
+        with torch.no_grad():
+            n = self._tok_sum.clamp_min(1.0)
+            share = (self._load_sum / n.clamp_min(1e-9))
+            share = share / share.sum().clamp_min(1e-9)
+            eff = torch.exp(-(share * (share + 1e-9).log()).sum())
+            m = {
+                "load_effective_n_experts": eff.item(),
+                "load_max_share": share.max().item(),
+                "load_min_share": share.min().item(),
+                "load_mean_token_entropy": (self._ent_sum / n).item(),
+                "load_tokens_seen": n.item(),
+            }
+            if self.balance_rate > 0.0:
+                m["load_bias_absmax"] = self.load_balance_bias.abs().max().item()
+            self._load_sum.zero_(); self._ent_sum.zero_(); self._tok_sum.zero_()
+        return m
 
     def _log_metrics(self, p: torch.Tensor, out: torch.Tensor) -> None:
         with torch.no_grad():
@@ -879,6 +958,11 @@ class FusedMoEContainer(FFEnergyBase):
         self._cached_metrics = self.moe.get_metrics()
         return out
 
+    def pop_load_metrics(self):
+        # Mirror the inner MoE's traced load stats so the trainer finds them on the
+        # container too (train_utils skips the inner '.moe' to avoid double-logging).
+        return self.moe.pop_load_metrics()
+
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
         return self.moe.energy_per_token(x)
 
@@ -896,6 +980,8 @@ def build_boltzmann_moe(
     repulsion_form: str = "squared",
     routing_norm: str = "none",
     renormalize_topk: bool = False,
+    track_load: bool = True,
+    balance_rate: float = 0.0,
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -942,5 +1028,7 @@ def build_boltzmann_moe(
         repulsion_form=repulsion_form,
         routing_norm=routing_norm,
         renormalize_topk=renormalize_topk,
+        track_load=track_load,
+        balance_rate=balance_rate,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)

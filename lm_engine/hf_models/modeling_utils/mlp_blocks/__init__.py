@@ -191,6 +191,8 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             repulsion_form=getattr(block, "repulsion_form", "squared"),
             routing_norm=getattr(block, "routing_norm", "none"),
             renormalize_topk=getattr(block, "renormalize_topk", False),
+            track_load=getattr(block, "track_load", True),
+            balance_rate=getattr(block, "balance_rate", 0.0),
             hopfield_grad_scale=getattr(block, "hopfield_grad_scale", "mean"),
             top_k=block.top_k,
             init_method=config.init_method,

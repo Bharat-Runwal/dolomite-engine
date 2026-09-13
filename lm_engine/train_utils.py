@@ -81,6 +81,12 @@ def track_metrics(
                 module,
                 (Energy_MLP, Compositional_Energy_MLP, Mixed_Energy_MLP, BoltzmannMoE_Energy_MLP, FFEnergyBase),
             ) and name.rsplit(".", 1)[-1] != "moe":
+                # Traced load stats work under torch_compile, unlike get_metrics().
+                if hasattr(module, "pop_load_metrics"):
+                    lm = module.pop_load_metrics()
+                    if lm:
+                        for mk, mv in lm.items():
+                            energy_mlp_metrics[f"{name}.{mk}"] = mv
                 metrics = module.get_metrics()
                 if metrics is not None:
                     for metric_name, value in metrics.items():
