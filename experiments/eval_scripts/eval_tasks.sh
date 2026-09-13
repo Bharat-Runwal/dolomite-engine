@@ -42,3 +42,24 @@ PY
         exit 1
     fi
 }
+
+# ---------------------------------------------------------------------------
+# THE AGGREGATION CONVENTION (fixed 2026-09-13, on the user's instruction)
+# ---------------------------------------------------------------------------
+# avg10_norm = mean over the 10 tasks in EVAL_TASKS, using acc_norm for EVERY task that
+# reports one and acc otherwise. Six tasks report acc_norm: arc_challenge, arc_easy,
+# hellaswag, openbookqa, piqa, sciq. Four use acc: boolq, copa, winogrande, mmlu.
+#
+# WHY THIS NEEDED FIXING. Three conventions were in circulation and sciq was the only task
+# they disagreed on (acc 0.762 vs acc_norm 0.680; spread over 10 tasks that is the ~0.8pp
+# gap between our scripts and our tables). compute_aggregates.py's docstring said "acc_norm
+# whenever the task reports it" while its code listed only five, omitting sciq.
+#
+# IMPORTANT: the vendored lm-evaluation-harness does NOT define an aggregate. It emits
+# per-task acc and acc_norm only. Pinning it fixes the harness version and per-task scoring,
+# NOT the averaging rule -- so there is no upstream convention to defer to. The rule lives
+# in compute_aggregates.py (ACC_NORM_TASKS) and is mirrored by
+# collect_flops_wave_20260912.sh's `table` mode. Change both together or neither.
+#
+# Verified 2026-09-13: all eight avg10 figures printed in the appendix reproduce exactly
+# under this rule, so no published number changes.

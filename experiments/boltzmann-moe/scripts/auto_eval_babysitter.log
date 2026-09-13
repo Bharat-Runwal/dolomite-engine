@@ -130,3 +130,6 @@
 [2026-09-13 20:57:14] frontier_table.txt refreshed (13 DONE)
 [2026-09-13 21:07:16] submitted 2 eval job(s); 13 arms DONE
 [2026-09-13 21:07:44] frontier_table.txt refreshed (13 DONE)
+[2026-09-13 21:17:46] submitted 3 eval job(s); 14 arms DONE
+[2026-09-13 21:18:20] frontier_table.txt refreshed (14 DONE)
+[2026-09-13 21:28:20] quota guard: 40 training + 3 eval GPUs in use; deferring evals this cycle

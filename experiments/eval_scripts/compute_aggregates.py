@@ -4,7 +4,7 @@
 Outputs:
   - avg10:        mean primary acc over the 10-task suite (uses `acc` for all)
   - avg10_norm:   mean over same 10 tasks but uses `acc_norm` whenever the task
-                  reports it (arc_challenge/easy, hellaswag, openbookqa, piqa);
+                  reports it (arc_challenge/easy, hellaswag, openbookqa, piqa, sciq);
                   falls back to `acc` for tasks that only report `acc`
                   (boolq, copa, sciq, winogrande, mmlu).
   - WikiText word-perplexity
@@ -29,7 +29,17 @@ TEN_TASKS = [
 ]
 
 # Tasks where `acc_norm` is the standard normalized metric
-ACC_NORM_TASKS = {"arc_challenge", "arc_easy", "hellaswag", "openbookqa", "piqa"}
+# 2026-09-13: sciq ADDED. The docstring always said avg10_norm uses acc_norm "whenever the
+# task [reports it]", but this set omitted sciq, which does report it. sciq is the ONLY task
+# the two readings differ on (acc 0.762 vs acc_norm 0.680), and dividing that 0.082 gap over
+# 10 tasks is exactly the ~0.8pp discrepancy between our stored tables and this script.
+# The project convention is acc_norm wherever available, which is what the appendix tables
+# and collect_flops_wave's `table` mode already compute, so the code now matches both the
+# docstring and the published numbers.
+# NOTE the vendored lm-evaluation-harness does NOT define any aggregate -- it emits per-task
+# acc and acc_norm only. Pinning it fixes per-task scoring, not the averaging rule. This
+# file is the sole definition of the averaging rule.
+ACC_NORM_TASKS = {"arc_challenge", "arc_easy", "hellaswag", "openbookqa", "piqa", "sciq"}
 
 
 def first_metric(d, candidates):

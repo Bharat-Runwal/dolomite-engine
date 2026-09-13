@@ -43,8 +43,12 @@ SEARCH = [
 TEN = ["arc_challenge", "arc_easy", "boolq", "copa", "hellaswag",
        "openbookqa", "piqa", "sciq", "winogrande", "mmlu"]
 NINE = [t for t in TEN if t != "mmlu"]
-NORM_NEW = {"arc_challenge", "arc_easy", "hellaswag", "openbookqa", "piqa"}
-NORM_OLD = NORM_NEW | {"sciq"}          # the old convention also normalised sciq
+# 2026-09-13: sciq belongs in BOTH. The project convention is acc_norm wherever a task
+# reports it, and sciq does. Excluding it here is what made this script disagree with the
+# appendix tables by ~0.8pp. avg9 and avg10 now differ only in whether MMLU is included,
+# which is the difference this script exists to measure.
+NORM_NEW = {"arc_challenge", "arc_easy", "hellaswag", "openbookqa", "piqa", "sciq"}
+NORM_OLD = NORM_NEW
 
 
 def pick(res: dict, task: str, norm_set: set) -> float | None:
