@@ -4,3 +4,107 @@
 [2026-09-13 07:38:27] submitted 1 eval job(s); 10 arms DONE
 [2026-09-13 07:39:51] frontier_table.txt refreshed (10 DONE)
 [2026-09-13 07:49:51] quota guard: 28 training + 3 eval GPUs in use; deferring evals this cycle
+[2026-09-13 07:59:51] quota guard: 28 training + 3 eval GPUs in use; deferring evals this cycle
+[2026-09-13 08:10:10] frontier_table.txt refreshed (10 DONE)
+[2026-09-13 08:20:23] frontier_table.txt refreshed (10 DONE)
+[2026-09-13 08:30:40] frontier_table.txt refreshed (10 DONE)
+[2026-09-13 08:40:51] frontier_table.txt refreshed (10 DONE)
+[2026-09-13 08:51:10] frontier_table.txt refreshed (10 DONE)
+[2026-09-13 09:01:31] frontier_table.txt refreshed (10 DONE)
+[2026-09-13 09:11:54] frontier_table.txt refreshed (10 DONE)
+[2026-09-13 09:21:54] quota guard: 32 training + 0 eval GPUs in use; deferring evals this cycle
+[2026-09-13 09:31:54] quota guard: 32 training + 0 eval GPUs in use; deferring evals this cycle
+[2026-09-13 09:41:56] submitted 1 eval job(s); 11 arms DONE
+[2026-09-13 09:42:15] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 09:53:12] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 10:03:31] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 10:13:52] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 10:24:12] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 10:34:33] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 10:44:48] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 10:55:02] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 11:05:13] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 11:15:33] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 11:25:33] quota guard: 32 training + 0 eval GPUs in use; deferring evals this cycle
+[2026-09-13 11:36:07] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 11:46:26] frontier_table.txt refreshed (11 DONE)
+[2026-09-13 11:56:28] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 11:56:47] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 12:06:49] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 12:07:07] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 12:17:08] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 12:17:26] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 12:27:27] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 12:28:31] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 12:38:32] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 12:38:44] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 12:48:45] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 12:48:52] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 12:58:53] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 12:59:12] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 13:09:13] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 13:09:30] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 13:19:32] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 13:19:52] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 13:30:36] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 13:30:55] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 13:40:57] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 13:41:20] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 13:51:21] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 13:51:41] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 14:01:43] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 14:02:01] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 14:12:02] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 14:12:20] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 14:22:21] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 14:22:40] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 14:32:41] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 14:32:56] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 14:42:57] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 14:43:16] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 14:53:17] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 14:53:31] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 15:03:33] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 15:03:52] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 15:13:53] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 15:14:10] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 15:24:12] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 15:24:25] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 15:34:26] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 15:34:41] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 15:44:42] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 15:44:57] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 15:54:59] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 15:55:17] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 16:05:19] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 16:05:37] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 16:15:38] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 16:15:59] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 16:26:00] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 16:26:14] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 16:36:15] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 16:36:29] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 16:46:31] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 16:46:49] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 16:56:51] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 16:57:09] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 17:07:10] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 17:07:27] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 17:17:29] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 17:17:47] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 17:27:54] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 17:28:15] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 17:38:17] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 17:38:36] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 17:48:37] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 17:48:55] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 17:58:56] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 17:59:14] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 18:09:16] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 18:09:34] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 18:19:36] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 18:19:59] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 18:30:00] submitted 1 eval job(s); 12 arms DONE
+[2026-09-13 18:31:39] frontier_table.txt refreshed (12 DONE)
+[2026-09-13 18:41:40] submitted 2 eval job(s); 13 arms DONE
+[2026-09-13 18:42:01] frontier_table.txt refreshed (13 DONE)

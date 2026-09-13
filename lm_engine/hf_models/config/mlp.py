@@ -276,6 +276,17 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     # See _hopfield_grad_prefactor in energy_ff.py for the full rationale.
     hopfield_grad_scale: str = "mean"
     top_k: int | None = None
+    # Match the baselines' sum(p)=1 on the top-k weights (TopK_Energy_MoE_MLP softmaxes over
+    # the top-k logits; the Switch class uses normalized_topk). Our masked form leaves
+    # sum(p) ~ 0.45 at K=16,k=2. Default false = unchanged behaviour.
+    renormalize_topk: bool = False
+    # Accumulate routing load in-graph so it is logged even under torch_compile, where the
+    # older _log_metrics path is traced away (which is why routing collapse went unseen).
+    track_load: bool = True
+    # >0 enables aux-loss-FREE balancing (DeepSeek-V3 style): a per-expert additive logit
+    # bias nudged under no_grad toward under-loaded experts. Not a loss, no gate params.
+    # DEFAULT 0 = OFF: enabling it changes the routing of every existing checkpoint.
+    balance_rate: float = 0.0
     gelu_grad_method: str = "sigmoid"
     activation_function: str = "gelu_pytorch_tanh"
     dropout: float = 0
