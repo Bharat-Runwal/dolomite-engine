@@ -105,12 +105,15 @@ model_args:
         add_bias: false
         dropout: 0.0
 
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_1blk/iclr_pure_learn_isoP
+
 tuning_args:
   tuning_method: pretraining
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_1blk/iclr_pure_learn_isoP
-  save_interval: 5000
+  save_interval: 2000
   max_to_keep: 2
 
 logging_args:

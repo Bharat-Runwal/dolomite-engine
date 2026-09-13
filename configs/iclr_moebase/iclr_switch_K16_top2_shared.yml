@@ -1,26 +1,16 @@
-# iclr_pure_hop_isoP
+# iclr_switch_K16_top2_shared
 #
-# single recurrent block, NO prefix, ENERGY router, top-2 of 16
+# SOTA-feature MoE baseline: Switch-style + SHARED EXPERT with gating (DeepSeek-V2/V3). Strongest standard-MoE baseline available config-only in this repo.
 #
-# PURPOSE: attribute the single-block failure. The 2026-09-12 wave had a
-# single-block ENERGY arm at 104.60M that scored 42.94 avg10 / 69.66 ppl vs ~40 ppl
-# for the 134.49M hybrids -- but that comparison was confounded TWICE: it was 22%
-# smaller AND there was no single-block learned-router control. These two arms fix
-# both: identical single-block architecture (num_layers=1, layer_iterations=[8], no
-# GPT prefix), iso-total-param at ~134.5M, iso-token, same k/K=0.125, differing
-# ONLY in router. If BOTH fail, the single-block design is at fault. If only the
-# energy arm fails, energy routing is at fault.
+# Same backbone/tokens/k-per-token as the 2026-09-12 iclr_flops wave; MoE-block
+# params matched to 12.58M. Answers two things the wave did not:
+#  (1) does the LEARNED router need its load-balance loss? (the noLB arm)
+#  (2) how do we compare to a real Switch / DeepSeek-style MoE, not just to a
+#      learned router bolted onto our energy experts?
 #
-# iclr_pure_hop_K16_top2_1blk
+# iclr_learn_K16_top2
 #
-# PURE Boltzmann-MoE: NO GPT prefix. ALL parameters live in ONE energy block
-# applied 8x (num_layers=1, layer_iterations=[8]). This is the regime where the
-# MoE is ~99% of per-token FLOPs, so top-k savings are end-to-end rather than
-# diluted by a dense prefix and the lm_head (which cap the hybrid at ~-22%).
-# Hopfield experts K=16 x I_e=2048, top-2 (k/K=0.125), with the 2026-09-12 fixes.
-# Exploratory: also tests whether a single recurrent block trains at all here.
-#
-# energy router, HOPFIELD experts (single W -> 2x experts at iso-param), K=16, top-2 (k/K=0.125)
+# STANDARD MoE BASELINE: learned router + top-2 + load-balance loss, K=16
 #
 # FLOPS-frontier wave (2026-09-12). Backbone FIXED across ALL arms:
 #   d=768, 7 blocks, layer_iterations [1,1,1,1,1,1,6], 12 heads, GPT ffn 2048,
@@ -70,17 +60,18 @@ model_args:
   model_class: AutoModelForCausalLM
   pretrained_config:
     model_type: energy
+    router_aux_loss_coef: 0.01
     num_iterations: 1
     num_pre_layers: 0
     num_post_layers: 0
-    layer_iterations: [8]
+    layer_iterations: [1, 1, 1, 1, 1, 1, 6]
     initializer_range: 0.02
     layer_norm_epsilon: 1.0e-05
     normalization_function: rmsnorm
     position_embedding_type: rope
     rope_dim: 64
     hidden_size: 768
-    num_layers: 1
+    num_layers: 7
     init_method: normal
     tie_word_embeddings: true
     energy_proj_type: dual_unconstrained
@@ -90,37 +81,41 @@ model_args:
     vocab_size: 100352
     max_position_embeddings: 4096
     sequence_mixer_blocks:
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
       - sequence_mixer_type: energy_attention
         num_attention_heads: 12
         num_key_value_heads: 12
         add_bias: false
         attention_multiplier: 0.125
     mlp_blocks:
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
       # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
-      - mlp_type: EnergyFF_BoltzmannMoE
-        expert_kind: hopfield
-        intermediate_size: 71680   # K=16 x I_e=4480; iso-param with the hybrids
-        n_experts: 16
-        top_k: 2
-        hopfield_grad_scale: sqrt_consistent
-        routing_norm: zscore
-        temperature: 0.35
-        repulsion_form: abs
-        repulsion_coef: 0.1
-        n_repulsion_pairs: 4
-        gelu_grad_method: sigmoid
-        activation_function: gelu
+      - mlp_type: MoE
+        activation_function: swiglu
+        intermediate_size: 288
+        shared_intermediate_size: 672
+        shared_expert_gating: true
+        num_experts: 16
+        num_experts_per_tok: 2
+        normalized_topk: true
         add_bias: false
-
-load_args:
-  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_1blk/iclr_pure_hop_isoP
 
 tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_1blk/iclr_pure_hop_isoP
-  save_interval: 2000
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_moebase/iclr_switch_K16_top2_shared
+  save_interval: 5000
   max_to_keep: 2
 
 logging_args:
@@ -128,7 +123,7 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: iclr_pure_hop_isoP
+    name: iclr_switch_K16_top2_shared
 
 training_parameters:
   num_training_steps: 30000
