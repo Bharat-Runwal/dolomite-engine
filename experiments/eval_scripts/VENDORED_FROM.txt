@@ -1,0 +1,25 @@
+Vendored 2026-09-12T06:28:01Z from /proj/dmfexp/energy-gpt/lm-evaluation-harness
+(colleague bsaha3's checkout), copied WITHOUT .git.
+
+upstream   : https://github.com/EleutherAI/lm-evaluation-harness.git
+commit     : ad3f4d0cad1cfcdb815f1e795f7947e49ed9f2e9
+subject    : increment version (#3433)
+version    : 0.4.9.2
+local diffs: 0 file(s) modified vs that commit  (0 = stock upstream)
+
+This is an UNMODIFIED upstream checkout. Switching to it pins the harness version;
+it does not import any custom task definitions.
+
+--- 2026-09-13: UNTRACKED, and how to restore it ---
+The harness tree itself is no longer in git history (it was 14,720 files of third-party
+code that made every diff and `git log --stat` in this fork unreadable). It is
+gitignored and lives on disk only. THIS file is tracked and is the provenance record.
+
+To recreate the tree on a fresh clone, either:
+  cp -a /proj/dmfexp/energy-gpt/lm-evaluation-harness experiments/eval_scripts/lm-evaluation-harness
+or from upstream at the exact pin:
+  git clone https://github.com/EleutherAI/lm-evaluation-harness.git \
+      experiments/eval_scripts/lm-evaluation-harness
+  git -C experiments/eval_scripts/lm-evaluation-harness checkout ad3f4d0cad1cfcdb815f1e795f7947e49ed9f2e9
+Either reproduces it exactly: the vendored copy had 0 local modifications.
+The pre-rewrite history is preserved at tag `pre-filter-repo-20260913` (pushed to origin).

@@ -42,3 +42,11 @@ experiments/energy-inference/paper/*.log
 
 # Claude internal state
 .claude/
+
+# Vendored lm-evaluation-harness (2026-09-13). Kept ON DISK because the eval jobs load it
+# via PYTHONPATH (experiments/eval_scripts/eval_tasks.sh), but NOT tracked: it is 14,720
+# files of third-party code that made every diff and `git log --stat` unreadable in this
+# fork. Provenance and the exact pin live in experiments/eval_scripts/VENDORED_FROM.txt
+# (upstream ad3f4d0c / v0.4.9.2, 0 local modifications), which IS tracked -- so the eval
+# remains exactly reproducible without carrying the tree in history.
+experiments/eval_scripts/lm-evaluation-harness/
