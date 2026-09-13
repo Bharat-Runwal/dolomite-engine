@@ -1,0 +1,174 @@
+# DEPTH-MATCHED SINGLE BLOCK (2026-09-13). iclr_pure_hop_isoP with T=8 -> T=12.
+#
+# WHY. T=8 was chosen so the mixture dominates per-token FLOPs (measured 90%), NOT
+# to match the hybrid. On the DEPTH axis the hybrid performs 12 block applications
+# (6 GPT x1 + 1 energy x6) while the single block performed only 8, so the single
+# block was the shallower of the two and 'give it more recurrence' is a fair ask.
+# T=12 is depth parity.
+#
+# COST. Already at T=8 the single block costs 3.43x the hybrid's per-token MACs at
+# equal parameters (976.8M vs 284.7M). T=12 is 5.01x. So this arm tests whether
+# depth parity closes the 0.32-nat quality gap, at 5x the compute -- it is a
+# scientific control, not a competitive configuration.
+# iclr_pure_hop_isoP
+#
+# single recurrent block, NO prefix, ENERGY router, top-2 of 16
+#
+# PURPOSE: attribute the single-block failure. The 2026-09-12 wave had a
+# single-block ENERGY arm at 104.60M that scored 42.94 avg10 / 69.66 ppl vs ~40 ppl
+# for the 134.49M hybrids -- but that comparison was confounded TWICE: it was 22%
+# smaller AND there was no single-block learned-router control. These two arms fix
+# both: identical single-block architecture (num_layers=1, layer_iterations=[8], no
+# GPT prefix), iso-total-param at ~134.5M, iso-token, same k/K=0.125, differing
+# ONLY in router. If BOTH fail, the single-block design is at fault. If only the
+# energy arm fails, energy routing is at fault.
+#
+# iclr_pure_hop_K16_top2_1blk
+#
+# PURE Boltzmann-MoE: NO GPT prefix. ALL parameters live in ONE energy block
+# applied 8x (num_layers=1, layer_iterations=[8]). This is the regime where the
+# MoE is ~99% of per-token FLOPs, so top-k savings are end-to-end rather than
+# diluted by a dense prefix and the lm_head (which cap the hybrid at ~-22%).
+# Hopfield experts K=16 x I_e=2048, top-2 (k/K=0.125), with the 2026-09-12 fixes.
+# Exploratory: also tests whether a single recurrent block trains at all here.
+#
+# energy router, HOPFIELD experts (single W -> 2x experts at iso-param), K=16, top-2 (k/K=0.125)
+#
+# FLOPS-frontier wave (2026-09-12). Backbone FIXED across ALL arms:
+#   d=768, 7 blocks, layer_iterations [1,1,1,1,1,1,6], 12 heads, GPT ffn 2048,
+#   30000 steps = 7.86B tokens, lr 2e-3 cosine. ONLY the MoE block differs.
+# Iso-total-params in the MoE block (12.58M): w1w2 and the learned-router
+#   class use 2*I_tot*d, hopfield uses I_tot*d, so hopfield carries 2x the
+#   experts for the same parameters -> half the k/K at equal top_k.
+# Question: quality vs k/K frontier against a learned-router MoE at each K.
+#
+# h1_boltz_moe_fullsize: direct BoltzmannMoE equivalent of h1_topk_egpt_moe
+# Architecture identical to h1_topk; only the EGPT FFN routing differs:
+#   h1_topk:            TopK_Energy_MoE_MLP  (sparse, learned linear router, load-balance loss)
+#   h1_boltz_fullsize:  BoltzmannMoE_Energy_MLP (soft Boltzmann routing, energy-based router)
+#
+# KEY FIX vs h1_boltz_egpt_moe (existing): full-size experts, NOT iso-param.
+#   OLD (iso-param): intermediate_size=2048 total → 4×512 per expert (tiny, same fail as B-series)
+#   NEW (full-size): intermediate_size=8192 total → 4×2048 per expert (matches h1_topk capacity)
+#
+# This isolates routing mechanism (Boltzmann vs TopK) from expert capacity.
+# Paired with repulsion λ=0.1 (best from B4) to discourage load collapse.
+#
+# Layers 1-6: softmax_attention + standard MLP (int=2048) — GPT prefix
+# Layer 7:    energy_attention  + BoltzmannMoE_Energy_MLP (×6 recurrent)
+#               4 experts × 2048 per expert = 8192 total intermediate
+#
+# Param count: ~145M (same order as h1_topk ~145M)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [12]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 71680   # K=16 x I_e=4480; iso-param with the hybrids
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 0.35
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        activation_function: gelu
+        add_bias: false
+
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_gptmoe/pure_hop_T12
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_gptmoe/pure_hop_T12
+  save_interval: 2000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: iclr_pure_hop_isoP
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
