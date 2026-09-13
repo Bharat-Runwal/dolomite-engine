@@ -63,7 +63,9 @@ resubmit_job() {
     # clients. 1/2 clients joined." That killed both 400M arms. `blaunch` is what
     # fans the script out to every allocated host; the repo's own working 16/24/32
     # GPU launchers all use it.
-    local gpus_per_node=$gpus nnodes=1 span_arg="" launcher="bash"
+    local gpus_per_node=$gpus nnodes=1 span_arg="" launcher=""   # MUST be empty for single node: the inner script already says `bash`,
+                                                              # so launcher="bash" produced `bash bash pretrain.sh`
+                                                              # -> "cannot execute binary file", a 13x crash loop.
     if [ "$gpus" -gt 4 ]; then
         gpus_per_node=4
         nnodes=$(( (gpus + 3) / 4 ))
