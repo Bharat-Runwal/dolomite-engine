@@ -20,6 +20,10 @@ for i in $(seq 1 400); do
     el=$(( $(date +%s) - START ))
     [ $el -lt 1800 ] && GAP=120 || GAP=600
 
+    # NOTE ON GPU ACCOUNTING (2026-09-13): boltz_moe_watchdog and boltz_auto_eval request
+    # NO GPUs. Any quota arithmetic that multiplies nexec_host by 4 over all our jobs counts
+    # them as 4 GPUs each and reports a false 36/32 over-quota. Exclude them by name.
+    # CPU-ONLY SERVICES: boltz_moe_watchdog boltz_auto_eval
     # --- 1. the persistence layer itself (most important) ---
     for svc in boltz_moe_watchdog boltz_auto_eval; do
         n=$(bjobs -noheader -o "stat" -J "$svc" 2>/dev/null | grep -c RUN)
