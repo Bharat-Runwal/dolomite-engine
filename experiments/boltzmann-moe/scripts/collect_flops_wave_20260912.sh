@@ -68,6 +68,13 @@ eval)
         # and this re-submitted an eval for every already-scored arm on every invocation --
         # 7 surplus GPU jobs that pushed us over the 32-GPU quota. Glob for any of them.
         if compgen -G "$U/harness_results*.json" > /dev/null; then echo "skip $a (already evaluated)"; continue; fi
+        # ALSO skip when an eval for this arm is already queued or running. The JSON only
+        # appears when the eval FINISHES (~1 h), so the glob above is blind for that whole
+        # window and a 10-min babysitter loop submitted the same eval repeatedly --
+        # ev_iclr_pure_hop_isoP and ev_iclr_big_hop_pure each got a duplicate GPU job.
+        if [ -n "$(bjobs -noheader -o 'jobid' -J "ev_$a" 2>/dev/null | head -1)" ]; then
+            echo "skip $a (eval already in flight)"; continue
+        fi
         # An eval already queued/running leaves no JSON yet, so without this the
         # level-triggered babysitter resubmits the same arm every cycle.
         if bjobs -noheader -o "job_name" 2>/dev/null | grep -qx "ev_$a"; then

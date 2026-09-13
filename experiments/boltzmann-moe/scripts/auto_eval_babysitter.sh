@@ -33,8 +33,13 @@ while true; do
     fi
     # QUOTA GUARD. Each eval takes 1 GPU. Training already uses ~28 of our 32, and
     # overshooting once before made LSF suspend one of our own training arms (SSUSP).
-    used=$(bjobs -noheader -o "job_name stat nexec_host" 2>/dev/null \
-           | awk '$1~/^(iclr|slope|gptmoe)/ && $2=="RUN" {s+=$3*4} END{print s+0}')
+    # Exclude the CPU-only services (they request NO GPUs). Counting them as 4 each
+    # inflated the total to a phantom 36-40 and made this guard defer evals for hours
+    # while the real usage was 28/32. Also count only the grp_ebm/normal queue, since
+    # preemptable draws on a different pool.
+    used=$(bjobs -noheader -o "job_name stat queue nexec_host" 2>/dev/null \
+           | grep -vE "boltz_moe_watchdog|boltz_auto_eval" \
+           | awk '$2=="RUN" && $3=="normal" {s+=$4*4} END{print s+0}')
     nev=$(bjobs -noheader -o "job_name stat" 2>/dev/null | grep -c "^ev_.*RUN")
     if [ $((used + nev)) -ge 31 ]; then
         log "quota guard: ${used} training + ${nev} eval GPUs in use; deferring evals this cycle"
