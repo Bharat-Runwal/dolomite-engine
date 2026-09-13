@@ -1,3 +1,4 @@
+# 8-GPU (2026-09-13): ga 16->8 so 8 GPU x mbs1 x ga8 x 4096 = same tokens/step.
 # OOM FIX (2026-09-13): first attempt OOM'd on 80GB (tried to alloc 3.06 GiB with
 # ~1.9 GiB free). At d=1024 with I_e=17920 the per-expert activations at
 # micro_batch_size=4 x 4096 tokens do not fit. Reduced to mbs=1 / ga=16, which
@@ -94,7 +95,7 @@ training_parameters:
   num_training_steps: 15000
   eval_interval: 5000
   micro_batch_size: 1
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 8
   eval_during_training: false
   gradient_clipping: 1
 
