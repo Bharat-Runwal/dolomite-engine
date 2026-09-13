@@ -11,6 +11,7 @@
 set -uo pipefail
 REPO=/proj/dmfexp/nima/Code/dolomite-engine
 CONF=$REPO/experiments/boltzmann-moe/scripts/watchdog/watchdog_jobs.conf
+STATE=$REPO/experiments/boltzmann-moe/scripts/watchdog/watchdog_state.txt
 START=$(date +%s)
 declare -A last_step stall done_seen
 tracked() { grep -E "^[a-z_0-9]+\|" "$CONF" | cut -d'|' -f1; }
@@ -29,7 +30,17 @@ for i in $(seq 1 400); do
 
     # --- 2. per-arm state ---
     for a in $(tracked); do
-        read jid st <<<"$(bjobs -noheader -o 'job_name jobid stat' 2>/dev/null | awk -v n=$a '$1==n{print $2, $3}' | head -1)"
+        # Resolve the jobid the way the watchdog does -- from its state file -- and only
+        # fall back to a name lookup. A name lookup alone false-alarms whenever a conf
+        # entry has been renamed while its job still runs under the old name (which is
+        # exactly the case for iclr_big_learn_pure_1node right now).
+        jid=$(awk -v n="$a" '$1==n{print $2}' "$STATE" 2>/dev/null | head -1)
+        case "$jid" in ''|DONE*|*[!0-9]*) jid="";; esac
+        st=""
+        [ -n "$jid" ] && st=$(bjobs -noheader -o "stat" "$jid" 2>/dev/null | tr -d ' ' | head -1)
+        if [ -z "$st" ]; then
+            read jid st <<<"$(bjobs -noheader -o 'job_name jobid stat' 2>/dev/null | awk -v n=$a '$1==n{print $2, $3}' | head -1)"
+        fi
         cfg=$(grep -E "^$a\|" "$CONF" | cut -d'|' -f2)
         sp=$(grep -E '^\s*save_path:' "$cfg" 2>/dev/null | head -1 | sed 's/.*save_path:[[:space:]]*//')
         tgt=$(grep -E '^\s*num_training_steps:' "$cfg" 2>/dev/null | grep -oE '[0-9]+' | head -1)
