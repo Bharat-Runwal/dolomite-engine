@@ -1,4 +1,5 @@
 #!/bin/bash
+shopt -s extglob 2>/dev/null || true
 # collect_flops_wave_20260912.sh — the follow-up for the ICLR FLOPS wave.
 #
 # RUN THIS when configs/iclr_flops/* have finished (bjobs shows no iclr_* jobs, or
@@ -62,7 +63,11 @@ eval)
         t=$(grep -E '^\s*num_training_steps:' $(cfg_of "$a") | grep -oE '[0-9]+' | head -1)
         if [ "$s" -lt "$t" ] 2>/dev/null; then echo "skip $a (step $s < $t)"; continue; fi
         U="$(res_of "$a")/unsharded"
-        if [ -f "$U/harness_results.json" ]; then echo "skip $a (already evaluated)"; continue; fi
+        # NOTE the glob. lm-eval writes harness_results_<ISO timestamp>.json, never the bare
+        # name we pass as --output_path, so testing -f "$U/harness_results.json" NEVER matched
+        # and this re-submitted an eval for every already-scored arm on every invocation --
+        # 7 surplus GPU jobs that pushed us over the 32-GPU quota. Glob for any of them.
+        if compgen -G "$U/harness_results*.json" > /dev/null; then echo "skip $a (already evaluated)"; continue; fi
         bsub -q normal -G grp_ebm -J "ev_$a" -gpu "num=1/task:mode=exclusive_process" \
              -n 1 -M 48G -W 04:00 \
              -o "$HOME/bsub_logs/ev_${a}_%J.stdout" -e "$HOME/bsub_logs/ev_${a}_%J.stderr" <<EOF >/dev/null
