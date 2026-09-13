@@ -54,41 +54,13 @@ get_save_path() {
 # Resubmit one job. Args: name cfg queue grp gpus excl wt mem
 resubmit_job() {
     local name=$1 cfg=$2 queue=$3 grp=$4 gpus=$5 excl=$6 wt=$7 mem=$8
-    # MULTI-NODE (2026-09-13). This cluster cannot satisfy num>4 on a single host,
-    # so anything above 4 GPUs must be spread as N tasks x 4 GPUs with
-    # span[ptile=1]. Critically, plain `bsub < script` then runs the script on the
-    # FIRST host ONLY -- pretrain.sh derives NODE_RANK from $HOSTNAME and expects
-    # to be started on EVERY node, so torchrun on rank 0 waits for peers that
-    # never appear and dies with "Timed out after 901 seconds waiting for
-    # clients. 1/2 clients joined." That killed both 400M arms. `blaunch` is what
-    # fans the script out to every allocated host; the repo's own working 16/24/32
-    # GPU launchers all use it.
-    local gpus_per_node=$gpus nnodes=1 span_arg="" launcher="bash"
-    if [ "$gpus" -gt 4 ]; then
-        gpus_per_node=4
-        nnodes=$(( (gpus + 3) / 4 ))
-        span_arg="span[ptile=1]"
-        launcher="blaunch"
-    fi
-    local gpu_arg="num=$gpus_per_node"
+    local gpu_arg="num=$gpus"
     local x_flag=""
     if [ "$excl" = "1" ]; then
         gpu_arg="$gpu_arg/task:mode=exclusive_process"
-        if [ "$gpus_per_node" -ge 4 ]; then
+        if [ "$gpus" -ge 4 ]; then
             x_flag="-x"
         fi
-    fi
-
-    # AUTO-RESUME. dolomite needs an explicit load_args.load_path; without it a
-    # resubmit silently restarts from step 0 and we lose everything since the last
-    # resubmit. Build a runtime config carrying load_path when a checkpoint exists.
-    local save_path resume_cfg="$cfg"
-    save_path=$(grep -E "^\\s*save_path:" "$cfg" | head -1 | sed "s/.*save_path:\\s*//")
-    if [ -n "$save_path" ] && [ -f "$save_path/latest_checkpointed_iteration.json" ]; then
-        resume_cfg="$save_path/watchdog_runtime_$(date +%s).yml"
-        cp "$cfg" "$resume_cfg"
-        printf "\\nload_args:\\n  load_path: %s\\n" "$save_path" >> "$resume_cfg"
-        log "  resuming $name from checkpoint in $save_path"
     fi
 
     # Write the job script to a temp file to avoid heredoc-in-heredoc pitfalls.
@@ -99,7 +71,7 @@ resubmit_job() {
 unset TMPDIR TEMP TMP
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=/proj/dmfexp/nima/Code/dolomite-engine:\${PYTHONPATH:-}
-$launcher bash /proj/dmfexp/nima/Code/dolomite-engine/scripts/common/pretrain.sh "$resume_cfg"
+bash /proj/dmfexp/nima/Code/dolomite-engine/scripts/common/pretrain.sh "$cfg"
 INNER
 
     local out
@@ -108,7 +80,7 @@ INNER
         -J "$name" \
         $x_flag \
         -gpu "$gpu_arg" \
-        -n "$nnodes" ${span_arg:+-R "$span_arg"} -M "$mem" -W "$wt" \
+        -n 1 -M "$mem" -W "$wt" \
         -o "$HOME/bsub_logs/${name}_%J.stdout" \
         -e "$HOME/bsub_logs/${name}_%J.stderr" \
         < "$tmp_script" 2>&1)
@@ -147,7 +119,7 @@ while true; do
         # If we have a known jid, check its state
         stat=""
         if [ -n "$last_jid" ]; then
-            stat=$(bjobs -noheader -o "stat" "$last_jid" 2>/dev/null | tr -d ' ' | head -1)
+            stat=$(bjobs "$last_jid" 2>/dev/null | tail -1 | awk '{print $3}')
         fi
 
         case "$stat" in
