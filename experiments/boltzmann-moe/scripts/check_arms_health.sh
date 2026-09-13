@@ -26,6 +26,11 @@ for c in $CFG/*.yml; do
     real=$(grep -B2 "Traceback" "$f" 2>/dev/null \
             | grep -cvE "_distributed_excepthook|exit_hooks|Process Process-|^--|Traceback" || true)
     oom=$(grep -c "CUDA out of memory" "$f" 2>/dev/null || true)
+    # NaN must be matched in the LOSS FIELD, never as a bare substring. A plain
+    # `grep nan` over these logs matches the venv path .../nanoGPT-og/... in every
+    # torch warning line, so it flags every healthy run. Seen 2026-09-13 on the live
+    # iclr_big_learn_pure log (8 hits, all "nanoGPT-og").
+    nans=$(grep -cE "train-(lm_)?loss = (nan|-?inf)" "$f" 2>/dev/null || true)
     [ "${oom:-0}" -gt 0 ] && note="OOM"
   fi
   if [ "$ck" -ge "$tgt" ] 2>/dev/null; then v="OK-DONE"
