@@ -22,15 +22,23 @@
 
 set -uo pipefail
 REPO=/proj/dmfexp/nima/Code/dolomite-engine
-RES=$REPO/experiments/boltzmann-moe/results/iclr_flops
-CFGDIR=$REPO/configs/iclr_flops
+# 2026-09-13: was iclr_flops ONLY, so every arm added since (the Switch baselines, the
+# single-block attribution pair, the 400M tier, the GPT-MoE baselines, the slope pair)
+# was invisible to status/eval/table and would never be auto-evaluated on completion.
+# Now scans all ICLR config dirs and derives each arm's results dir from its own
+# save_path, so no per-dir RES mapping can drift out of sync.
+CFGDIRS="$REPO/configs/iclr_flops $REPO/configs/iclr_moebase $REPO/configs/iclr_1blk \
+         $REPO/configs/iclr_big $REPO/configs/iclr_ctrl $REPO/configs/iclr_gptmoe \
+         $REPO/configs/iclr_slope"
+cfg_of() { for d in $CFGDIRS; do [ -f "$d/$1.yml" ] && { echo "$d/$1.yml"; return; }; done; }
+res_of() { grep -E '^\s*save_path:' "$(cfg_of "$1")" 2>/dev/null | head -1 | sed 's/.*save_path:[[:space:]]*//'; }
 OUT=$REPO/experiments/boltzmann-moe/results/router_analysis
 mkdir -p "$HOME/bsub_logs" "$OUT"
 MODE="${1:-status}"
 
-arms() { ls $CFGDIR/*.yml 2>/dev/null | xargs -n1 basename | sed 's/\.yml$//'; }
+arms() { for d in $CFGDIRS; do ls $d/*.yml 2>/dev/null; done | xargs -n1 basename | sed 's/\.yml$//' | sort -u; }
 step_of() {
-    local f="$RES/$1/latest_checkpointed_iteration.json"
+    local f="$(res_of "$1")/latest_checkpointed_iteration.json"
     [ -f "$f" ] && grep -oE '[0-9]+' "$f" | head -1 || echo 0
 }
 
@@ -40,7 +48,7 @@ status)
     printf "%-30s %8s %8s  %s\n" ARM STEP TARGET STATE
     for a in $(arms); do
         s=$(step_of "$a")
-        t=$(grep -E '^\s*num_training_steps:' $CFGDIR/$a.yml | grep -oE '[0-9]+' | head -1)
+        t=$(grep -E '^\s*num_training_steps:' $(cfg_of "$a") | grep -oE '[0-9]+' | head -1)
         alive=$(bjobs -noheader -o "stat" -J "$a" 2>/dev/null | tr -d ' ' | head -1)
         [ -z "$alive" ] && alive="-"
         done_flag=""; [ "$s" -ge "$t" ] 2>/dev/null && done_flag="DONE"
@@ -51,9 +59,9 @@ status)
 eval)
     for a in $(arms); do
         s=$(step_of "$a")
-        t=$(grep -E '^\s*num_training_steps:' $CFGDIR/$a.yml | grep -oE '[0-9]+' | head -1)
+        t=$(grep -E '^\s*num_training_steps:' $(cfg_of "$a") | grep -oE '[0-9]+' | head -1)
         if [ "$s" -lt "$t" ] 2>/dev/null; then echo "skip $a (step $s < $t)"; continue; fi
-        U="$RES/$a/unsharded"
+        U="$(res_of "$a")/unsharded"
         if [ -f "$U/harness_results.json" ]; then echo "skip $a (already evaluated)"; continue; fi
         bsub -q normal -G grp_ebm -J "ev_$a" -gpu "num=1/task:mode=exclusive_process" \
              -n 1 -M 48G -W 04:00 \
@@ -73,7 +81,7 @@ cd $REPO
 if [ ! -f "$U/model.safetensors" ]; then
   C=/tmp/unshard_${a}_\$\$.yml
   printf "load_args:\n  load_path: %s\n  iteration: %s\nunsharded_path: %s\nmixed_precision_args:\n  dtype: bf16\n" \
-      "$RES/$a" "$s" "$U" > "\$C"
+      "$(res_of "$a")" "$s" "$U" > "\$C"
   python -m lm_engine.unshard --config "\$C" && rm -f "\$C"
 fi
 python experiments/energy-inference/scripts/structured-proj/eval_harness.py \
@@ -136,7 +144,7 @@ PY
 
 proxy)
     for a in $(arms); do
-        U="$RES/$a/unsharded"
+        U="$(res_of "$a")/unsharded"
         [ -f "$U/model.safetensors" ] || { echo "skip $a (not unsharded; run 'eval' first)"; continue; }
         bsub -q normal -G grp_ebm -J "px_$a" -gpu "num=1/task:mode=exclusive_process" \
              -n 1 -M 48G -W 04:00 \
@@ -149,9 +157,9 @@ export TMPDIR=/proj/dmfexp/nima/.cache/tmp && mkdir -p "\$TMPDIR"
 cd $REPO
 # cache (x, E_k) pairs first, then fit the proxy and measure paired NLL
 python experiments/boltzmann-moe/scripts/measure_moe_routing_20260912.py \
-    --run "$RES/$a" --n_prompts 400 --max_len 1024 --cache_per_iter 6000 --ranks 8 32
+    --run "$(res_of "$a")" --n_prompts 400 --max_len 1024 --cache_per_iter 6000 --ranks 8 32
 python experiments/boltzmann-moe/scripts/fit_proxy_router_20260912.py \
-    --run "$RES/$a" --rank 32 --hidden 64 --steps 4000 --n_eval 250
+    --run "$(res_of "$a")" --rank 32 --hidden 64 --steps 4000 --n_eval 250
 EOF
         echo "submitted px_$a"
     done
