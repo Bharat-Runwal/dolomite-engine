@@ -536,8 +536,18 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         self.register_buffer("_load_sum", torch.zeros(self.n_experts), persistent=False)
         self.register_buffer("_ent_sum", torch.zeros((), dtype=torch.float32), persistent=False)
         self.register_buffer("_tok_sum", torch.zeros((), dtype=torch.float32), persistent=False)
-        # persistent: the bias is part of the trained routing rule and must survive a resume
-        self.register_buffer("load_balance_bias", torch.zeros(self.n_experts), persistent=True)
+        # REGISTER ONLY WHEN BALANCING IS ON. A persistent buffer adds a key to the
+        # state_dict, and registering it unconditionally broke resume for EVERY existing
+        # energy-MoE checkpoint:
+        #     RuntimeError: Missing key in checkpoint state_dict:
+        #                   state.model.transformer.h.0.ffwd.moe.load_balance_bias
+        # (hit on slope90k_1blk resuming from its step-2000 checkpoint). Arms with
+        # balance_rate=0 must keep exactly their original state_dict shape. Balancing arms
+        # do want it persistent, since the bias is part of the trained routing rule.
+        if self.balance_rate > 0.0:
+            self.register_buffer("load_balance_bias", torch.zeros(self.n_experts), persistent=True)
+        else:
+            self.load_balance_bias = None
         self.top_k = top_k
         self.e_sign = e_sign
         self.layer_idx = layer_idx
@@ -603,11 +613,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 self._load_sum += pf.sum(0)
                 self._ent_sum += -(pf * (pf + 1e-9).log()).sum(-1).sum()
                 self._tok_sum += pf.shape[0]
-                if self.balance_rate > 0.0:
+                if self.balance_rate > 0.0 and self.load_balance_bias is not None:
                     # Under-loaded experts get a positive nudge, over-loaded a negative one.
                     share = pf.mean(0)
                     target = share.new_full((), 1.0 / self.n_experts)
-                    self.load_balance_bias += self.balance_rate * torch.sign(target - share)
+                    upd = (self.balance_rate * torch.sign(target - share))
+                    self.load_balance_bias += upd.to(self.load_balance_bias.dtype)
 
         # Aggregate gradients: ∇_h E_total = Σ_k w_k · ∇_h E_k.
         expert_grads = torch.stack(expert_outs, dim=-2)        # (..., n_experts, hidden)
@@ -668,8 +679,10 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             s = (s - s.mean(-1, keepdim=True)) / s.std(-1, keepdim=True).clamp_min(1e-12)
         # Bias is added AFTER normalisation: zscore would otherwise rescale it away, and
         # it is defined in the same (post-norm) space the temperature divides.
-        if self.balance_rate > 0.0:
-            s = s + self.load_balance_bias
+        if self.balance_rate > 0.0 and self.load_balance_bias is not None:
+            # Cast to the logits' dtype: the buffer is fp32 while s is bf16 under mixed
+            # precision, and the implicit promotion failed during fake-tensor tracing.
+            s = s + self.load_balance_bias.to(s.dtype)
         return s / self.temperature
 
     def _add_repulsion_loss(self, expert_grads: torch.Tensor) -> None:
@@ -703,7 +716,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 "load_mean_token_entropy": (self._ent_sum / n).item(),
                 "load_tokens_seen": n.item(),
             }
-            if self.balance_rate > 0.0:
+            if self.balance_rate > 0.0 and self.load_balance_bias is not None:
                 m["load_bias_absmax"] = self.load_balance_bias.abs().max().item()
             self._load_sum.zero_(); self._ent_sum.zero_(); self._tok_sum.zero_()
         return m
