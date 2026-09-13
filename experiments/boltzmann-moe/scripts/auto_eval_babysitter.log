@@ -123,3 +123,8 @@
 [2026-09-13 20:23:10] quota guard: 36 training + 0 eval GPUs in use; deferring evals this cycle
 [2026-09-13 20:32:13] === babysitter start (pid=2542775 host=p3-r31-n1.bluevela.rmf.ibm.com jid=1621453) ===
 [2026-09-13 20:32:16] submitted 2 eval job(s); 13 arms DONE
+[2026-09-13 20:33:39] frontier_table.txt refreshed (13 DONE)
+[2026-09-13 20:43:43] submitted 2 eval job(s); 13 arms DONE
+[2026-09-13 20:45:13] frontier_table.txt refreshed (13 DONE)
+[2026-09-13 20:55:18] submitted 2 eval job(s); 13 arms DONE
+[2026-09-13 20:57:14] frontier_table.txt refreshed (13 DONE)
