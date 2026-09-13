@@ -113,5 +113,30 @@ mixed_precision_args:
 distributed_args:
   fsdp_algorithm: 2
   gradient_checkpointing_method: block
-  torch_compile: true
+  # torch_compile: false  (2026-09-13, jid 1589109 died after 30 min)
+  #
+  # ROOT CAUSE, traced to the exact pass. Inductor runs a diagnostic SPMD check in
+  # post_grad_passes:
+  #     spmd_check(gm) -> dist.all_gather_object(all_hashes, structure_hash, pg)
+  # which requires EVERY rank to reach the same compile point together. Across 2
+  # nodes the ranks did not, so the gloo all_gather blocked until its 1800 s
+  # timeout and every rank raised
+  #     InductorError: RuntimeError: [gloo/transport/tcp/unbound_buffer.cc:129]
+  #     Timed out waiting 1800000ms for send operation
+  # The pass is gated on `reorder_for_compute_comm_overlap`, which dolomite sets
+  # unconditionally at lm_engine/distributed.py:57, so it is always on for us.
+  #
+  # This is the same failure already fixed this way on both Switch arms: a learned
+  # router makes per-expert work DATA-DEPENDENT, which triggers rank-dependent
+  # recompiles. The 8-GPU energy arm (iclr_big_hop_pure) compiles fine and keeps
+  # torch_compile: true -- its routing is a dense masked mixture with static shapes.
+  #
+  # FAIRNESS: compile changes kernel fusion, not the function or the optimisation
+  # trajectory, so the hop/learn comparison stays valid; only wall-clock differs.
+  # A narrower alternative exists if speed becomes the binding constraint --
+  #     torch._inductor.config.aten_distributed_optimizations.spmd_check = False
+  # which drops only the diagnostic collective (its mismatch action defaults to
+  # "warn", so it prevents nothing). Not used here: if the graphs really are
+  # non-SPMD, that just moves the hang to a real NCCL collective later.
+  torch_compile: false
   stage: 0
