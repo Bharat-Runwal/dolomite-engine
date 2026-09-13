@@ -23,6 +23,10 @@ eval_env() {
     export TMPDIR="${TMPDIR:-/proj/dmfexp/nima/.cache/tmp}"; mkdir -p "$TMPDIR"
 }
 
+# PIN CHECK IS FATAL (2026-09-13). This used to sys.exit("WRONG HARNESS: ..."),
+# returning 1 -- but every caller runs `set -uo pipefail` WITHOUT `-e`, so the message
+# was printed and the eval continued against whatever lm_eval site-packages provided.
+# The guard existed and was INEFFECTIVE. Now it kills the shell explicitly.
 eval_assert_pin() {
     python - <<'PY'
 import lm_eval, os, sys
@@ -32,4 +36,9 @@ if want not in got:
     sys.exit(f"WRONG HARNESS: lm_eval resolved to {got}, expected the vendored {want}")
 print(f"  harness OK: {got}")
 PY
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "FATAL: harness pin check failed (rc=$rc); refusing to eval against the wrong lm_eval." >&2
+        exit 1
+    fi
 }
