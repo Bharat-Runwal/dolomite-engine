@@ -1,3 +1,9 @@
+# NCCL/inductor FIX (2026-09-13): first attempt died with a collective timeout
+# (switch_K16_top2) and an inductor gloo send timeout (…_shared). The MoE class
+# routes with DATA-DEPENDENT shapes (tokens per expert varies per step), which
+# under torch_compile + FSDP triggers recompiles that desync ranks. Hence
+# torch_compile: false for these two arms only.
+#
 # iclr_switch_K16_top2_shared
 #
 # SOTA-feature MoE baseline: Switch-style + SHARED EXPERT with gating (DeepSeek-V2/V3). Strongest standard-MoE baseline available config-only in this repo.
@@ -153,5 +159,5 @@ mixed_precision_args:
 
 distributed_args:
   fsdp_algorithm: 2
-  torch_compile: true
+  torch_compile: false
   stage: 0
