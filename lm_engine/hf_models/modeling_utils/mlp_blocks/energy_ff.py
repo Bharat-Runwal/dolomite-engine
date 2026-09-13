@@ -484,6 +484,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         layer_idx: int | None = None,
         repulsion_form: str = "squared",
         routing_norm: str = "none",
+        renormalize_topk: bool = False,
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -500,6 +501,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         self.repulsion_form = repulsion_form
         assert routing_norm in ("none", "zscore", "sqrt_width")
         self.routing_norm = routing_norm
+        self.renormalize_topk = bool(renormalize_topk)
         self.top_k = top_k
         self.e_sign = e_sign
         self.layer_idx = layer_idx
@@ -545,7 +547,17 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             _, topk_idx = logits.topk(self.top_k, dim=-1)
             mask = torch.zeros_like(p, dtype=torch.bool)
             mask.scatter_(-1, topk_idx, True)
-            p = p * mask  # sparse Boltzmann approx; sum < 1 intentionally
+            p = p * mask
+            # NOTE ON COMPARABILITY. Leaving sum(p) < 1 was a deliberate choice (it
+            # avoids abrupt weight redistribution at routing boundaries), but the
+            # baselines we compare against do NOT do this: TopK_Energy_MoE_MLP takes
+            # softmax over only the top-k logits, and the Switch-style MoE class uses
+            # normalized_topk, so both give sum(p) = 1 exactly. Empirically our masked
+            # form gives sum(p) ~ 0.45 at K=16, k=2, i.e. the mixture output is scaled
+            # down by roughly 2x relative to the baselines. scale_ff can absorb that, but
+            # it is a real asymmetry in the comparison, so expose the matched option.
+            if self.renormalize_topk:
+                p = p / p.sum(-1, keepdim=True).clamp_min(1e-9)
 
         # Aggregate gradients: ∇_h E_total = Σ_k w_k · ∇_h E_k.
         expert_grads = torch.stack(expert_outs, dim=-2)        # (..., n_experts, hidden)
@@ -883,6 +895,7 @@ def build_boltzmann_moe(
     top_k: int | None = None,
     repulsion_form: str = "squared",
     routing_norm: str = "none",
+    renormalize_topk: bool = False,
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -928,5 +941,6 @@ def build_boltzmann_moe(
         layer_idx=layer_idx,
         repulsion_form=repulsion_form,
         routing_norm=routing_norm,
+        renormalize_topk=renormalize_topk,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)
