@@ -68,6 +68,11 @@ eval)
         # and this re-submitted an eval for every already-scored arm on every invocation --
         # 7 surplus GPU jobs that pushed us over the 32-GPU quota. Glob for any of them.
         if compgen -G "$U/harness_results*.json" > /dev/null; then echo "skip $a (already evaluated)"; continue; fi
+        # An eval already queued/running leaves no JSON yet, so without this the
+        # level-triggered babysitter resubmits the same arm every cycle.
+        if bjobs -noheader -o "job_name" 2>/dev/null | grep -qx "ev_$a"; then
+            echo "skip $a (eval already in flight)"; continue
+        fi
         bsub -q normal -G grp_ebm -J "ev_$a" -gpu "num=1/task:mode=exclusive_process" \
              -n 1 -M 48G -W 04:00 \
              -o "$HOME/bsub_logs/ev_${a}_%J.stdout" -e "$HOME/bsub_logs/ev_${a}_%J.stderr" <<EOF >/dev/null
@@ -106,18 +111,34 @@ import json, glob, os, sys
 sys.path.insert(0, "/proj/dmfexp/nima/Code/dolomite-engine")
 from lm_engine.arguments import TrainingArgs
 from lm_engine.utils import load_yaml
-RES="/proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_flops"
-CFG="/proj/dmfexp/nima/Code/dolomite-engine/configs/iclr_flops"
+# 2026-09-13: was iclr_flops only, so evaluated arms from every other dir were invisible
+# to the table. Now scans all ICLR config dirs and takes each arm's results dir from its
+# own save_path, matching the shell helpers above.
+CFGDIRS = ["configs/iclr_flops", "configs/iclr_moebase", "configs/iclr_1blk",
+           "configs/iclr_big", "configs/iclr_ctrl", "configs/iclr_gptmoe",
+           "configs/iclr_slope"]
+ROOT = "/proj/dmfexp/nima/Code/dolomite-engine"
 ACC=["arc_challenge","arc_easy","boolq","copa","hellaswag","openbookqa","piqa","sciq","winogrande","mmlu"]
 rows=[]
-for c in sorted(glob.glob(f"{CFG}/*.yml")):
+cfgs = []
+for d in CFGDIRS:
+    cfgs += sorted(glob.glob(f"{ROOT}/{d}/*.yml"))
+for c in cfgs:
     a=os.path.basename(c)[:-4]
     b=TrainingArgs(**load_yaml(c)).model_args.pretrained_config["mlp_blocks"][-1]
-    K=b["n_experts"]; tk=b.get("top_k") or K
-    learned = b["mlp_type"]=="TopK_Energy_MoE_MLP"
+    # Key names differ by class: EnergyFF_BoltzmannMoE / TopK_Energy_MoE_MLP use
+    # n_experts + top_k, while the standard Switch-style MoE uses num_experts +
+    # num_experts_per_tok. A plain b["n_experts"] raised KeyError on the new GPT-MoE arms.
+    K = b.get("n_experts") or b.get("num_experts")
+    if K is None:
+        continue                      # not a mixture block (e.g. a dense-FFN-only arm)
+    tk = b.get("top_k") or b.get("num_experts_per_tok") or K
+    mt = b.get("mlp_type","")
+    learned = mt in ("TopK_Energy_MoE_MLP", "MoE")
     hop = b.get("expert_kind")=="hopfield"
-    js=glob.glob(f"{RES}/{a}/unsharded/harness_results*.json")
-    if not js: rows.append((a,K,tk,tk/K,learned,hop,None,None)); continue
+    save = TrainingArgs(**load_yaml(c)).save_args.save_path
+    js=glob.glob(f"{save}/unsharded/harness_results*.json")
+    if not js: rows.append((a,K,tk,tk/K,learned,hop,None,None,mt)); continue
     d=json.load(open(sorted(js)[-1])); r=d.get("results",d)
     accs=[]
     for t in ACC:
@@ -125,12 +146,12 @@ for c in sorted(glob.glob(f"{CFG}/*.yml")):
         m=v.get("acc_norm,none", v.get("acc,none"))
         if m is not None: accs.append(m)
     ppl=r.get("wikitext",{}).get("word_perplexity,none")
-    rows.append((a,K,tk,tk/K,learned,hop,100*sum(accs)/len(accs) if accs else None,ppl))
+    rows.append((a,K,tk,tk/K,learned,hop,100*sum(accs)/len(accs) if accs else None,ppl,mt))
 print(f"{'arm':30s} {'router':8s} {'exp':4s} {'K':>3s} {'k':>2s} {'k/K':>6s} "
       f"{'FLOPratio':>9s} {'avg%':>7s} {'wikiPPL':>8s}")
-for a,K,tk,kk,learned,hop,avg,ppl in rows:
+for a,K,tk,kk,learned,hop,avg,ppl,mt in rows:
     # cost of the mixture block relative to dense soft, with a free proxy router
-    print(f"{a:30s} {'learned' if learned else 'energy':8s} {'hop' if hop else 'w1w2':4s} "
+    print(f"{a:30s} {('switch' if mt=='MoE' else 'learned' if learned else 'energy'):8s} {('hop' if hop else 'swiglu' if mt=='MoE' else 'w1w2'):6s} "
           f"{K:3d} {tk:2d} {kk:6.3f} {kk:9.3f} "
           f"{('%7.2f'%avg) if avg else '      -':>7s} {('%8.2f'%ppl) if ppl else '       -':>8s}")
 print()
