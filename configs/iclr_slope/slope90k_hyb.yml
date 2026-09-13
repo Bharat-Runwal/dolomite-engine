@@ -1,0 +1,170 @@
+# SCHEDULE-CORRECTED SLOPE PAIR (2026-09-13). Answers "does the 1-block model just
+# need more tokens?" -- which our existing curves CANNOT answer.
+#
+# THE PROBLEM WITH THE EXISTING RUNS. Both arms use 2000 warmup + cosine over 30000. The
+# local log-log slope therefore varies ~3x along a single arm's own curve (measured on
+# the hybrid: -0.148 just after warmup, -0.052 at step 9000, -0.078 at 22000). That is a
+# schedule artifact, not a scaling exponent, and it makes the two obvious comparisons
+# disagree: at matched STEP the 1-block looks steeper (-0.079 vs -0.069, supporting the
+# more-tokens hypothesis), at matched LOSS it looks shallower (-0.065 vs -0.148).
+#
+# THE FIX. Set num_training_steps to a LONG horizon (90000) so the cosine is stretched
+# and the first ~15000 steps sit at near-peak, near-constant LR. Both arms get the
+# IDENTICAL schedule, so a slope measured over 4000-15000 is a clean comparison. We do
+# NOT need to run 90000 steps -- a short run suffices to measure the slope, which is the
+# whole point. Checkpoints every 2000 steps, so the run can be stopped or preempted at
+# any time and still yield the curve.
+#
+# Read the pair together; neither arm means anything alone.
+# THIS ARM: the 7-block hybrid, same 90000-step schedule. The control.
+# iclr_hop_K16_top2
+#
+# energy router, HOPFIELD experts (single W -> 2x experts at iso-param), K=16, top-2 (k/K=0.125)
+#
+# FLOPS-frontier wave (2026-09-12). Backbone FIXED across ALL arms:
+#   d=768, 7 blocks, layer_iterations [1,1,1,1,1,1,6], 12 heads, GPT ffn 2048,
+#   30000 steps = 7.86B tokens, lr 2e-3 cosine. ONLY the MoE block differs.
+# Iso-total-params in the MoE block (12.58M): w1w2 and the learned-router
+#   class use 2*I_tot*d, hopfield uses I_tot*d, so hopfield carries 2x the
+#   experts for the same parameters -> half the k/K at equal top_k.
+# Question: quality vs k/K frontier against a learned-router MoE at each K.
+#
+# h1_boltz_moe_fullsize: direct BoltzmannMoE equivalent of h1_topk_egpt_moe
+# Architecture identical to h1_topk; only the EGPT FFN routing differs:
+#   h1_topk:            TopK_Energy_MoE_MLP  (sparse, learned linear router, load-balance loss)
+#   h1_boltz_fullsize:  BoltzmannMoE_Energy_MLP (soft Boltzmann routing, energy-based router)
+#
+# KEY FIX vs h1_boltz_egpt_moe (existing): full-size experts, NOT iso-param.
+#   OLD (iso-param): intermediate_size=2048 total → 4×512 per expert (tiny, same fail as B-series)
+#   NEW (full-size): intermediate_size=8192 total → 4×2048 per expert (matches h1_topk capacity)
+#
+# This isolates routing mechanism (Boltzmann vs TopK) from expert capacity.
+# Paired with repulsion λ=0.1 (best from B4) to discourage load collapse.
+#
+# Layers 1-6: softmax_attention + standard MLP (int=2048) — GPT prefix
+# Layer 7:    energy_attention  + BoltzmannMoE_Energy_MLP (×6 recurrent)
+#               4 experts × 2048 per expert = 8192 total intermediate
+#
+# Param count: ~145M (same order as h1_topk ~145M)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 6]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 16384   # total across K; I_e = 1024
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent   # 2026-09-12 fix; REVERT = mean
+        routing_norm: zscore
+        temperature: 0.35
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        activation_function: gelu
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_slope/slope90k_hyb
+  save_interval: 2000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: iclr_hop_K16_top2
+
+training_parameters:
+  num_training_steps: 90000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

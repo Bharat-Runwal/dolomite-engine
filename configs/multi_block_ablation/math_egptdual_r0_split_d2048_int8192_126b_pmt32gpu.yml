@@ -1,0 +1,168 @@
+# ============================================================================
+# 1B EGPT-Dual (paper-identical arch) BASELINE — n_registers 0.  Iso-codebase
+# no-register control for the register-recovery experiment (2026-07-27).
+#
+# 32-GPU / preemptable variant of math_egptdual_r0_split_d2048_int8192_126b_16gpu.yml.
+# RECIPE IS IDENTICAL to the 16-GPU version — global batch preserved by halving
+# gradient_accumulation_steps (ga4@16GPU -> ga2@32GPU):
+#     mb4 x ga2 x 32 GPU x 4096 = 1,048,576 tok/step (same 1.05M as 16-GPU ga4).
+#     120000 steps x 1.05M = 125.8B (~126B) tokens.  Same LR 1.5e-4, same warmup
+#     2000 / decay 118000, same grad_clip 0.5.  Pure ~2x wall-clock win.
+#
+# Identical in EVERY respect to the R128-softband arm
+# (math_egptdual_r128s8_softband_split_d2048_int8192_126b_pmt32gpu.yml) EXCEPT
+# n_registers: 0.  register_energy with n_registers=0 is a supported no-op
+# path (model.py:158) => a perfect +reg vs -reg ablation in one codebase.
+#
+# This reproduces the paper 1B EGPT-Dual (GSM8K-flex 11.5 / hash 12.0) in the
+# dolomite codebase so the R128 comparison is apples-to-apples (the paper
+# numbers were trained in energy-gpt, a different codebase).
+#
+# ARCH: d=2048, 16 heads (head_dim 128), int 8192, 12 layers,
+#   iterations [1,1,1,1,1,1,1,1,2,3,4,6], dual_unconstrained, no Rayleigh,
+#   no FPT.  ~944M params.
+# LR: muP 1.5e-4 (2e-4@d1536 x 1536/2048), grad_clip 0.5, warmup 2000.
+# Launcher: run_egptdual_1b_recovery_pmt32gpu.sh <config> <save_path> <job_name>
+# ============================================================================
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: register_energy
+    n_registers: 0                           # <-- ONLY difference vs R128 arm
+    register_start_layer: 8
+    register_generation_mode: no_cache
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 6]
+    iter_dropout_range_per_block: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 2048
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    energy_apply_rayleigh: false
+    energy_full_per_token_grad: false
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348      # 1/sqrt(head_dim=128)
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - &egpt_attn
+        sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+    mlp_blocks:
+      - &gpt_ffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 8192
+        add_bias: false
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - &egpt_ffn
+        mlp_type: Energy_MLP
+        intermediate_size: 8192
+        add_bias: false
+      - *egpt_ffn
+      - *egpt_ffn
+      - *egpt_ffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_egptdual_r0_split_d2048_int8192_126b_pmt32gpu
+  save_interval: 2000
+  max_to_keep: 8
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: EGPT-action
+    name: math_egptdual_r0_split_d2048_int8192_126b_pmt32gpu
+
+training_parameters:
+  num_training_steps: 120000       # 120k x (mb4 x ga2 x 32 GPU x 4096) = 125.8B tokens
+  eval_interval: 20000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 2   # ga2@32GPU == ga4@16GPU (same 1.05M-tok global batch)
+  eval_during_training: false
+  gradient_clipping: 0.5
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.00015                    # muP: 2e-4@d1536 x (1536/2048)
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1             # 1.5e-4 -> 1.5e-5
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 118000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true              # ~1.6x speedup; fallback to false if it crashes at startup
+  stage: 0

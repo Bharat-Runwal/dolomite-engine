@@ -1,0 +1,162 @@
+# ============================================================================
+# 1B EGPT-Dual RESTART from the lr2e3 run's step-10000 weights, at lr 1.5e-3.
+# 2026-08-06.  The lr2e3 run (657853) showed mild self-recovering loss spikes
+# (grad_norm 2-3 caught by grad_clip 1.0); we restart at a lower peak LR + tighter
+# clip to smooth training.
+#
+#   * lr 1.5e-3 (down from 2e-3; muP-sweep optimum region, less spiky)
+#   * grad_clip 0.5 (down from 1.0; directly damps the grad spikes)
+#   * loads MODEL WEIGHTS ONLY from lr2e3/global_step10000 (load_optimizer:false),
+#     so the config's lr actually takes effect (peak LR = optimizer base LR, which
+#     is restored-from-ckpt when load_optimizer:true).  Fresh Adam is cushioned by
+#     a short 500-step re-warmup; iteration restarts at 0 (fresh cosine).
+#   * global batch 512 seq (mb4 x ga4 x 32 GPU) = 2.10M tok/step, unchanged.
+#   * save_path on /u (80T free, NOT the quota-pinned /proj) -> no checkpoint-fail risk.
+#
+# TOKENS: 10k prior steps (@2e-3, 21B tok) + 50000 steps here (105B) ~= 126B total.
+# The load_args are injected by the launcher (weights-only on first launch,
+# full-resume-from-own-ckpt on guardian resubmit): run_egptdual_1b_restart_20260806.sh
+# ARCH byte-identical to R0 / the lr2e3 config.
+# ============================================================================
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: register_energy
+    n_registers: 0
+    register_start_layer: 8
+    register_generation_mode: no_cache
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 6]
+    iter_dropout_range_per_block: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 2048
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    energy_apply_rayleigh: false
+    energy_full_per_token_grad: false
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - &egpt_attn
+        sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+    mlp_blocks:
+      - &gpt_ffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 8192
+        add_bias: false
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - &egpt_ffn
+        mlp_type: Energy_MLP
+        intermediate_size: 8192
+        add_bias: false
+      - *egpt_ffn
+      - *egpt_ffn
+      - *egpt_ffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /u/ndehmamy/egpt_runs/math_egptdual_r0_restart10k_lr1p5e3
+  save_interval: 2000
+  max_to_keep: 6
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: EGPT-action
+    name: math_egptdual_r0_restart10k_lr1p5e3
+
+training_parameters:
+  num_training_steps: 50000        # + 10k prior @2e-3 => ~126B total tokens
+  eval_interval: 20000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4   # x 32 GPU => 512 seq/step
+  eval_during_training: false
+  gradient_clipping: 0.5           # tighter than lr2e3's 1.0 to damp grad spikes
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.0015                     # peak LR (takes effect because load_optimizer:false)
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1             # 1.5e-3 -> 1.5e-4
+  num_warmup_steps: 500            # short re-warmup to cushion the fresh optimizer
+  num_constant_steps: 0
+  num_decay_steps: 49500
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: false
+  stage: 0

@@ -1,0 +1,205 @@
+# ============================================================================
+# 1B EGPT-Dual (paper-identical arch) + 128 register tokens on the 4 energy
+# blocks, SOFT-BAND attn-balance loss.  RECOVERY EXPERIMENT (2026-07-27).
+#
+# WHY 1B (not 400M): the EGPT-Dual vs RecGPT GSM8K gap is ABSENT at 400M/800M
+# and only opens at 1B (paper tab:1b_benchmarks: GSM8K-flex 11.5 vs 16.4;
+# hash 12.0 vs 18.3).  The recovery hypothesis — EAttn ties W_V into
+# span(W_Q^T W_K), denying the energy blocks the free scratch space RecGPT
+# enjoys; registers return extra residual rank — can only be tested where the
+# gap exists.  If registers recover EGPT-Dual GSM8K toward RecGPT, that is a
+# WIN and evidence FOR the value-tying hypothesis.
+#
+# WHY R=128 (not R=64): the value-tying deficit scales with the model — at
+# d=2048 with FOUR energy blocks (layers 8-11, sharing ONE register bank
+# across 2+3+4+6=15 energy-block-forwards) the lost scratch rank is ~4x the
+# single-EGPT-block d1536 regime where R64 was tuned.  R128 provisions more
+# residual rank so recovery is not starved (avoids a false negative).  Softband
+# was designed precisely to make LARGE register banks usable: the R128 failure
+# at 409M was ceiling-ONLY balance suppressing use (BBH 0.2641 < R64); softband
+# R128 was the best-BBH register run (0.2822).  The floor FORCES participation,
+# so the "big bank gets ignored" failure mode does not apply.  Register cost is
+# negligible: 128*2048 = 262K params (+0.03%), ~2% extra KV at seq 4096.
+#
+# ARCH — matches the paper 1B EGPT-Dual (text/appendix.tex:725) EXCEPT GPT
+#   blocks use sequential `softmax_attention` (register_energy rejects the
+#   paper's `parallel_softmax_attention`; both arms identical so +reg/-reg clean):
+#   d=2048, 16 heads (head_dim 128), intermediate 8192, 12 layers,
+#   iterations [1,1,1,1,1,1,1,1,2,3,4,6].  EGPT-Dual = proj_mode:split =
+#   dual_unconstrained proj + NO Rayleigh + NO FPT.  ~944M params (R0);
+#   registers add n_reg*d embedding rows only (R128 => +262K).
+#
+# LR — muP width transfer from the PROVEN d1536 operating point (2e-4, "+2.2pp
+#   avg10_norm / -4.5 PPL vs 1e-3"), tuned in OUR 16-GPU batch regime (not the
+#   paper's ~256-GPU large-batch 2e-3, so no double-count of batch scaling):
+#     lr(2048) = 2e-4 * (1536/2048) = 1.5e-4.
+#   Unconstrained proj is spike-prone (math_unc d1280 hit gnorm 83 at
+#   2e-3/clip1.0) -> grad_clip 0.5, warmup 2000.
+#
+# TOKENS — 120000 steps x (mb4 x ga4 x 16 GPU x 4096) = 125.8B (~126B) tokens,
+#   matching the 400M token budget.  Two independent 2-node (16-GPU) jobs:
+#   this R128 arm and the iso R0 baseline (n_registers 0).
+#
+# REGISTER BALANCE — softband (floor rho_lo=1 + soft ceiling rho_hi=4).  The
+#   floor FORCES minimum register participation, which is exactly the recovery
+#   mechanism (registers must be USED in generation to add scratch rank).
+#   Empirically the only balance variant to bring register GENERATION to
+#   non-register baseline parity (RESULTS 2026-07-16: BBH 0.2822, best of any
+#   register run).  Plain (no balance) under-differentiates registers and
+#   regresses generation ~1.2pp; ceiling-only suppressed use at high capacity.
+#
+# Baseline (iso, no reg): math_egptdual_r0_split_d2048_int8192_126b_16gpu.yml
+# Launcher: run_egptdual_1b_recovery_16gpu.sh <config> <save_path> <job_name>
+# ============================================================================
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: register_energy
+    n_registers: 128
+    register_start_layer: 8                  # only the 4 energy blocks see registers
+    register_generation_mode: no_cache       # decode-bug fix (2026-06-29)
+    register_attn_balance_coef: 1.0          # softband: natural coef ~1.0
+    register_balance_mode: softband          # soft floor + soft ceiling band
+    register_balance_rho_lo: 1.0             # parity floor target (force minimum use)
+    register_balance_rho_hi: 4.0             # soft ceiling target (4x parity)
+    register_balance_beta: 1.0               # softness / BT-like sharpness
+    register_balance_hi_weight: 1.0          # gamma, weight on the anti-bypass arm
+    register_attn_balance_threshold: 0.10    # ignored in softband mode (harmless)
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 6]
+    iter_dropout_range_per_block: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 2048
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    energy_apply_rayleigh: false
+    energy_full_per_token_grad: false
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348      # 1/sqrt(head_dim=128)
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - &egpt_attn
+        sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+    mlp_blocks:
+      - &gpt_ffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 8192
+        add_bias: false
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - &egpt_ffn
+        mlp_type: Energy_MLP
+        intermediate_size: 8192
+        add_bias: false
+      - *egpt_ffn
+      - *egpt_ffn
+      - *egpt_ffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/energy-inference/results/multi-block-ablation/math_egptdual_r128s8_softband_split_d2048_int8192_126b_16gpu
+  save_interval: 2000
+  max_to_keep: 8
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: EGPT-action
+    name: math_egptdual_r128s8_softband_split_d2048_int8192_126b_16gpu
+
+training_parameters:
+  num_training_steps: 120000       # 120k x (mb4 x ga4 x 16 GPU x 4096) = 125.8B tokens
+  eval_interval: 20000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 0.5
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.00015                    # muP: 2e-4@d1536 x (1536/2048)
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1             # 1.5e-4 -> 1.5e-5
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 118000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: false             # DISABLED 2026-07-27: torch.compile spmd_check gloo timeout
+                                   # (InductorError, 1800s) under FSDP-2 -- iter-dropout gives
+                                   # data-dependent per-rank graphs -> SPMD collective deadlocks.
+                                   # Crash-looped R0 / hung R128 on resume. Stable without compile.
+  stage: 0

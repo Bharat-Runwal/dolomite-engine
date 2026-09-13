@@ -12,8 +12,24 @@
 # CROSS-RACK (p1-r29-n2 + p4-r07-n3) while the healthy hop arm is intra-rack
 # (p1-r32-n3 + p1-r27-n4). Unproven, one data point.
 #
-# This config removes inter-node NCCL entirely. Use it if the 8-GPU arm fails a
-# THIRD time; it trades wall-clock for eliminating the whole failure class.
+# UPDATE after the 3rd failure: this is now the PRIMARY config, and torch_compile is
+# back ON. The 8-GPU arm failed three times on THREE DIFFERENT host pairs (p6-r26-n2 +
+# p1-r29-n2; p5-r19-n2 + p5-r21-n4, intra-rack; and the earlier inductor one), always
+# with NumelIn=297,812,992 on SeqNum=1. So it was never host-transient -- the
+# cross-rack guess is dead.
+#
+# CAUSAL CHAIN, including my own mistake. torch_compile: false fixed the inductor
+# spmd_check hang but CAUSED this one: dolomite's reorder_for_compute_comm_overlap
+# (lm_engine/distributed.py:57) only takes effect under compile, so without it FSDP
+# stage-0 issues ONE unbucketed 0.60 GB bf16 all-reduce of the whole non-embedding
+# gradient, which does not survive an inter-node hop here.
+#
+# Going single-node fixes BOTH at once and needs no compile compromise: the spmd_check
+# all_gather is trivially satisfied within one host, and there is no inter-node
+# collective to break. Proven by iclr_pure_learn_isoP -- same TopK_Energy_MoE_MLP class,
+# compile ON, 4 GPUs, 1 node, step 14060 with zero NCCL errors.
+#
+# Cost: 4 GPUs instead of 8, so roughly 2x wall-clock. Tokens/step is unchanged.
 # 8-GPU (2026-09-13): ga 16->8 so 8 GPU x mbs1 x ga8 x 4096 = same tokens/step.
 # OOM FIX (2026-09-13): first attempt OOM'd on 80GB (tried to alloc 3.06 GiB with
 # ~1.9 GiB free). At d=1024 with I_e=17920 the per-expert activations at
@@ -154,5 +170,5 @@ distributed_args:
   # which drops only the diagnostic collective (its mismatch action defaults to
   # "warn", so it prevents nothing). Not used here: if the graphs really are
   # non-SPMD, that just moves the hang to a real NCCL collective later.
-  torch_compile: false
+  torch_compile: true
   stage: 0

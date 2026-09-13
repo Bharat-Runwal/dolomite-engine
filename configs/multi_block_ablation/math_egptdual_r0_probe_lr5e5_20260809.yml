@@ -1,0 +1,161 @@
+# ============================================================================
+# 1B EGPT-Dual CONTINUE-FROM-60k at lr 1e-4 (decaying), 2026-08-09.
+# Follow-on to the cont10k lr1e3 run (677442->717744) which finished at global
+# step 60000 with loss STILL DROPPING (2.055) and lr at its 1e-4 floor. Per user:
+# push another 60k steps at a fresh cosine peaking at lr 1e-4 to see the ceiling.
+#
+#   * peak lr 1e-4 (== where the previous run's cosine bottomed out -> smooth).
+#   * warmup 200 (0 -> 1e-4), then cosine decay over 59800 (1e-4 -> 1e-5).
+#   * num_training_steps 120000 with load_starting_iteration:true => 60000 MORE
+#     local steps (global 60000 -> 120000, ~126B more tokens, ~250B lineage total).
+#   * load_optimizer:false (DCP-sharded; can't cheaply edit base_lr) -> fresh Adam;
+#     transient is gentle at 1e-4 (lower than the 1e-3 that worked cleanly).
+#   * resume_learning_rate:false (avoids the grp["lr"]=0 -> base_lr=0 dolomite bug).
+#   * grad_clip 0.5. SAVE ON /proj (/u home is at 93/100G quota; would EDQUOT).
+#
+# Weights loaded from cont10k/global_step60000 (on /proj dolomite multi-block-
+# ablation dir; moved off /u which was at quota). load_args injected by the
+# launcher run_egptdual_1b_cont60k_20260809.sh. ARCH byte-identical to R0 / cont10k.
+# ============================================================================
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: register_energy
+    n_registers: 0
+    register_start_layer: 8
+    register_generation_mode: no_cache
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 6]
+    iter_dropout_range_per_block: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 2048
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    energy_apply_rayleigh: false
+    energy_full_per_token_grad: false
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - &egpt_attn
+        sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.088388348
+      - *egpt_attn
+      - *egpt_attn
+      - *egpt_attn
+    mlp_blocks:
+      - &gpt_ffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 8192
+        add_bias: false
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - &egpt_ffn
+        mlp_type: Energy_MLP
+        intermediate_size: 8192
+        add_bias: false
+      - *egpt_ffn
+      - *egpt_ffn
+      - *egpt_ffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/egpt_runs/probe_lr5e5_from60k
+  save_interval: 2000
+  max_to_keep: 4
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: EGPT-action
+    name: math_egptdual_r0_probe_lr5e5
+
+training_parameters:
+  num_training_steps: 120000       # continue 60000 -> 120000 (60k more, ~126B) ; ~250B lineage
+  eval_interval: 20000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4   # x 32 GPU => 512 seq/step x 4096 = 2.1M tok/step
+  eval_during_training: false
+  gradient_clipping: 0.5
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.00005                    # PROBE peak lr (lr5e5) — kill ~step 61000
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1             # 1e-4 -> 1e-5
+  num_warmup_steps: 200            # 0 -> 1e-4 within 200 local steps, then cosine
+  num_constant_steps: 0
+  num_decay_steps: 59800           # 200 + 59800 = 60000 = actual local steps (global 60000->120000)
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: false
+  stage: 0
