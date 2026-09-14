@@ -72,6 +72,24 @@ resubmit_job() {
         span_arg="span[ptile=1]"
         launcher="blaunch"
     fi
+    # ---------------------------------------------------------------------------
+    # BAD-HOST EXCLUSION (2026-09-14)
+    # ---------------------------------------------------------------------------
+    # gptmoe_all_isoP failed twice on p4-r10-n4 with 10 fabric errors per run:
+    #     error 401 'the operation cannot be performed in the present state'
+    #     ... error in the Fabric Manager or NVSwitches
+    #     NCCL error ... unhandled cuda error
+    # That is NVLink/NVSwitch fabric language, i.e. a node-level fault, not our code -- the
+    # same arm's six other failures were on six different hosts with ZERO fabric errors and
+    # had a different cause (torch_compile). Confirmed host-specific: the two sibling arms
+    # run healthy on other hosts right now. The repo's own 24-GPU launcher uses exactly this
+    # exclusion pattern for a previously-broken host.
+    # Add hosts here as they go bad; remove them once admins have drained and returned them.
+    local BAD_HOSTS="p4-r10-n4"
+    local excl_sel=""
+    for h in $BAD_HOSTS; do excl_sel="$excl_sel && hname!='$h'"; done
+    excl_sel="${excl_sel# && }"
+
     local gpu_arg="num=$gpus_per_node"
     local x_flag=""
     if [ "$excl" = "1" ]; then
@@ -117,7 +135,7 @@ INNER
         -J "$name" \
         $x_flag \
         -gpu "$gpu_arg" \
-        -n "$nnodes" ${span_arg:+-R "$span_arg"} -M "$mem" -W "$wt" \
+        -n "$nnodes" ${span_arg:+-R "$span_arg"} ${excl_sel:+-R "select[$excl_sel]"} -M "$mem" -W "$wt" \
         -o "$HOME/bsub_logs/${name}_%J.stdout" \
         -e "$HOME/bsub_logs/${name}_%J.stderr" \
         < "$tmp_script" 2>&1)
