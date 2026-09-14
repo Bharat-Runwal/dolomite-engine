@@ -63,10 +63,25 @@ resubmit_job() {
     # clients. 1/2 clients joined." That killed both 400M arms. `blaunch` is what
     # fans the script out to every allocated host; the repo's own working 16/24/32
     # GPU launchers all use it.
+    # PREFER 8 GPUs PER NODE (2026-09-14). Nodes here have 8 GPUs, and IB exposure grows with
+    # the number of inter-node paths: 4 nodes x 4 GPUs has six, 2 nodes x 8 has one. Our 16-GPU
+    # 4x4 job died on SeqNum=1 with
+    #     IBV_WC_RETRY_EXC_ERR ... hca mlx5_6   (InfiniBand retry count exhausted)
+    # against four different IB peers, while every 2-node job we have run completed. So pack to
+    # 8/node when the request divides by 8, and fall back to 4/node otherwise.
     local gpus_per_node=$gpus nnodes=1 span_arg="" launcher=""   # MUST be empty for single node: the inner script already says `bash`,
                                                               # so launcher="bash" produced `bash bash pretrain.sh`
                                                               # -> "cannot execute binary file", a 13x crash loop.
-    if [ "$gpus" -gt 4 ]; then
+    # note -ge 8, not -gt 8: an 8-GPU request becomes ONE node with zero inter-node traffic,
+    # which is strictly better than 2 nodes x 4.
+    if [ "$gpus" -ge 8 ] && [ $((gpus % 8)) -eq 0 ]; then
+        gpus_per_node=8
+        nnodes=$(( gpus / 8 ))
+        if [ "$nnodes" -gt 1 ]; then
+            span_arg="span[ptile=1]"
+            launcher="blaunch"
+        fi
+    elif [ "$gpus" -gt 4 ]; then
         gpus_per_node=4
         nnodes=$(( (gpus + 3) / 4 ))
         span_arg="span[ptile=1]"
