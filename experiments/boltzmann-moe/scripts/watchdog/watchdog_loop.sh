@@ -69,7 +69,7 @@ resubmit_job() {
     #     IBV_WC_RETRY_EXC_ERR ... hca mlx5_6   (InfiniBand retry count exhausted)
     # against four different IB peers, while every 2-node job we have run completed. So pack to
     # 8/node when the request divides by 8, and fall back to 4/node otherwise.
-    local gpus_per_node=$gpus nnodes=1 span_arg="" launcher=""   # MUST be empty for single node: the inner script already says `bash`,
+    local gpus_per_node=$gpus nnodes=1 span_arg="" launcher="" slots_per_host=1   # MUST be empty for single node: the inner script already says `bash`,
                                                               # so launcher="bash" produced `bash bash pretrain.sh`
                                                               # -> "cannot execute binary file", a 13x crash loop.
     # note -ge 8, not -gt 8: an 8-GPU request becomes ONE node with zero inter-node traffic,
@@ -78,7 +78,7 @@ resubmit_job() {
         gpus_per_node=8
         nnodes=$(( gpus / 8 ))
         if [ "$nnodes" -gt 1 ]; then
-            span_arg="span[ptile=1]"
+            span_arg="span[ptile=SLOTS]"
             launcher="blaunch"
         fi
     elif [ "$gpus" -gt 4 ]; then
@@ -105,10 +105,16 @@ resubmit_job() {
     for h in $BAD_HOSTS; do excl_sel="$excl_sel && hname!='$h'"; done
     excl_sel="${excl_sel# && }"
 
+    # UNIT MUST TRACK slots_per_host. "num=N/task" means N GPUs PER TASK, so with 16 tasks on a
+    # host it would ask for 16*8 = 128 GPUs there. Use "/host" whenever we hold more than one
+    # slot per host; keep "/task" for the single-slot shapes, which is what every working
+    # submission in this repo uses.
+    local gpu_unit="task"
+    [ "$slots_per_host" -gt 1 ] && gpu_unit="host"
     local gpu_arg="num=$gpus_per_node"
     local x_flag=""
     if [ "$excl" = "1" ]; then
-        gpu_arg="$gpu_arg/task:mode=exclusive_process"
+        gpu_arg="$gpu_arg/$gpu_unit:mode=exclusive_process"
         # -x WHEN WE TAKE THE WHOLE NODE (2026-09-14). Restored for gpus_per_node == 8 only.
         # Rationale, and why this is not a reversal of the earlier removal: -x asks for the whole
         # node, which is inconsistent when we want 4 of its 8 GPUs (that is what made 2-node
@@ -123,8 +129,16 @@ resubmit_job() {
         # slots in use, while the median across hosts with 8 free GPUs is 1 and 416 such hosts
         # have <= 4. So select on CPU utilisation instead: it avoids the busy tail without
         # requiring the whole node, and 416 candidates schedule immediately where 0 did with -x.
+        # RESERVE CPU SLOTS, not just a quiet node (2026-09-14). select[ut<0.5] only filters at
+        # DISPATCH: our hosts were at 1 slot when chosen and drifted to 9 and 5, and step time
+        # went 2.35 -> 6.05 s again. The underlying problem is that -n <nnodes> requests ONE slot
+        # per host for EIGHT GPUs, so we are cgroup-limited to about one core and the dataloader
+        # starves as soon as neighbours arrive. The repo's working 8-GPU-per-node launcher dodges
+        # this with -x, which cannot be scheduled here, so reserve cores explicitly instead:
+        # 16 of each host's 96 slots. That is graduated where -x is all-or-nothing.
         if [ "$gpus_per_node" -eq 8 ]; then
             load_sel="ut<0.5"
+            slots_per_host=16
         fi
         # NO -x otherwise. It asks for the WHOLE NODE exclusively, which we do not need when
         # mode=exclusive_process already gives us the requested GPUs exclusively, and
@@ -167,7 +181,7 @@ INNER
         -J "$name" \
         $x_flag \
         -gpu "$gpu_arg" \
-        -n "$nnodes" ${span_arg:+-R "$span_arg"} \
+        -n "$(( nnodes * slots_per_host ))" ${span_arg:+-R "${span_arg/SLOTS/$slots_per_host}"} \
         -R "select[${excl_sel}${load_sel:+ && $load_sel}]" -M "$mem" -W "$wt" \
         -o "$HOME/bsub_logs/${name}_%J.stdout" \
         -e "$HOME/bsub_logs/${name}_%J.stderr" \
