@@ -109,7 +109,17 @@ resubmit_job() {
     local x_flag=""
     if [ "$excl" = "1" ]; then
         gpu_arg="$gpu_arg/task:mode=exclusive_process"
-        # NO -x. It asks for the WHOLE NODE exclusively, which we never need:
+        # -x WHEN WE TAKE THE WHOLE NODE (2026-09-14). Restored for gpus_per_node == 8 only.
+        # Rationale, and why this is not a reversal of the earlier removal: -x asks for the whole
+        # node, which is inconsistent when we want 4 of its 8 GPUs (that is what made 2-node
+        # 4-GPU jobs PEND 45+ min) but exactly right when we want all 8. Without it we shared a
+        # node with 33 other job slots and step time went 2.5s -> 6.8s at step 410, i.e. a 2.7x
+        # slowdown turning a 42h run into 114h. The repo's own working 24-GPU launcher pairs
+        # -x with num=8/task for precisely this reason.
+        if [ "$gpus_per_node" -eq 8 ]; then
+            x_flag="-x"
+        fi
+        # NO -x otherwise. It asks for the WHOLE NODE exclusively, which we do not need when
         # mode=exclusive_process already gives us the requested GPUs exclusively, and
         # we only want 4 of each node's 8. Demanding two FULLY exclusive hosts at once
         # left both 400M arms PEND for 45+ min --
