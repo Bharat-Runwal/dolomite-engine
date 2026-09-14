@@ -131,12 +131,17 @@ save_args:
   save_interval: 2000
   max_to_keep: 2
 
+# NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
+# copying a parent config; only save_path was updated, so every derived arm logged to
+# wandb under the PARENT's name and collided there. Local results under save_path were
+# always correct (that is what the reported numbers come from), but the wandb view was
+# missing or merged. wandb name must equal the config basename.
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: iclr_hop_K16_top2
+    name: slope90k_hyb
 
 training_parameters:
   num_training_steps: 90000
