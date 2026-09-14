@@ -14,6 +14,12 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="$DIR/watchdog_jobs.conf"
+# NOTE ON THE RESUME MARKER (2026-09-14). Auto-resume keys off
+# <save_path>/latest_checkpointed_iteration.json, which the trainer writes JUST AFTER the
+# global_stepN directory. Killing a job in that narrow window leaves a complete checkpoint with no
+# marker, and the next submission then starts from scratch. If you kill an arm and see
+# global_stepN present but the json missing, write it by hand before the watchdog resubmits:
+#     printf '{"latest_checkpointed_iteration": N}' > <save_path>/latest_checkpointed_iteration.json
 STATE="$DIR/watchdog_state.txt"
 LOG="$DIR/watchdog.log"
 
