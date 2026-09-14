@@ -142,9 +142,14 @@ resubmit_job() {
         # starves as soon as neighbours arrive. The repo's working 8-GPU-per-node launcher dodges
         # this with -x, which cannot be scheduled here, so reserve cores explicitly instead:
         # 16 of each host's 96 slots. That is graduated where -x is all-or-nothing.
+        # REVERTED the 16-slot reservation (2026-09-14). It does not schedule: asking one host for
+        # 16 slots AND 8 GPUs left the headline 32B arm PEND with "ngpus_physical not satisfied"
+        # while a slower-but-running job had been killed to make way for it. Running beats optimal.
+        # Contention remains a real risk (2.35 -> 6.05 s/step when neighbours arrive) but a job at
+        # 6 s/step finishes; a job that cannot be dispatched does not. slots_per_host stays 1, which
+        # is what every submission in this repo that has ever run uses.
         if [ "$gpus_per_node" -eq 8 ]; then
             load_sel="ut<0.5"
-            slots_per_host=16
         fi
         # NO -x otherwise. It asks for the WHOLE NODE exclusively, which we do not need when
         # mode=exclusive_process already gives us the requested GPUs exclusively, and
