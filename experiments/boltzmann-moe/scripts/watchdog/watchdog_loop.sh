@@ -217,14 +217,15 @@ while true; do
         # failure. Three consecutive fast failures pause the arm and log loudly, because a job
         # that cannot survive five minutes has a bug that resubmitting will not fix. Any run
         # that survives MIN_ALIVE resets the counter.
-        local MIN_ALIVE=300 MAX_FAST=3
-        local ff_file="$DIR/fastfail_${name}.count"
-        local lived=-1
+        MIN_ALIVE=300; MAX_FAST=3            # NOT `local`: this block is in the main
+        ff_file="$DIR/fastfail_${name}.count" # while-loop, not a function, and `local`
+        lived=-1                              # there is a runtime error that bash -n
+                                              # cannot catch. It killed the watchdog once.
         if [ -n "$last_jid" ]; then
             lived=$(bhist -noheader -o "run_time" "$last_jid" 2>/dev/null | grep -oE '^[0-9]+' | head -1)
             [ -z "$lived" ] && lived=-1
         fi
-        local ffc=0; [ -f "$ff_file" ] && ffc=$(cat "$ff_file" 2>/dev/null || echo 0)
+        ffc=0; [ -f "$ff_file" ] && ffc=$(cat "$ff_file" 2>/dev/null || echo 0)
         if [ "$lived" -ge 0 ] 2>/dev/null && [ "$lived" -lt "$MIN_ALIVE" ] 2>/dev/null; then
             ffc=$((ffc + 1)); echo "$ffc" > "$ff_file"
             log "  $name: last job lived only ${lived}s (< ${MIN_ALIVE}s) -- fast failure $ffc/$MAX_FAST"
