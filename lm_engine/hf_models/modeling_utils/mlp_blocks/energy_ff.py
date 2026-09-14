@@ -471,6 +471,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
     share a single fused weight tensor across experts.
     """
 
+    # Hard bound on the balancing bias. The logits it is added to are z-scored and hence
+    # O(1), so an unbounded bias silently takes over routing: the first version of this
+    # update was unclamped, reached |bias| = 1482, and destabilised the one arm that
+    # enabled balancing (loss 4.05 -> 5.18 with 77 upward jumps).
+    _BIAS_MAX: float = 1.0
+
     def __init__(
         self,
         experts: Sequence[FFEnergyBase],
@@ -614,11 +620,28 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 self._ent_sum += -(pf * (pf + 1e-9).log()).sum(-1).sum()
                 self._tok_sum += pf.shape[0]
                 if self.balance_rate > 0.0 and self.load_balance_bias is not None:
-                    # Under-loaded experts get a positive nudge, over-loaded a negative one.
+                    # BOUNDED, PROPORTIONAL update. The first version used
+                    #     bias += rate * sign(target - share)
+                    # which has TWO defects and destabilised training on the one arm that
+                    # enabled it (pure_hop_isoP_bal: 77 upward loss jumps > 0.15, loss rising
+                    # 4.05 -> 5.18, while two sibling arms with balance_rate=0 descended
+                    # smoothly to 3.51 with zero jumps).
+                    #   1. sign() never shrinks as load approaches balance, so there is no
+                    #      equilibrium -- the bias drifts at a constant +-rate forever. It
+                    #      reached |bias| = 1482 against z-scored logits of unit scale
+                    #      divided by tau=0.35, so routing was decided almost entirely by the
+                    #      bias and oscillated.
+                    #   2. It fired once per MICROBATCH, so with gradient_accumulation_steps
+                    #      = 16 the bias moved 16x per optimiser step.
+                    # Now: proportional to the actual imbalance (so it has a fixed point at
+                    # uniform load), divided by the microbatch count, and hard-clamped to
+                    # BIAS_MAX -- the logits it is added to are z-scored, hence O(1), so a
+                    # bias beyond ~1 can only overwhelm the energy it is meant to nudge.
                     share = pf.mean(0)
-                    target = share.new_full((), 1.0 / self.n_experts)
-                    upd = (self.balance_rate * torch.sign(target - share))
+                    target = 1.0 / self.n_experts
+                    upd = self.balance_rate * (target - share) * self.n_experts
                     self.load_balance_bias += upd.to(self.load_balance_bias.dtype)
+                    self.load_balance_bias.clamp_(-self._BIAS_MAX, self._BIAS_MAX)
 
         # Aggregate gradients: ∇_h E_total = Σ_k w_k · ∇_h E_k.
         expert_grads = torch.stack(expert_outs, dim=-2)        # (..., n_experts, hidden)
