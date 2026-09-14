@@ -250,6 +250,30 @@ while true; do
         # failure. Three consecutive fast failures pause the arm and log loudly, because a job
         # that cannot survive five minutes has a bug that resubmitting will not fix. Any run
         # that survives MIN_ALIVE resets the counter.
+        # ------------------------------------------------------------------------
+        # NAME-BASED SAFETY CHECK (2026-09-14). Never resubmit an arm that is already
+        # in the queue under its own name, whatever the state file says.
+        #
+        # WHY. The jid recorded in watchdog_state.txt is the only liveness signal, and it
+        # is lost whenever the state file is missing, stale, or the watchdog restarts
+        # before persisting it. The watchdog has restarted six times today; on two cycles
+        # it read `last_jid=` empty for scale32B_boltz_hop and scale32B_gptswitch, decided
+        # they were dead, and resubmitted them -- which put us over quota and got the
+        # ALREADY-RUNNING job killed (TERM_OWNER) at step 660. On a 61,035-step run with
+        # 1000-step checkpoints, each such cycle throws away everything since the last save.
+        #
+        # bjobs by name is authoritative and costs one call. If a RUN/PEND job with this
+        # name exists, adopt its jid into the state file and skip the resubmit entirely.
+        live_jid=$(bjobs -noheader -o "jobid stat" -J "$name" 2>/dev/null \
+                   | awk '$2=="RUN"||$2=="PEND"||$2=="PROV"{print $1; exit}')
+        if [ -n "$live_jid" ]; then
+            log "$name: already in queue as jid=$live_jid ($(bjobs -noheader -o stat "$live_jid" 2>/dev/null | tr -d ' ')); adopting, NOT resubmitting"
+            grep -v "^$name " "$STATE" > "$STATE.tmp" 2>/dev/null || true
+            echo "$name $live_jid ${new_count:-0}" >> "$STATE.tmp"
+            mv "$STATE.tmp" "$STATE"
+            continue
+        fi
+
         MIN_ALIVE=300; MAX_FAST=3            # NOT `local`: this block is in the main
         ff_file="$DIR/fastfail_${name}.count" # while-loop, not a function, and `local`
         lived=-1                              # there is a runtime error that bash -n
