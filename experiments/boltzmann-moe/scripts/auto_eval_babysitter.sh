@@ -37,10 +37,16 @@ while true; do
     # inflated the total to a phantom 36-40 and made this guard defer evals for hours
     # while the real usage was 28/32. Also count only the grp_ebm/normal queue, since
     # preemptable draws on a different pool.
+    # Count GPUs per job KIND. Two earlier versions of this guard over-counted and deferred
+    # evals for hours: the first treated the CPU-only services as 4 GPUs each, the second
+    # still counted the CPU-only `claude` session job and charged 1-GPU eval jobs as 4. It
+    # reported 40 against a real 24. Rules: ev_* jobs take 1 GPU; the watchdog, the
+    # babysitter and the interactive session take none; training arms take 4 per host.
     used=$(bjobs -noheader -o "job_name stat queue nexec_host" 2>/dev/null \
-           | grep -vE "boltz_moe_watchdog|boltz_auto_eval" \
-           | awk '$2=="RUN" && $3=="normal" {s+=$4*4} END{print s+0}')
-    nev=$(bjobs -noheader -o "job_name stat" 2>/dev/null | grep -c "^ev_.*RUN")
+           | awk '$2!="RUN" || $3!="normal" { next }
+                  $1 ~ /^(boltz_moe_watchdog|boltz_auto_eval|claude)$/ { next }
+                  { s += ($1 ~ /^ev_/) ? 1 : $4*4 } END{print s+0}')
+    nev=0    # eval GPUs are already included in `used` above
     if [ $((used + nev)) -ge 31 ]; then
         log "quota guard: ${used} training + ${nev} eval GPUs in use; deferring evals this cycle"
         sleep "$CYCLE"; continue

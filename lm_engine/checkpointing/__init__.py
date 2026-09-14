@@ -437,6 +437,20 @@ def load_checkpoint_and_unshard(args: UnshardingArgs) -> tuple[ModelWrapper, Tra
             any(".sequence_mixer.W_O_gpt." in k for k in model_keys)):
         state = {k.replace(".sequence_mixer.W_O.", ".sequence_mixer.W_O_gpt."): v for k, v in state.items()}
 
+    # backward-compat: drop load_balance_bias when the model does not expect it.
+    # BoltzmannMoEFFEnergy registers that buffer only when balance_rate > 0. Between
+    # 2026-09-13 and 2026-09-14 it was registered UNCONDITIONALLY and persistently, so
+    # checkpoints written in that window carry the key even for arms with balance_rate = 0,
+    # and unsharding them now fails with
+    #     Unexpected key(s) in state_dict: "...ffwd.moe.load_balance_bias"
+    # It is a zero tensor for those arms and carries no information, so dropping it is
+    # lossless. Affected: hop_K16_top2_renorm, slope90k_hyb, big_hop_sandwich. Arms that DO
+    # set balance_rate keep the key, because the model then expects it.
+    stray = [k for k in state if k.endswith("load_balance_bias") and k not in model_keys]
+    if stray:
+        log_rank_0(logging.WARN, f"dropping {len(stray)} load_balance_bias key(s) absent from the model")
+        state = {k: v for k, v in state.items() if k not in set(stray)}
+
     model.load_state_dict(state)
 
     return model, args_from_checkpoint, state
