@@ -134,3 +134,28 @@
 [2026-09-13 21:18:20] frontier_table.txt refreshed (14 DONE)
 [2026-09-13 21:28:20] quota guard: 40 training + 3 eval GPUs in use; deferring evals this cycle
 [2026-09-13 21:38:20] quota guard: 40 training + 3 eval GPUs in use; deferring evals this cycle
+[2026-09-13 21:48:20] quota guard: 32 training + 2 eval GPUs in use; deferring evals this cycle
+[2026-09-13 21:58:20] quota guard: 32 training + 2 eval GPUs in use; deferring evals this cycle
+[2026-09-13 22:08:21] quota guard: 32 training + 2 eval GPUs in use; deferring evals this cycle
+[2026-09-13 22:18:21] quota guard: 32 training + 2 eval GPUs in use; deferring evals this cycle
+[2026-09-13 22:28:30] submitted 1 eval job(s); 15 arms DONE
+[2026-09-13 22:28:56] frontier_table.txt refreshed (15 DONE)
+[2026-09-13 22:38:56] quota guard: 32 training + 2 eval GPUs in use; deferring evals this cycle
+[2026-09-13 22:49:38] frontier_table.txt refreshed (15 DONE)
+[2026-09-13 22:59:59] frontier_table.txt refreshed (15 DONE)
+[2026-09-13 23:10:19] frontier_table.txt refreshed (15 DONE)
+[2026-09-13 23:20:39] frontier_table.txt refreshed (15 DONE)
+[2026-09-13 23:31:00] frontier_table.txt refreshed (15 DONE)
+[2026-09-13 23:41:22] frontier_table.txt refreshed (15 DONE)
+[2026-09-13 23:51:42] frontier_table.txt refreshed (15 DONE)
+[2026-09-14 00:02:02] frontier_table.txt refreshed (15 DONE)
+[2026-09-14 00:12:11] frontier_table.txt refreshed (15 DONE)
+[2026-09-14 00:22:13] submitted 1 eval job(s); 16 arms DONE
+[2026-09-14 00:22:40] frontier_table.txt refreshed (16 DONE)
+[2026-09-14 00:33:03] frontier_table.txt refreshed (16 DONE)
+[2026-09-14 00:43:23] frontier_table.txt refreshed (16 DONE)
+[2026-09-14 00:53:43] frontier_table.txt refreshed (16 DONE)
+[2026-09-14 01:04:04] frontier_table.txt refreshed (16 DONE)
+[2026-09-14 01:14:22] frontier_table.txt refreshed (16 DONE)
+[2026-09-14 01:26:15] frontier_table.txt refreshed (16 DONE)
+[2026-09-14 01:36:35] frontier_table.txt refreshed (16 DONE)
