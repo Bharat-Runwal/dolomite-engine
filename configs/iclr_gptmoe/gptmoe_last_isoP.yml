@@ -159,5 +159,18 @@ mixed_precision_args:
 
 distributed_args:
   fsdp_algorithm: 2
-  torch_compile: true
+  # torch_compile: false (2026-09-14). REQUIRED for the standard MoE class, and this arm
+  # inherited `true` because the config was copied from an energy arm.
+  #
+  # Two symptoms, one cause. (a) SPEED: gptmoe_last_isoP ran at 5.77 s/step under compile
+  # against 0.46 s/step for the otherwise-identical iclr_switch_K16_top2 with compile off --
+  # 12.5x slower, i.e. 48 h instead of 3.8 h for 30000 steps. (b) CRASHES: gptmoe_all_isoP
+  # died repeatedly with
+  #     RuntimeError: [gloo/transport/tcp/pair.cc:547] Connection closed by peer
+  # a gloo collective failure of the same family as the inductor spmd_check hang that killed
+  # iclr_big_learn_pure. Both come from the MoE class routing with DATA-DEPENDENT shapes
+  # (tokens per expert varies per step), which under torch_compile triggers rank-dependent
+  # recompiles. The Switch arms were fixed this way on 2026-09-13; the fix simply was not
+  # carried over when these configs were derived.
+  torch_compile: false
   stage: 0
