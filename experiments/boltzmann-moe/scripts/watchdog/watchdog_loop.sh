@@ -101,7 +101,7 @@ resubmit_job() {
     # exclusion pattern for a previously-broken host.
     # Add hosts here as they go bad; remove them once admins have drained and returned them.
     local BAD_HOSTS="p4-r10-n4"
-    local excl_sel=""
+    local excl_sel="" load_sel=""
     for h in $BAD_HOSTS; do excl_sel="$excl_sel && hname!='$h'"; done
     excl_sel="${excl_sel# && }"
 
@@ -116,8 +116,15 @@ resubmit_job() {
         # node with 33 other job slots and step time went 2.5s -> 6.8s at step 410, i.e. a 2.7x
         # slowdown turning a 42h run into 114h. The repo's own working 24-GPU launcher pairs
         # -x with num=8/task for precisely this reason.
+        # PREFER A QUIET NODE INSTEAD OF DEMANDING AN EXCLUSIVE ONE (2026-09-14).
+        # -x turned out to be unobtainable here: "requirement for exclusive execution not
+        # satisfied: 663 hosts", leaving both 32B arms PEND. But the contention that tripled our
+        # step time is a LOAD problem, not an exclusivity one -- we landed on a host with 33 job
+        # slots in use, while the median across hosts with 8 free GPUs is 1 and 416 such hosts
+        # have <= 4. So select on CPU utilisation instead: it avoids the busy tail without
+        # requiring the whole node, and 416 candidates schedule immediately where 0 did with -x.
         if [ "$gpus_per_node" -eq 8 ]; then
-            x_flag="-x"
+            load_sel="ut<0.5"
         fi
         # NO -x otherwise. It asks for the WHOLE NODE exclusively, which we do not need when
         # mode=exclusive_process already gives us the requested GPUs exclusively, and
@@ -160,7 +167,8 @@ INNER
         -J "$name" \
         $x_flag \
         -gpu "$gpu_arg" \
-        -n "$nnodes" ${span_arg:+-R "$span_arg"} ${excl_sel:+-R "select[$excl_sel]"} -M "$mem" -W "$wt" \
+        -n "$nnodes" ${span_arg:+-R "$span_arg"} \
+        -R "select[${excl_sel}${load_sel:+ && $load_sel}]" -M "$mem" -W "$wt" \
         -o "$HOME/bsub_logs/${name}_%J.stdout" \
         -e "$HOME/bsub_logs/${name}_%J.stderr" \
         < "$tmp_script" 2>&1)
