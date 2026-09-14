@@ -115,7 +115,9 @@ tuning_args:
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_gptmoe/gptmoe_last_3x
-  save_interval: 5000
+  save_interval: 1000   # 2026-09-14: was 5000. On preemptable these arms were preempted
+                     # before ever reaching 5000, so they NEVER checkpointed and every
+                     # resubmit restarted from step 0 -- 28 submissions, zero net progress.
   max_to_keep: 2
 
 logging_args:
