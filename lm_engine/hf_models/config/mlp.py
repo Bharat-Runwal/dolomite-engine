@@ -149,6 +149,14 @@ class _BoltzmannMoEEnergyMLPArgs(BaseArgs):
     temperature: float = 1.0
     repulsion_coef: float = 0.0      # 0 = disabled; try 0.01 for stochastic repulsion
     n_repulsion_pairs: int = 4
+    # DEFAULT "signed" FOR THIS LEGACY CLASS, deliberately different from the composable
+    # class's "abs". Every arm built on BoltzmannMoE_Energy_MLP -- including the published h1
+    # models -- was TRAINED with the old hardcoded cos.mean(), which is exactly "signed". The
+    # field did not exist here, so the module fell back to getattr(..., "squared") and those
+    # configs silently changed behaviour with no way to pin them back. Defaulting to "signed"
+    # makes legacy arms reproduce by construction; set "abs" explicitly for new work (it is
+    # worth +0.69pp / -1.83 ppl, and is what the composable class now defaults to).
+    repulsion_form: str = "signed"
     top_k: int | None = None    # None = soft (all experts active); int = sparse top-k Boltzmann routing
     activation_function: str = "gelu_pytorch_tanh"
     dropout: float = 0.0
@@ -264,7 +272,17 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     # "squared"|"abs"|"hinge" are minimised at orthogonality. "signed" is the
     # pre-2026-09-12 legacy form, minimised at cos=-1, which rewards
     # anti-alignment and collapses the FF branch under near-uniform routing.
-    repulsion_form: str = "squared"
+    # DEFAULT IS "abs" (2026-09-14). Three facts forced this:
+    #  * the pre-2026-09-12 code hardcoded cos.mean(), i.e. "signed", which is MINIMISED at
+    #    cos = -1 and therefore rewarded anti-aligned experts -- a mis-specification;
+    #  * "abs" is the only form we have actually trained (13 arms) and is worth +0.69pp /
+    #    -1.83 ppl over "signed" (45.89 vs 45.20);
+    #  * "squared" was never trained by anyone, and at our measured expert cosines
+    #    (|cos| <= 0.067) it is ~15x weaker than "abs", so defaulting to it silently
+    #    near-disables repulsion for any config that omits this key.
+    # Legacy configs under configs/boltzmann_moe/ now pin "signed" explicitly so they
+    # reproduce what they were trained with.
+    repulsion_form: str = "abs"
     # "none" keeps softmax(+-E/tau) as trained. The Hopfield MEAN form leaves
     # E ~ 1e-2 against tau=1 and routes uniformly; "zscore" (scale-free) or
     # "sqrt_width" (matches the w1w2 line's 1/sqrt(expert_I)) fix that.

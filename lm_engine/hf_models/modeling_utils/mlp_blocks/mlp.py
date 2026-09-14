@@ -720,7 +720,9 @@ class BoltzmannMoE_Energy_MLP(nn.Module):
         i_idx = [pr[0] for pr in sampled]
         j_idx = [pr[1] for pr in sampled]
         cos = (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1)
-        form = getattr(self, "repulsion_form", "squared")
+        # fallback matches the legacy config default; see _BoltzmannMoEEnergyMLPArgs.
+        # It must NOT be "squared" -- no arm was ever trained with that form.
+        form = getattr(self, "repulsion_form", "signed")
         add_aux_loss(self.repulsion_coef * _repulsion_penalty(cos, form))
 
     def _log_metrics(self, p: torch.Tensor, out: torch.Tensor) -> None:

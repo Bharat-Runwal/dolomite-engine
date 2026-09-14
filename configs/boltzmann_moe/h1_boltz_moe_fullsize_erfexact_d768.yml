@@ -81,7 +81,10 @@ model_args:
         intermediate_size: 8192   # total = n_experts × per_expert_I = 4 × 2048
         n_experts: 4
         temperature: 1.0
-        repulsion_coef: 0.1       # best load balance from B4
+        repulsion_coef: 0.1
+        repulsion_form: signed   # pinned 2026-09-14: this arm was TRAINED with the
+                                  # old hardcoded cos.mean(). The default is now \"abs\",
+                                  # so without this pin a re-run would not reproduce it.       # best load balance from B4
         n_repulsion_pairs: 4
         gelu_grad_method: erf_exact   # self-consistent phi/phi' (vs legacy sigmoid·0.5 phi')
         dropout: 0.0

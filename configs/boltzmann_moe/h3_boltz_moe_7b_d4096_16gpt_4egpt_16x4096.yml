@@ -137,6 +137,9 @@ model_args:
         n_experts: 16
         temperature: 1.0
         repulsion_coef: 0.1
+        repulsion_form: signed   # pinned 2026-09-14: this arm was TRAINED with the
+                                  # old hardcoded cos.mean(). The default is now \"abs\",
+                                  # so without this pin a re-run would not reproduce it.
         n_repulsion_pairs: 4
         dropout: 0.0
         add_bias: false
