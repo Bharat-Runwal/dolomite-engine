@@ -90,8 +90,16 @@ reaches 45.89 with no such loss to remove.
 3. **Multi-node needs `blaunch`, and must NOT use `-x`.** `pretrain.sh` derives `NODE_RANK` from
    `$HOSTNAME`, so it must start on every host; plain `bsub < script` starts it on the first only
    and torchrun dies at exactly 901 s. And `-x` (whole-node exclusive) makes a 2-node job PEND for
-   45+ min. Use `-n <nodes> -R "span[ptile=1]" -gpu "num=4/task"` plus `blaunch bash pretrain.sh`.
-   `-gpu "num=8"` on one host cannot be satisfied on this cluster.
+   45+ min. Use `-n <nodes> -R "span[ptile=1]" -gpu "num=<per-host>/task"` plus
+   `blaunch bash pretrain.sh`.
+
+   **On GPUs per host:** hosts have 8 H100s. Whether `num=8/task` schedules depends on how busy
+   the cluster is, not on a hard limit — an earlier note here claimed 8-per-host "cannot be
+   satisfied", which was true of one busy afternoon and wrong in general (checked 2026-09-14: 48
+   hosts had all 8 free). Prefer `num=8/task` when it schedules, since it removes inter-node
+   traffic and the InfiniBand retry exhaustion (`IBV_WC_RETRY_EXC_ERR`) that 4-per-host multi-node
+   jobs hit; fall back to `num=4/task` with more nodes if 8-free hosts are scarce. Check with
+   `bhosts -gpu` before assuming either.
 4. **`balance_rate > 0` changes the checkpoint format.** It registers a persistent buffer, so a
    run started with it cannot strict-load a checkpoint written without it, and vice versa.
    `load_checkpoint_and_unshard` now drops the stray key, but don't toggle it mid-run.
