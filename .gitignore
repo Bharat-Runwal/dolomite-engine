@@ -50,3 +50,4 @@ experiments/energy-inference/paper/*.log
 # (upstream ad3f4d0c / v0.4.9.2, 0 local modifications), which IS tracked -- so the eval
 # remains exactly reproducible without carrying the tree in history.
 experiments/eval_scripts/lm-evaluation-harness/
+experiments/boltzmann-moe/scripts/*.log
