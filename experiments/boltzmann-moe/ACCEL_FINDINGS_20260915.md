@@ -168,32 +168,43 @@ RNG stream are now identical with and without the proxy.
 
 ## OPEN: effK diverges more than run-to-run noise, and I cannot yet explain it
 
-Restricted to the steps A' has reached (10-110), so the comparison is like-for-like:
+A' has since completed all 300 steps, so the floor is now measured over the FULL
+run rather than the first 110 steps. That materially changes the picture, and the
+earlier truncated numbers should be ignored:
 
-| metric | A-vs-A' floor | B | C | D |
+| metric | A-vs-A' floor | B fused | C fused+rep10 | D +proxy8 |
 |---|---:|---:|---:|---:|
-| `lm_loss` | 0.0219 | 0.0190 **within** | 0.0155 **within** | 0.0964 (init confound, above) |
-| `effK` | 0.985 | 2.775 **above** | 3.636 **above** | 4.333 **above** |
+| `lm_loss` | 0.0382 | **0.0280 (BELOW floor)** | 0.0317 within | 0.1010 (init confound) |
+| `effK` | 1.191 | 2.027 (1.70x floor) | 2.498 (2.10x) | 3.047 (2.56x) |
 
-`lm_loss` -- the quantity that matters -- is INSIDE the nondeterminism floor for
-both B and C. `effK` is ~2.8x the floor for B, which is the exact-arithmetic arm.
+**`lm_loss`: the fused arm tracks A MORE closely than a byte-identical replicate of
+A does** (0.0280 vs 0.0382). On the quantity that matters, the fusion is
+indistinguishable from noise.
 
-I tried to attribute this to bf16 reduction-order differences feeding a DISCRETE
-top-k, and **the test was inconclusive: on CPU the fused and looped paths produced
-bit-identical bf16 energies (max|dE_k| = 0.000e+00) and 100% identical top-2 sets,
-so it reproduced no divergence at all.** It therefore neither explains nor rules
-out the GPU behaviour, which involves FSDP and different GEMM kernels. Do not cite
-that test as support.
+**`effK`: B sits at 1.70x the floor**, not the 2.8x the truncated 10-110 range
+suggested. Note the floor is itself 1.19 on a statistic whose value is ~4 by step
+300 -- i.e. two IDENTICAL runs already disagree by ~30% on it. This is a chaotic
+quantity: it is driven by which experts win a discrete top-2, so any perturbation
+is amplified. The fused path adds a systematically different rounding order (one
+large GEMM instead of 32 small ones) ON TOP of run-to-run nondeterminism, and two
+composed perturbation sources exceeding one is unsurprising.
 
-What is established: the fusion is exact to 1.227e-15 in float64 and bit-identical
-in bf16 on CPU, and GPU `lm_loss` is within noise. What is not established: why
-`effK` moves more than run-to-run noise.
+Still, 1.70x is not 1.0x, and I could not demonstrate the mechanism: my attempt to
+show bf16 rounding flips top-k picks was **INCONCLUSIVE** -- on CPU the fused and
+looped paths produced bit-identical bf16 energies (max|dE_k| = 0.000e+00) and 100%
+identical top-2 sets, reproducing no divergence at all. It therefore neither
+explains nor rules out the GPU behaviour (FSDP, different GEMM kernels). Do not
+cite that test as support.
 
-**The cheap way to settle it is the adoption path itself.** Resuming the live arm
-from its own checkpoint with `fused_experts: true` is a far tighter comparison
-than two independent runs -- identical weights, optimizer state and data position,
-so effK should simply CONTINUE its existing trajectory. If it steps
-discontinuously at the flip, that is the signal to stop and investigate.
+Established: exact to 1.227e-15 in float64, bit-identical in bf16 on CPU,
+checkpoint-compatible, and GPU `lm_loss` below the nondeterminism floor.
+Not established: why `effK` moves ~1.7x more than run-to-run noise.
+
+**The adoption path settles it for free.** Resuming the live arm from its own
+checkpoint with `fused_experts: true` is a much tighter test than two independent
+runs -- identical weights, optimizer state and data position -- so effK should
+simply CONTINUE its trajectory. A discontinuity at the flip is the signal to stop
+and investigate.
 
 ## Recommendation
 
