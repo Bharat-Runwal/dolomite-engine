@@ -19,6 +19,17 @@ the test distribution. Documents are taken from the TAIL of the megatron index, 
 validation side of the run's own 99.5/0.5/0 split.
 
 The original unsharded/ directory is never modified; output goes to a sibling directory.
+
+KNOWN LIMITATION for RECURRENT / pure-energy stacks. The MoE block is shared across
+iterations (layer_iterations [8] for a pure arm, [1,1,1,1,1,1,6] for a hybrid), so a single
+forward pass solves a DISTINCT mu at each iteration -- the hidden states differ -- while there
+is only ONE `sinkhorn_mu` buffer. The running mean therefore collapses those per-iteration
+duals into one compromise value, and eval applies that same value at every iteration. Strictly
+better than mu = 0, but NOT what training did. Watch for it in the `count` line: 64 batches on
+an 8-iteration arm reports count=512, i.e. 8 solves per batch.
+If recovery is only partial, this is the first thing to suspect, and the fix would be a
+per-iteration buffer (the block would need to know its iteration index, which it currently
+does not).
 """
 import argparse, json, shutil
 from pathlib import Path
