@@ -9,7 +9,8 @@ preemptable host can stall one step and blow up an average).
 import argparse, glob, os, re, statistics as st
 from collections import defaultdict
 
-ARMS = ["accel_A_base", "accel_B_fused", "accel_C_fused_rep10", "accel_D_fused_rep10_proxy8"]
+ARMS = ["accel_A_base", "accel_A2_base_replicate", "accel_B_fused",
+        "accel_C_fused_rep10", "accel_D_fused_rep10_proxy8"]
 STEP = re.compile(r"step = (\d+),")
 def num(key, line):
     m = re.search(re.escape(key) + r" = (-?[\d.]+(?:e-?\d+)?)", line)
@@ -20,8 +21,13 @@ def parse(arm):
                   key=os.path.getmtime)
     if not logs:
         return None
+    # NEWEST LOG ONLY. Merging every log per arm silently mixes CODE BUILDS: arm D
+    # was restarted after a bug fix, and the merged view kept serving the old
+    # build's numbers (aux 19.77) as if current. Restarts also replay from step 0
+    # here (checkpointing is off during the probe), so the newest log is complete
+    # on its own. The job id is printed so the reader can tell which build it is.
     rows = {}
-    for lg in logs:                      # later logs (resubmits) win per step
+    for lg in logs[-1:]:
         with open(lg, errors="ignore") as f:
             for line in f:
                 m = STEP.search(line)
@@ -37,14 +43,20 @@ def parse(arm):
                     "eff":   num("ffwd.load_effective_n_experts", line),
                     "agree": num("ffwd.proxy_topk_agree", line),
                 }
-    return dict(sorted(rows.items())) or None
+    return (dict(sorted(rows.items())), os.path.basename(logs[-1])) if rows else None
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--skip-steps", type=int, default=60,
                 help="drop steps <= this (compile + warm-up) before timing")
 a = ap.parse_args()
 
-data = {arm: parse(arm) for arm in ARMS}
+parsed = {arm: parse(arm) for arm in ARMS}
+data = {a: (v[0] if v else None) for a, v in parsed.items()}
+srcs = {a: (v[1] if v else "-") for a, v in parsed.items()}
+print("logs read (newest per arm):")
+for a_ in ARMS:
+    print(f"  {a_:30s} {srcs[a_]}")
+print()
 base_t = None
 print(f"{'arm':30s} {'steps':>6s} {'s/step':>8s} {'vs A':>7s} {'Btok/d':>8s} "
       f"{'lm_loss':>9s} {'mean aux':>9s} {'effK':>6s} {'proxy':>6s}")
@@ -99,3 +111,56 @@ for arm in ARMS:
     n_fire = sum(1 for x in auxs if x > 1e-6)
     print(f"  {arm:30s} mean={st.mean(auxs):.5f}  n={len(auxs):3d}  "
           f"nonzero={n_fire:3d} ({100*n_fire/len(auxs):.0f}% of steps fired)")
+
+
+# Routing behaviour must not move: the fusion is exact, so effective_n_experts
+# should track arm A step-for-step. Comparing last-values is invalid when arms sit
+# at different steps (effK evolves fast early), so compare only shared steps.
+print("\n=== load_effective_n_experts vs arm A at shared steps ===")
+if A:
+    for arm in ARMS[1:]:
+        d = data[arm]
+        if not d:
+            print(f"  {arm:30s} no log"); continue
+        common = [k for k in d if k in A and d[k]["eff"] is not None and A[k]["eff"] is not None]
+        if not common:
+            print(f"  {arm:30s} no overlapping steps"); continue
+        diffs = [abs(d[k]["eff"] - A[k]["eff"]) for k in common]
+        print(f"  {arm:30s} n={len(common):3d}  mean|d effK|={st.mean(diffs):.3f}  "
+              f"max={max(diffs):.3f}   (A={A[max(common)]['eff']:.2f} vs {d[max(common)]['eff']:.2f} "
+              f"@step {max(common)})")
+
+
+# ---------------------------------------------------------------------------
+# NOISE FLOOR. accel_A2_base_replicate is byte-identical to arm A, so whatever it
+# diverges by is pure run-to-run nondeterminism (FSDP reduction order,
+# non-deterministic kernels, torch.compile) -- NOT an effect of any knob. The
+# fused path is exact in float64 to 1.2e-15, so in bf16 its divergence from A
+# should sit at or below this floor. Judging "close enough" by eye is exactly the
+# mistake this replicate exists to prevent.
+# ---------------------------------------------------------------------------
+def diverge(arm, field):
+    d, ref = data[arm], data[ARMS[0]]
+    if not d or not ref:
+        return None
+    common = [k for k in d if k in ref
+              and d[k].get(field) is not None and ref[k].get(field) is not None]
+    if not common:
+        return None
+    return st.mean([abs(d[k][field] - ref[k][field]) for k in common]), len(common)
+
+print("\n=== divergence from arm A, against the A-vs-A' nondeterminism floor ===")
+floor = {f: diverge("accel_A2_base_replicate", f) for f in ("lm", "eff")}
+for f, label in (("lm", "lm_loss"), ("eff", "effK")):
+    fl = floor[f]
+    if not fl:
+        print(f"  {label}: A' replicate has no overlapping steps yet -- floor unknown, "
+              f"so no verdict can be drawn on the other arms for this metric.")
+        continue
+    print(f"  {label}: noise floor (A vs A', n={fl[1]}) = {fl[0]:.5f}")
+    for arm in ARMS[2:]:
+        r = diverge(arm, f)
+        if not r:
+            print(f"      {arm:30s} n/a"); continue
+        verdict = "within noise" if r[0] <= fl[0] * 1.5 else "ABOVE noise -- investigate"
+        print(f"      {arm:30s} {r[0]:.5f} (n={r[1]:3d})  {verdict}")
