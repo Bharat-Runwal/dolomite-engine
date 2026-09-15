@@ -1,0 +1,186 @@
+# AUTO-GENERATED 4-GPU A/B PROBE (boltz-accel, 2026-09-15). NOT a science run.
+#
+# Question: how much of the 400M Boltzmann arm's 6.75 s/step (vs gptswitch 1.34 s)
+# do the acceleration knobs recover, and does the loss curve stay put?
+#
+# All four arms are byte-identical except the MoE knobs below, same seed, same
+# data order, so step_time is comparable and the loss curves are directly
+# comparable step-for-step.
+#   A base            fused_experts=false, interval=1   <- control == current main
+#   B fused           fused_experts=true,  interval=1   <- EXACT, must match A's loss
+#   C fused+rep10     + repulsion_interval=10 (scale-compensated)
+#   D fused+rep10+px  + rank-8 proxy router (passive; logs proxy_topk_agree)
+#
+# 4 GPU x mbs1 x ga8 x 4096 = 131,072 tok/step (production uses 16 GPU = 524,288),
+# so ABSOLUTE s/step is not comparable to the production run -- only the RATIO
+# between these arms is. Warmup/decay shortened so the loss actually moves.
+# 400M / 32B-TOKEN SCALE RUN (2026-09-14). The headline pair the paper needs.
+#
+# WHY THIS SHAPE. Our 134M grid is only 7.86B tokens -- enough to rank variants, nothing about
+# scale -- and the earlier 400M pair ran just 3.93B tokens and came out inconclusive (ppl 62-69,
+# three metrics disagreeing). This pair fixes both: 400M at 32B tokens, 4x the 134M grid's budget
+# and 8x the old 400M pair's.
+#
+# ARCHITECTURE IS THE HYBRID, NOT THE PURELY RECURRENT DESIGN. The 400M pure single-block arm
+# scored 42.70, and attribution showed the architecture causes that, not the router (~0.32 nats,
+# ~7.5x the router effect, hitting both routers equally). Repeating it at 32B would spend two
+# days confirming a known-bad design. So the Boltzmann arm is the hybrid -- GPT prefix plus one
+# recurrent energy block -- the design that produced 46.26.
+#
+# EXPERT FORM IS HOPFIELD: our best measured sparse arm (46.26 at k/K=0.062 vs w1w2's 45.69 at
+# 0.125). The w1w2 K=32 arm that would settle the form choice needs 7.2h more, past the window
+# for starting this run.
+#
+# SCHEDULE: decay spans the FULL run. The slope arms were misconfigured with a decay length
+# inherited from a 30k schedule, so their LR hit its floor at 30k and sat there for 60k steps.
+# ACTUAL ARCHITECTURE (this file = d=1536 / ~400M; the block below was cloned from the
+# 134M h1 template and its numbers were WRONG — corrected 2026-09-14).
+#
+# Hybrid: GPT prefix + ONE recurrent energy block.
+#   Backbone: model_type=energy, hidden_size=1536, num_layers=7, 16 heads, rope_dim=64,
+#     layer_iterations [1,1,1,1,1,1,6] -> blocks 1-6 run once, block 7 runs 6x (recurrent),
+#     so effective depth = 6 + 6 = 12 block-applications.
+#   Blocks 1-6 (GPT prefix): softmax_attention + swiglu MLP, intermediate_size=4096.
+#   Block 7 (energy, x6):    energy_attention + EnergyFF_BoltzmannMoE
+#       expert_kind=hopfield, n_experts=32, top_k=2 (k/K=0.062),
+#       intermediate_size=40960 TOTAL across experts -> I_e=1280 per expert,
+#       temperature=0.35, routing_norm=zscore, repulsion_coef=0.1 (abs), n_repulsion_pairs=4,
+#       hopfield_grad_scale=sqrt_consistent, gelu_grad_method=sigmoid.
+#   Training: 61,035 steps x 524,288 tok/step = 32.0B tokens; lr 2e-3 cosine, warmup 2000,
+#     decay 59,035; bf16; FSDP2; gradient_checkpointing=block; torch_compile=true.
+#
+# MEASURED COST (16 GPU / 2 nodes, 2026-09-14): ~6.75 s/step, ~6.7 Btok/day -> 32B ~= 4.8 days.
+#   That is ~5x slower per step than gptswitch (~1.34 s/step), and it is NOT a torch.compile
+#   problem (compile is stable). The cost is algorithmic: the Boltzmann MoE computes ALL 32
+#   experts densely and applies top-2 only as a post-hoc MASK (zero FLOP saving), and that
+#   whole block runs 6x via recurrence. The gptswitch baseline dispatches just 2 of 32 experts.
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 6]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1536
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 16, num_key_value_heads: 16, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4096, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      # BoltzmannMoE: 32 hopfield experts, top-2, 40960 total intermediate (I_e=1280/expert).
+      # top-2 is a post-hoc MASK — all 32 experts are computed densely each step (see header).
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 40960   # total across K; I_e = 1280
+        n_experts: 32
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent   # 2026-09-12 fix; REVERT = mean
+        routing_norm: zscore
+        temperature: 0.35
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        activation_function: gelu
+        add_bias: false
+        # ---- boltz-accel knobs for this arm ----
+        fused_experts: false
+        repulsion_interval: 1
+        repulsion_scale_comp: true
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-accel/experiments/boltzmann-moe/results/accel/accel_A_base
+  save_interval: 100000   # never during the probe: keeps checkpoint I/O out of the timing
+  max_to_keep: 1
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: boltz-accel
+    name: accel_A_base
+
+training_parameters:
+  num_training_steps: 300   # short A/B probe, NOT a science run
+  eval_interval: 100000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 8   # 16 GPU x mbs1 x ga8 x 4096 = 524,288 tok/step; x 61,035 steps = 32.0B
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 50
+  num_constant_steps: 0
+  num_decay_steps: 250
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  # 400M at d=1536 does not fit without this; the earlier 400M tier OOM'd at
+  # mbs=4 even at d=1024.
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0

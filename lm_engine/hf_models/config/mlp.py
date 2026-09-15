@@ -298,6 +298,44 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     # the top-k logits; the Switch class uses normalized_topk). Our masked form leaves
     # sum(p) ~ 0.45 at K=16,k=2. Default false = unchanged behaviour.
     renormalize_topk: bool = False
+
+    # ---------------- acceleration knobs (boltz-accel, 2026-09-15) ----------
+    # All default to the pre-existing behaviour, so untouched configs and
+    # existing checkpoints are bit-identical.
+    #
+    # repulsion_interval: fire repulsion on ~1 call in N (stochastic). With
+    #   repulsion_scale_comp the coefficient is multiplied by N on firing calls,
+    #   so the time-averaged repulsion pressure is unchanged. 1 = every call.
+    repulsion_interval: int = 1
+    repulsion_scale_comp: bool = True
+    # fused_experts: EXACT single-GEMM expert path (hopfield only). Collapses the
+    #   2*K per-expert slice-GEMMs into 2 GEMMs against the shared fused weight.
+    #   Identical arithmetic -- the loss curve must match. This is the real
+    #   speedup: the profiler measured 79.5k kernels/step and GPU-busy 1.71s
+    #   against 6.75s wall, i.e. the cost is launch overhead, not FLOPs.
+    fused_experts: bool = False
+    # proxy_rank: rank r of the learnable cheap router (0 = disabled). The proxy
+    #   is trained online by KL against the exact routing distribution and its
+    #   top-k agreement is logged as `proxy_topk_agree`. It does NOT affect the
+    #   forward pass unless proxy_route=True, so enabling it cannot degrade
+    #   training -- it only costs K*d*r MACs/token (~3% at r=8).
+    proxy_rank: int = 0
+    proxy_loss_coef: float = 0.0
+    proxy_route: bool = False
+    # cos_probe_interval: measure mean|cos| between expert outputs under no_grad on
+    #   1 call in N, INDEPENDENTLY of the repulsion loss, and log it as
+    #   `expert_cos_abs_mean`. 0 = off. Needed because the repulsion aux loss is
+    #   coef*mean|cos| and is therefore unreadable at coef=0 -- which is the control
+    #   that says how much of the alignment plateau repulsion actually buys.
+    cos_probe_interval: int = 0
+    cos_probe_pairs: int = 8
+    # repulsion_space: "output" (default, as trained -- cosine between per-token
+    #   expert outputs, cost scales with N) or "weight" (cosine between expert
+    #   weight blocks: no token dimension, so 3.5x cheaper at N=4096 and 6.4x at
+    #   N=8192, and sparse-kernel compatible). NOTE repulsion_coef does NOT
+    #   transfer between the two spaces -- weight cosines are ~5-25x smaller than
+    #   output cosines -- so re-sweep it when switching.
+    repulsion_space: str = "output"
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).
     track_load: bool = True
