@@ -861,3 +861,37 @@ CONCLUSION. Sinkhorn does not damage training -- pure+sinkhorn trains to CE 3.41
 BETTER than pure+clamped at 3.34 on the hybrid's scale... in fact essentially the same. It
 damages INFERENCE, by evaluating a router that was trained tilted with no tilt at all. The fix
 is the per-iteration mu buffer; the target is to recover the 1.587 nats.
+
+### 2026-09-15 (FIXED, measured): per-iteration mu removes the entire 1.587-nat discontinuity
+
+Same held-out web batches, train vs eval mode, so no dataset or metric confound:
+
+| checkpoint | train CE | eval CE | discontinuity |
+|---|---:|---:|---:|
+| before (mu dropped at eval) | 3.4088 | 4.9959 | **+1.587** |
+| **after PER-ITERATION mu** | 3.4088 | **3.3506** | **-0.058** |
+| pure + clamped (control) | 3.3360 | 3.3365 | +0.0005 |
+
+Eval token PPL 147.81 -> 28.52. Sinkhorn + per-iteration mu now agrees with the clamped
+control to 0.014 nats, which is what should happen if mu was the entire story -- and it was.
+Eval CE landing slightly BELOW train CE is expected: eval has no train-time stochasticity, and
+mu accumulated over 64 batches is lower-variance than any single batch's solve.
+
+The single-averaged-mu attempt could not be re-measured here because its buffer is shape (K,)
+while the code now expects (n_iter, K); that directory is stale. Its failure is already
+documented and explained by the 1.56-1.68 mean spread across iterations.
+
+**GUIDANCE CORRECTED, again.** Earlier I wrote "sinkhorn is for HYBRIDS only; do not recommend
+it for pure-energy stacks". That is now wrong. Sinkhorn is fine everywhere PROVIDED the dual
+reaches inference:
+    sinkhorn_iters: 3
+    sinkhorn_persist_mu: true
+    sinkhorn_mu_iters: <this block's entry in layer_iterations>   # 8 pure, 6 hybrid
+For an already-trained checkpoint, `calibrate_sinkhorn_mu_20260915.py` recovers it in minutes
+without retraining. Hybrids only lose 0.003 nats without it, so it is optional there, but it
+costs nothing.
+
+**LR is a side issue.** The 6000-step sweep gives 5x (1e-2) = 3.7869 against 1x (2e-3) = 3.8285,
+i.e. 0.042 nats, right at the noise floor, with 10x diverging (7.89) and lower LRs clearly worse.
+So LR tuning is worth ~0.04 nats where the mu fix is worth 1.587 -- roughly 38x more. The pure
+model's log-log slope (-0.097 vs -0.082 hybrid) says it wants more TOKENS, not a different LR.

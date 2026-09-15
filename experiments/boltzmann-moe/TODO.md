@@ -404,3 +404,12 @@ Axes to sweep (in priority order):
   measuring per-expert L2 norm of `term2_e * p_e` in trained vs sparse-trained.
 - Is 580M's GSM8k_cot flex jitter (2.88% @ 14k → 2.27% @ 18k) within stderr
   (±0.4pp) or a real regression? Run cot eval at step 22k, 26k to see trend.
+
+- [ ] **Re-derive the pure-energy paper rows from the RECALIBRATED checkpoints.** The published
+      `app:frontier` pure rows and everything I measured before 2026-09-15 evening evaluated a
+      mu-tilted router with no tilt, costing 1.587 nats (eval token PPL 147.8 vs 28.5). Those
+      corrected-sign pure numbers (Avg11 36.16 / 38.76 / 39.04) are therefore NOT the model's
+      quality and must not go into a table. The `unsharded_mucal2/` evals supersede them.
+- [ ] **Tell colleagues `sinkhorn_persist_mu: true` + `sinkhorn_mu_iters: <layer_iterations>`
+      is REQUIRED** for pure/recurrence-heavy stacks. This supersedes the earlier
+      "sinkhorn for hybrids only" note, which was based on the pre-fix measurements.
