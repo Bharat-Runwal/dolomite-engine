@@ -56,6 +56,24 @@ def compile_helpers() -> None:
 
     Communication.barrier()
 
+    # FIRST-RUN BOOTSTRAP FIX (2026-09-15). The module-level loader above registers
+    # sys.modules["helpers"] only if build/helpers.so ALREADY existed at import time.
+    # On a fresh checkout it does not, so `helpers` stayed None, this function built
+    # the .so, and the later `import helpers` in build_sample_idx still died with
+    #     ModuleNotFoundError: No module named 'helpers'
+    # An existing checkout hides the bug because a previous run left the .so behind.
+    # Hit for real on a fresh git worktree. Register it here, after the build, on
+    # every rank (the barrier above guarantees rank 0 has finished writing it).
+    global helpers
+    if helpers is None and os.path.isfile(_so_path):
+        _spec = importlib.util.spec_from_file_location(
+            "lm_engine.data.megatron.utils.helpers", _so_path
+        )
+        helpers = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(helpers)
+        sys.modules["helpers"] = helpers
+        sys.modules["lm_engine.data.megatron.utils.helpers"] = helpers
+
 
 def build_blending_indices(
     dataset_index: np.ndarray, dataset_sample_index: np.ndarray, weights: list[float], num_datasets: int, size: int

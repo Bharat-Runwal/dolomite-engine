@@ -824,18 +824,24 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         if not self._repulsion_fires():
             return
         i_idx, j_idx = self._sample_pairs()
-        ids = sorted(set(i_idx) | set(j_idx))
-        pos = {e: n for n, e in enumerate(ids)}
         K, I_e = self.n_experts, self._expert_I
+        Wv = W.view(K, I_e, self.hidden_size)
+        g = gated.reshape(-1, K, I_e)
 
-        W_sel = W.view(K, I_e, self.hidden_size)[ids]              # (S, I_e, hidden)
-        gated_sel = gated.reshape(-1, K, I_e)[:, ids, :]           # (N, S, I_e)
-        eg = pref * torch.einsum("nsi,sih->nsh", gated_sel, W_sel)  # (N, S, hidden)
-        eg_norm = F.normalize(eg, dim=-1)
-
-        ii = [pos[e] for e in i_idx]
-        jj = [pos[e] for e in j_idx]
-        cos = (eg_norm[:, ii, :] * eg_norm[:, jj, :]).sum(-1)
+        # SHAPES MUST NOT DEPEND ON THE RANDOM DRAW. The first version gathered the
+        # UNIQUE expert set of the sampled pairs, whose SIZE varies (7 or 8 of 32
+        # for n_pairs=4). Activation checkpointing re-runs this forward during
+        # backward, `random.sample` drew different pairs, the size changed, and the
+        # recompute check failed with
+        #     saved [7,1280,1536] vs recomputed [8,1280,1536] -> CheckpointError
+        # Indexing by i_idx/j_idx directly makes every tensor here (n_pairs, ...),
+        # constant regardless of the draw -- which is exactly why the pre-existing
+        # looped path never hit this (its cos is always (N, n_pairs)). Cost is
+        # 2*n_pairs=8 expert back-projections instead of <=8 unique: same work,
+        # shape-stable.
+        ei = pref * torch.einsum("npi,pih->nph", g[:, i_idx, :], Wv[i_idx])
+        ej = pref * torch.einsum("npi,pih->nph", g[:, j_idx, :], Wv[j_idx])
+        cos = (F.normalize(ei, dim=-1) * F.normalize(ej, dim=-1)).sum(-1)
         add_aux_loss(self._repulsion_coef_now() * _repulsion_penalty(cos, self.repulsion_form))
 
     # --- learnable rank-r proxy router -------------------------------------- #
@@ -939,10 +945,18 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         because this path is already stochastic (`random.sample` of pairs) and the
         block is called 48x per optimizer step (6 recurrence x 8 grad-accum), so a
         counter would need extra bookkeeping to mean '1 in N OPTIMIZER steps' and
-        could desync from grad-accum. Equivalent in expectation, needs no state."""
+        could desync from grad-accum. Equivalent in expectation, needs no state.
+
+        USES TORCH CPU RNG, NOT `random`. Activation checkpointing re-runs the
+        forward during backward and restores torch's RNG state around that
+        recompute (preserve_rng_state=True) -- but NOT Python's `random`. With
+        `random.random()` the gate could fire in the forward and not in the
+        recompute, which changes the set of saved tensors and trips
+        CheckpointError. The CPU generator keeps this off the GPU, so no sync.
+        """
         if self.repulsion_interval <= 1:
             return True
-        return random.random() < 1.0 / self.repulsion_interval
+        return bool(torch.randint(self.repulsion_interval, (1,), device="cpu").item() == 0)
 
     def _repulsion_coef_now(self) -> float:
         if self.repulsion_scale_comp and self.repulsion_interval > 1:
