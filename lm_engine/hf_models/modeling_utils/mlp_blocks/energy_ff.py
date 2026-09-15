@@ -502,6 +502,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         proxy_route: bool = False,
         cos_probe_interval: int = 0,
         cos_probe_pairs: int = 8,
+        repulsion_space: str = "output",
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -582,6 +583,35 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # NOTE: the Phase-B profiler put repulsion at only ~2-4% of the FULL step
         # (the 65% was one isolated block-call), so this is a safe near-free win,
         # NOT the headline lever. The headline lever is `fused_experts` below.
+        # ------------------------------------------------------------------ #
+        # REPULSION SPACE (2026-09-15)                                        #
+        # ------------------------------------------------------------------ #
+        # "output" (default, as trained): cosine between per-token expert OUTPUTS.
+        #   Cost scales with the token count -- measured 4.06 / 7.59 / 14.91 ms per
+        #   call at N = 2048 / 4096 / 8192 -- because it needs the (N, K, hidden)
+        #   output stack, and in the fused path that stack must be back-projected
+        #   specially since the fused combine never materialises it.
+        # "weight": cosine between the expert WEIGHT blocks. Has NO token dimension
+        #   at all, so it is O(K * I_e * d) and INDEPENDENT of N -- measured 2.21 /
+        #   2.20 / 2.33 ms at those same three N, i.e. 3.5x cheaper at N=4096 and
+        #   6.4x at N=8192. It also needs no expert outputs, so unlike output
+        #   repulsion it survives a future true-sparse MoE kernel.
+        #
+        # This is the option the cost analysis points at: at ~20% of the step,
+        # weight-space repulsion collects most of that saving while keeping the
+        # regulariser at FULL strength EVERY step -- whereas intermittent output
+        # repulsion buys speed by weakening it (measured: expert alignment rises
+        # 2.7-4.4x at 1 pair/step or 2 pairs 1-in-4).
+        #
+        # ⚠ THE COEFFICIENT DOES NOT TRANSFER. Weight cosines are far smaller than
+        # output cosines -- measured on 134M final checkpoints, weight mean|cos| is
+        # ~0.004 against ~0.021 for outputs, and the gap widens at 400M (~0.10
+        # output). So `repulsion_coef` must be re-swept for this space; reusing 0.1
+        # would apply a much weaker effective pressure. Whether keeping WEIGHTS
+        # apart also keeps OUTPUTS apart is exactly what `cos_probe_interval`
+        # (which always measures output-space) is there to answer.
+        assert repulsion_space in ("output", "weight")
+        self.repulsion_space = repulsion_space
         assert repulsion_interval >= 1
         self.repulsion_interval = int(repulsion_interval)
         self.repulsion_scale_comp = bool(repulsion_scale_comp)
@@ -738,7 +768,10 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             self._last_energy_per_token = None
 
         if self.training and self.repulsion_coef > 0:
-            self._add_repulsion_loss(expert_grads)
+            if self.repulsion_space == "weight":
+                self._add_repulsion_loss_weight()
+            else:
+                self._add_repulsion_loss(expert_grads)
 
         if self.training and self._cos_probe_fires():
             self._probe_expert_cos(expert_grads)
@@ -845,7 +878,10 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             self._last_energy_per_token = None
 
         if self.training and self.repulsion_coef > 0:
-            self._add_repulsion_loss_fused(gated, W, pref)
+            if self.repulsion_space == "weight":
+                self._add_repulsion_loss_weight()
+            else:
+                self._add_repulsion_loss_fused(gated, W, pref)
 
         if self.training and self._cos_probe_fires():
             self._probe_expert_cos(gated, W=W, pref=pref)
@@ -1030,6 +1066,21 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             s = s + self.load_balance_bias.to(s.dtype)
         return s / self.temperature
 
+    def _add_repulsion_loss_weight(self) -> None:
+        """Repulsion on expert WEIGHT blocks. No token dimension, so O(1) in N."""
+        if not self._repulsion_fires():
+            return
+        W = self._fused_W() if self.fused_experts else None
+        if W is None:                      # looped path: stack the expert slices
+            W = torch.cat([e._W_slice() for e in self.experts], dim=0)
+        Wv = W.reshape(self.n_experts, -1)
+        i_idx, j_idx = self._sample_pairs()
+        a = F.normalize(Wv[i_idx].float(), dim=-1)
+        b = F.normalize(Wv[j_idx].float(), dim=-1)
+        cos = (a * b).sum(-1)
+        add_aux_loss(self._repulsion_coef_now()
+                     * _repulsion_penalty(cos, self.repulsion_form).to(W.dtype))
+
     def _repulsion_fires(self) -> bool:
         """Stochastic 1-in-`interval` gate. Bernoulli rather than a step counter
         because this path is already stochastic (`random.sample` of pairs) and the
@@ -1101,6 +1152,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 self._proxy_agree_sum.zero_(); self._proxy_agree_n.zero_()
             m["repulsion_interval"] = float(self.repulsion_interval)
             m["repulsion_n_pairs"] = float(self.n_repulsion_pairs)
+            m["repulsion_space_is_weight"] = float(self.repulsion_space == "weight")
             if self.cos_probe_interval > 0 and self._cos_n > 0:
                 m["expert_cos_abs_mean"] = (self._cos_sum / self._cos_n.clamp_min(1.0)).item()
                 self._cos_sum.zero_(); self._cos_n.zero_()
@@ -1389,6 +1441,7 @@ def build_boltzmann_moe(
     proxy_route: bool = False,
     cos_probe_interval: int = 0,
     cos_probe_pairs: int = 8,
+    repulsion_space: str = "output",
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -1458,5 +1511,6 @@ def build_boltzmann_moe(
         proxy_route=proxy_route,
         cos_probe_interval=cos_probe_interval,
         cos_probe_pairs=cos_probe_pairs,
+        repulsion_space=repulsion_space,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)

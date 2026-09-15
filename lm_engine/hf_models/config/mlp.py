@@ -329,6 +329,13 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   that says how much of the alignment plateau repulsion actually buys.
     cos_probe_interval: int = 0
     cos_probe_pairs: int = 8
+    # repulsion_space: "output" (default, as trained -- cosine between per-token
+    #   expert outputs, cost scales with N) or "weight" (cosine between expert
+    #   weight blocks: no token dimension, so 3.5x cheaper at N=4096 and 6.4x at
+    #   N=8192, and sparse-kernel compatible). NOTE repulsion_coef does NOT
+    #   transfer between the two spaces -- weight cosines are ~5-25x smaller than
+    #   output cosines -- so re-sweep it when switching.
+    repulsion_space: str = "output"
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).
     track_load: bool = True

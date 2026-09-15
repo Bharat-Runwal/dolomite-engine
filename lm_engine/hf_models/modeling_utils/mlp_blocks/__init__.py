@@ -203,6 +203,7 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             proxy_route=getattr(block, "proxy_route", False),
             cos_probe_interval=getattr(block, "cos_probe_interval", 0),
             cos_probe_pairs=getattr(block, "cos_probe_pairs", 8),
+            repulsion_space=getattr(block, "repulsion_space", "output"),
             init_method=config.init_method,
             initializer_range=config.initializer_range,
             m_width=config.m_width,
