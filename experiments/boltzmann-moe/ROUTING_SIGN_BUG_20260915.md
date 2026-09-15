@@ -259,25 +259,40 @@ All arms below are CORRECTED sign (`e_sign_override: "pos"`), 4 GPU, same seed/d
 | **T4 corrected** | **0.35** | **on** | **5.00** | **6.94** | **1.0000** |
 | **T5 corrected** | 1.0 | on | **7.08** | 2.00 | **1.0000** |
 
-## The prediction held
+## ⚠ THE STEP-30 READING BELOW WAS WRONG — CORRECTED AT STEP 200
 
-**T4 — the ORIGINAL tau plus `mu_k` — dominates both temperature arms on BOTH axes.**
-Against S2 (same tau, no bias): effK 1.54 -> 5.00 AND ffwd_norm 2.78 -> 6.94. Balance
-improves 3.2x while the branch gets 2.5x STRONGER. It also beats T3 (tau=3.0) on
-balance and by 20x on branch magnitude.
+**Retracted:** I concluded from step 30 that "T4 (original tau + mu_k) dominates both
+temperature arms on both axes" and therefore "tau does not need retuning after all".
+**Step 200 refutes both.** This is exactly the non-monotone early-dynamics trap
+recorded two sections above (S2 went 1.03 -> 1.47 -> 2.32) — and I walked into it.
+Step-30 orderings in this system are not predictive; do not draw conclusions before
+~200 steps.
 
-So the two mechanisms are cleanly separated, as the derivation says:
-- **tau** buys occupancy spread by BLURRING the selection — and self-defeats, because
-  masked top-k weights shrink as routing softens, so T3's branch collapses to 0.34.
-- **mu_k** redistributes occupancy WITHOUT touching the selection.
+**Corrected picture (matched step 200, effK of 32 / ffwd_norm / lm_loss):**
 
-**tau does not need retuning after all.** The corrected sign plus a chemical potential
-at the original tau=0.35 is the configuration that gets both properties. This converts
-the accidental anti-routing balance into a principled mechanism whose principled form
-is strictly better than the temperature workaround.
+| arm | tau | mu_k | effK | ffwd_norm | lm_loss |
+|---|---:|:---:|---:|---:|---:|
+| S1 deployed (anti-routing) | 0.35 | -- | **8.36** | 0.090 | 6.2168 |
+| S2 corrected | 0.35 | off | 2.09 | 10.88 (121x) | 6.2246 |
+| T2 corrected | 1.0 | off | 4.25 | 11.56 (129x) | 6.2110 |
+| T3 corrected | 3.0 | off | 6.84 | 1.92 (21x) | 6.2227 |
+| T4 corrected | 0.35 | ON | 3.34 | **14.38 (160x)** | 6.2463 |
+| **T5 corrected** | **1.0** | **ON** | **7.61** | 11.00 (122x) | **6.2040** |
 
-Frontier: T4 = best branch (239x S1's ffwd_norm), T5 = best balance (7.08 against
-S1's 9.18, still 69x S1's branch).
+**tau and mu_k are COMPLEMENTARY, not redundant:**
+- mu_k helps at each tau: 2.09 -> 3.34 (tau .35); 4.25 -> **7.61** (tau 1.0)
+- tau helps at each mu: 2.09 -> 4.25 -> 6.84 (off); 3.34 -> **7.61** (on)
+
+**What survives from the step-30 reading:** tau ALONE is self-defeating. T3 buys
+balance (6.84) but leaves the branch at 1.92, 5-6x below every mu_k arm, because
+masked top-k weights shrink as routing softens. So the mechanism distinction in the
+derivation holds — tau blurs the selection, mu_k redistributes occupancy — it is just
+that BOTH are needed in practice.
+
+**Best configuration: T5 = corrected sign + tau 1.0 + chemical potential.** It recovers
+91% of the anti-routed balance (7.61 vs 8.36) with a **122x stronger FF branch** and
+the lowest lm_loss in the sweep. That is the configuration that gets both properties
+the sign bug had to trade between, and it is the principled form of the accident.
 
 ## Actionable caveat: `mu_k` is CLAMP-SATURATED
 
