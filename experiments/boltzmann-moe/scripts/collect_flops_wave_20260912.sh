@@ -28,9 +28,13 @@ REPO=/proj/dmfexp/nima/Code/dolomite-engine
 # was invisible to status/eval/table and would never be auto-evaluated on completion.
 # Now scans all ICLR config dirs and derives each arm's results dir from its own
 # save_path, so no per-dir RES mapping can drift out of sync.
+# 2026-09-15: iclr_sink ADDED. The 14 corrected-sign + Sinkhorn rerun arms live there,
+# and without this line they would have trained to 30000 and sat UNSCORED indefinitely --
+# the exact failure this script's header already describes for iclr_switch_K16_top2. Any
+# new config dir must be added here or its arms are invisible to the whole eval pipeline.
 CFGDIRS="$REPO/configs/iclr_flops $REPO/configs/iclr_moebase $REPO/configs/iclr_1blk \
          $REPO/configs/iclr_big $REPO/configs/iclr_ctrl $REPO/configs/iclr_gptmoe \
-         $REPO/configs/iclr_slope"
+         $REPO/configs/iclr_slope $REPO/configs/iclr_sink"
 cfg_of() { for d in $CFGDIRS; do [ -f "$d/$1.yml" ] && { echo "$d/$1.yml"; return; }; done; }
 res_of() { grep -E '^\s*save_path:' "$(cfg_of "$1")" 2>/dev/null | head -1 | sed 's/.*save_path:[[:space:]]*//'; }
 OUT=$REPO/experiments/boltzmann-moe/results/router_analysis
@@ -123,7 +127,7 @@ from lm_engine.utils import load_yaml
 # own save_path, matching the shell helpers above.
 CFGDIRS = ["configs/iclr_flops", "configs/iclr_moebase", "configs/iclr_1blk",
            "configs/iclr_big", "configs/iclr_ctrl", "configs/iclr_gptmoe",
-           "configs/iclr_slope"]
+           "configs/iclr_slope", "configs/iclr_sink"]
 ROOT = "/proj/dmfexp/nima/Code/dolomite-engine"
 ACC=["arc_challenge","arc_easy","boolq","copa","hellaswag","openbookqa","piqa","sciq","winogrande","mmlu"]
 rows=[]
