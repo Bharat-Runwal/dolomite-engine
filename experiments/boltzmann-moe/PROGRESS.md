@@ -715,6 +715,46 @@ interpretable at this scale; only the aggregate (no systematic shift) is support
 Do not rewrite `tab:frontier` rows off single deltas -- wait for the full set, and treat
 the renorm row as the one claim the correction might genuinely overturn.
 
+### 2026-09-15 (update): ALL SIX core `tab:frontier` Boltzmann rows measured
+
+| arm | k/K | published | corrected | delta | MMLU | GSM8K |
+|---|---:|---:|---:|---:|---:|---:|
+| iclr_hop_K32_top2 | 0.062 | 44.38 | **44.58** | +0.19 | 25.29 | 1.82 |
+| iclr_hop_K16_top2_renorm | 0.125 | 43.74 | 44.54 | **+0.81** | 23.86 | 2.43 |
+| iclr_hop_K16_dense | 1.000 | 44.78 | 44.40 | -0.38 | 26.28 | 2.20 |
+| iclr_hop_K32_top1 | 0.031 | 44.12 | 44.19 | +0.08 | 24.47 | 2.20 |
+| iclr_hop_K16_top2 | 0.125 | 43.91 | 43.50 | -0.41 | 25.21 | 2.05 |
+| iclr_hop_K16_top2_nofix* | 0.125 | 43.53 | 43.40 | -0.13 | 23.92 | 2.12 |
+| iclr_pure_hop_K16_top2_1blk | 0.125 | 40.21 | 38.76 | **-1.45** | 24.58 | 1.36 |
+
+\*not like-for-like (tau normalisation removed one of its four reverted knobs).
+
+**Mean delta over the six HYBRID arms: +0.03pp.** Not merely within noise -- essentially
+exactly zero. The fully-recurrent `1blk` arm (-1.45) is the sole exception, so the split is
+by ARCHITECTURE, not a spread.
+
+**A mechanism I proposed and then REFUTED.** I hypothesised the recurrent arm suffered
+because correct routing makes all iterations converge on the same experts, losing
+cross-iteration diversity. The routing metrics contradict the premise: 1blk sits at
+effK **15.93/16**, max_share 0.0769 -- marginally BETTER balanced than the hybrid
+(15.84, 0.0733). There is no diversity collapse. The -1.45pp is UNEXPLAINED; candidates
+are genuine architectural sensitivity or noisier evals on a weaker model (its baseline is
+40.21 vs 43-44, i.e. nearer chance on several tasks). `pure_hop_T12_sink` (the other
+fully-recurrent arm) tests whether recurrent arms pattern together at all.
+
+**Consequences for the paper, in OPPOSITE directions:**
+* STRENGTHENS the sparsity claim. Sparse K32-top2 at k/K=0.062 now BEATS dense routing
+  (44.58 vs 44.40); published had dense ahead (44.78 vs 44.38). "More, narrower experts is
+  simultaneously better and cheaper" goes from a within-noise ordering to the sparse arm
+  winning outright at 1/16 the arithmetic.
+* WEAKENS the Switch comparison. Switch stays 44.83 (learned router, correctly not rerun).
+  Published best Boltzmann was dense at 44.78, a 0.05pp gap -- what "the same number to two
+  decimals" rested on. Corrected best is K32-top2 at 44.58, so the gap widens to 0.25pp.
+  Still small, and now achieved at HALF Switch's routing density, but the "to two decimals"
+  phrasing must go.
+* The renorm reversal PERSISTS (+0.81, now 2nd of the Boltzmann rows), contradicting
+  `sec:experiments`' "renormalising costs 0.17pp".
+
 **ENERGY STABILITY — the feared runaway does not happen.** The energy is evaluated on
 `ln_x = self.ln(x)` (RMSNorm), not the raw residual, so it cannot grow through the
 residual; only `||W||` remains, opposed by `weight_decay 0.1`. Measured
