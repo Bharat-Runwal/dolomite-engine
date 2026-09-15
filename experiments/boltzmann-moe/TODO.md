@@ -59,6 +59,71 @@
       it. Note the recurrence tax: k/K must be ≲ 1/T to stay at parity with a
       conventional dense transformer at iso-total-params.
 
+## 2026-09-14: training-step speedup for scale32B_boltz_hop (6.75s vs gptswitch 1.34s)
+
+**Done**
+- [x] Training-step microbench (fwd+BWD, production shape) —
+      `scripts/bench_moe_train_step_20260914.py` →
+      `results/router_analysis/bench_moe_train_step_20260914.json`. Findings:
+      repulsion = +65% of the MoE block (single largest cost); two_stage is SLOWER
+      (0.59× at N=4096, grouped-loop backward); proxy needs a fused kernel (no FLOP
+      saving at 4096 tok/call); 1-in-10 output repulsion → 1.55× block speedup;
+      weight-space repulsion 3.5× cheaper AND sparse-compatible. See PROGRESS.md.
+- [x] (a) Phase-B profiler config `configs/iclr_scale/scale32B_boltz_hop_PROFILE.yml`
+      (throwaway; engine TorchProfiler; 4 preemptable GPUs, job 1658324) — trace →
+      `results/profiler/boltz_hop_trace`. PARSED (`scripts/parse_profiler_trace_20260915.py`).
+      RESULT: one step = 1712.99 ms GPU kernel time; **elementwise 61.0% / GEMM 25.3%
+      / attention 4.3% / comms 0.4%**. Both elementwise AND GEMM are dominated by the
+      dense-32-expert MoE (I_e=1280 projections fire 1536×/step = 32×6×8). **The ~14%
+      MoE estimate was REFUTED — the 5× gap is `recurrence × dense-32-expert`.** See
+      PROGRESS.md "Phase B RESULT (2026-09-15)".
+- [x] (b) Intermittent-repulsion patch DRAFTED (not applied; needs sign-off) —
+      `results/router_analysis/intermittent_repulsion_20260914.patch`. Adds
+      `repulsion_interval` (default 1 = current) + `repulsion_scale_comp` to
+      `BoltzmannMoEFFEnergy`, opt-in per config. NOTE: profiler shows repulsion is
+      only ~2–4% of the whole step (not 39%: that was one isolated block-call), so
+      this is a safe near-free win but NOT the headline lever.
+
+**Next**
+- [ ] **Headline levers to close the 5× gap (from the trace, biggest first):**
+      (1) fused top-k sparse **back-projection** (skip 15/16 of the [·,1280]@[1280,1536]
+      ≈244 ms); (2) **rank-r proxy router** (Hopfield ceiling 96.7% top-1 @ r=16 —
+      TODO line 28) to skip the all-32 fwd projection ≈266 ms; (3) **fuse the
+      per-expert energy loop** (grouped-GEMM + fused gelu²-mean) to cut both
+      elementwise and the launch-overhead gap (79.5 k kernels/step, GPU-busy 1.71 s ≪
+      6.75 s wall); (4) route-once-reuse across the 6 recurrence iters ONLY if
+      verified stable on the trained config (re-check TODO line 54's 0.87–0.90).
+- [ ] (b) patch: ship it opportunistically (safe, ~2–3% step) once sign-off is given;
+      `repulsion_interval: 10, repulsion_scale_comp: true`. Not gating on it.
+- [x] **Overleaf Avg11 — RESOLVED 2026-09-15.** User's call: the target paper is the
+      **ICLR draft** (`/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`), NOT the
+      NeurIPS one, and it migrates fully to Avg11. This turned out to need **no
+      re-eval at all**: every `iclr_*` run already carries race+lambada, so all 22
+      yield a COMPLETE Avg11. Migration applied and PUSHED to Overleaf (commit
+      `Migrate all reported numbers from avg10 to canonical Avg11`). Number-by-number
+      record + the claims that changed: **`AVG11_ICLR_MIGRATION.md`**.
+      The NeurIPS draft was deliberately left alone — it is archive, still on avg10.
+- [x] **32B gptswitch arm FINISHED (2026-09-15)** — job 1647503 DONE at step
+      61,035 = the full 32B tokens, final train-loss 2.8277, 1.31 s/step. It had
+      **no eval at all**; agent tasked with unshard + full harness. This is the
+      completed half of the 400M headline pair and the paper's first real
+      400M/32B number. **The Boltzmann half is only at step ~7370 of 61,035
+      (12%)** at 6.79 s/step → ~4.2 more days as-is, ~2.6 days with
+      `fused_experts` (see ACCEL_FINDINGS on the `boltz-accel` branch).
+- [ ] **DO NOT paper-cite the 4 newly-evaluated arms — all are PARTIAL.**
+      w1w2_K32_top2 10k/30k (33%), slope90k_1blk 40k/90k, pure_hop_isoP_bal
+      16k/30k, iclr_big_hop_sandwich 4k/15k. Their Avg11 is complete (11/11 tasks)
+      but not comparable to the finished 30k grid. In particular w1w2_K32_top2
+      (41.63, PPL 56.00) does NOT yet resolve Hopfield-vs-W1W2 — it is at a third
+      of Hopfield K=32's budget and its PPL says undertrained, not worse. The
+      paper's "that arm is training" wording stays.
+- [ ] **Fold in the remaining ICLR runs that had NO eval** (agent submitted the
+      jobs 2026-09-15): `iclr_decide/w1w2_K32_top2` (**the arm `tab:threeway` says
+      "resolves" Hopfield-vs-W1W2 — highest value**), `iclr_slope/slope90k_1blk`,
+      `iclr_big/iclr_big_hop_sandwich` (the paper's one remaining acknowledged
+      baseline gap), `iclr_balance/pure_hop_isoP_bal`, and the two live
+      `iclr_scale/scale32B_*` arms. Skipped: `pure_hop_isoP_bal_DIVERGED_*`.
+
 ## After Mon 2026-06-01 talk
 
 ### A/B test: tanh_exact φ' (DONE — surprising negative result, follow-up needed)
