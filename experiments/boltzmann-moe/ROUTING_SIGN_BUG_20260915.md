@@ -242,3 +242,60 @@ noise floor), consistent with 7.5's finding that deleting the FF branch entirely
 moved perplexity by +0.0003. At this scale the branch is not load-bearing for the LM
 loss in either sign. The chemical-potential frame is a claim about the ROUTING
 MECHANISM being principled, not yet about it winning.
+
+---
+
+# SWEEP RESULT (step 30, early): the chemical potential works, and tau is NOT needed
+
+All arms below are CORRECTED sign (`e_sign_override: "pos"`), 4 GPU, same seed/data.
+`mu_k` = `balance_rate: 0.001` (the aux-loss-free per-expert bias).
+
+| arm | tau | mu_k | effK (of 32) | ffwd/output_norm | bias_absmax |
+|---|---:|:---:|---:|---:|---:|
+| S1 deployed (anti-routing) | 0.35 | — | 9.18 | 0.029 | — |
+| S2 corrected | 0.35 | off | 1.54 | 2.78 | — |
+| T2 corrected | 1.0 | off | 3.05 | 5.28 | — |
+| T3 corrected | 3.0 | off | 3.47 | **0.34** | — |
+| **T4 corrected** | **0.35** | **on** | **5.00** | **6.94** | **1.0000** |
+| **T5 corrected** | 1.0 | on | **7.08** | 2.00 | **1.0000** |
+
+## The prediction held
+
+**T4 — the ORIGINAL tau plus `mu_k` — dominates both temperature arms on BOTH axes.**
+Against S2 (same tau, no bias): effK 1.54 -> 5.00 AND ffwd_norm 2.78 -> 6.94. Balance
+improves 3.2x while the branch gets 2.5x STRONGER. It also beats T3 (tau=3.0) on
+balance and by 20x on branch magnitude.
+
+So the two mechanisms are cleanly separated, as the derivation says:
+- **tau** buys occupancy spread by BLURRING the selection — and self-defeats, because
+  masked top-k weights shrink as routing softens, so T3's branch collapses to 0.34.
+- **mu_k** redistributes occupancy WITHOUT touching the selection.
+
+**tau does not need retuning after all.** The corrected sign plus a chemical potential
+at the original tau=0.35 is the configuration that gets both properties. This converts
+the accidental anti-routing balance into a principled mechanism whose principled form
+is strictly better than the temperature workaround.
+
+Frontier: T4 = best branch (239x S1's ffwd_norm), T5 = best balance (7.08 against
+S1's 9.18, still 69x S1's branch).
+
+## Actionable caveat: `mu_k` is CLAMP-SATURATED
+
+Both bias arms report `bias_absmax = 1.0000`, exactly `_BIAS_MAX`. So `mu_k` achieves
+this while pinned, and wants to push harder — the +-1.0 bound is now the binding
+constraint at K=32. Raising the clamp is the obvious move but risky: the bound exists
+because an earlier unclamped `sign()`-based version reached |bias| = 1482 and
+destabilised `pure_hop_isoP_bal` (loss 4.05 -> 5.18, 77 upward jumps).
+
+**Preferred fix: Sinkhorn-style exact marginal normalisation**, which enforces the
+occupancy constraint without an unbounded multiplier — the canonical-ensemble version
+of the same variational problem. A few normalisation sweeps per step, no clamp, no
+tuning knob.
+
+## Still open
+
+- Step 30 only, and S2 showed non-monotone early dynamics (1.03 -> 1.47 -> 2.32), so
+  the ordering needs confirming at 300 steps.
+- No quality claim. Every sign/balance arm so far sits inside the 0.038 lm_loss noise
+  floor at this scale, consistent with 7.5's "deleting the FF branch moved perplexity
+  by +0.0003". These are mechanism results, not quality results.
