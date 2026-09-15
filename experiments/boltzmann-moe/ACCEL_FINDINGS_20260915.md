@@ -27,6 +27,65 @@ reproducible across hosts and the 1.61x is a real effect, not host variation.**
   ~4.2 s/step, i.e. 32B tokens in ~3.0 days instead of ~4.8.
 - The rank-8 proxy costs ~3% (1.212 -> 1.253), matching the predicted K*d*r.
 
+## CORRECTION: repulsion is ~17-21% of the STEP, not 2-4%
+
+TODO.md recorded "the profiler shows repulsion is only ~2-4% of the whole step
+(not 39%)" and I repeated that to the user. **It is an undercount and it
+misdirects the optimisation.** All four figures quoted for this, reconciled:
+
+| figure | what it actually measures |
+|---|---|
+| **65%** | repulsion added ON TOP of the no-repulsion block: 7.59 / 11.70 ms |
+| **39%** | repulsion's share OF the with-repulsion block: 7.59 / 19.29 ms |
+| **17-21%** | repulsion's share of the FULL OPTIMIZER STEP |
+| ~2-4% | **WRONG** -- a profiler bucketing artefact |
+
+65 and 39 are the same bench number over two denominators (bench at N=4096, K=32:
+shipped 19.29 ms/call, shipped_norep 11.70, rep_marginal 7.59).
+
+The step figure follows because the MoE block runs **48x per optimizer step**
+(6 recurrence x 8 grad-accum -- the profiler's matmul counts confirm it:
+x3072 = 32 experts x 6 x 8 x 2). So 7.59 x 48 = ~364 ms of the 1713 ms step =
+21%, independently matched by direct A/B (arm B 1.463 vs arm C 1.210 = 17%).
+
+The 2-4% came from per-family bucketing, which credited only repulsion's
+`F.normalize` (reduce/norm, 53.91 ms, shared with the energy mean). Repulsion's
+dominant cost -- the BACKWARD through normalize+cos on the (N, K, hidden) tensor
+-- fell into the generic elementwise bucket. **Per-family kernel attribution
+cannot isolate a feature whose cost is spread across a shared bucket; only an A/B
+with the feature off can.**
+
+**Consequence: repulsion IS a headline-sized lever** (~20% of the step), not a
+rounding error -- visible in the arms as 1.61x (fusion) -> 1.94x (fusion + reduced
+repulsion).
+
+## What actually dominates a training step
+
+| family | ms | % | what |
+|---|---:|---:|---|
+| **elementwise** | 1045 | **61.0%** | per-expert `mean(gelu(Wx)^2)` (gelu/pow/sigmoid/mean x3072 each) + MoE combine-add + gc recompute |
+| GEMM | 433 | 25.3% | the I_e=1280 expert projections |
+| attention | 73 | 4.3% | flash fwd+bwd, negligible |
+| copy/memset | 64 | 3.7% | |
+| reduce/norm | 54 | 3.1% | energy mean, repulsion normalize |
+
+**Training is ELEMENTWISE-bound, not matmul-bound.** Because top-2 is a post-hoc
+MASK, all 32 experts' full-width intermediates are materialised: [4096 x 40960] =
+168M elements, walked several times per call, 48 calls/step, x2 for gc recompute.
+
+This is why the fusion gave 1.61x and no more: **it cut kernel LAUNCHES
+(79.5k/step) but not elementwise VOLUME.** The two levers that attack the 61%:
+1. **Fuse the elementwise chain** -- one kernel for gelu*gelu' and mean(gelu^2)
+   instead of several passes over 168M elements.
+2. **True sparsity** -- computing only the selected 2 of 32 experts cuts that
+   volume ~16x. Needs the sparse-dispatch kernel, which the proxy unlocks.
+
+Also from the bench: **weight-space repulsion is 2.20 ms/call against output-space
+7.59** (3.5x cheaper) AND needs no dense expert outputs, so it survives a sparse
+kernel. At ~20% of the step that swap is worth ~14% at FULL strength every step --
+strictly better than intermittent output repulsion, which buys speed by weakening
+the regulariser.
+
 ## FINDING: `fused_experts` is a PURE RESUME -- no banked steps are lost
 
 The obvious objection to adopting the fusion on the live 32B arm was that
