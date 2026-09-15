@@ -291,3 +291,88 @@ and investigate.
   a restart is staked on it.
 - Whether to restart the live 32B arm. 1.61x is real but is not the 4x that would
   close the gap to gptswitch, and a restart discards ~7000 banked steps.
+
+---
+
+# REPULSION SWEEP RESULTS (2026-09-15)
+
+4 arms x 4 H100, 300 steps, all `fused_experts=true`, all logging the
+repulsion-independent `expert_cos_abs_mean` probe. "apps" = pair-applications per
+block call = `n_repulsion_pairs / repulsion_interval`.
+
+| arm | apps | s/step | speedup | cos min | cos @300 | vs no-rep |
+|---|---:|---:|---:|---:|---:|---:|
+| R1 4 pairs, every step (**current**) | 4.0 | 1.464 | 1.00x | 0.0112 | 0.0400 | 21.5x |
+| R2 1 pair, every step | 1.0 | 1.331 | 1.10x | 0.0301 | 0.0586 | 8.8x |
+| R3 2 pairs, 1-in-4, coef x4 | 0.5 | 1.244 | **1.18x** | 0.0348 | 0.0377 | 5.2x |
+| R4 **NONE** (control) | 0.0 | 1.222 | **1.20x** | 0.4070 | 0.5046 | 1.0x |
+
+## 1. Repulsion costs 17% of the step -- measured directly
+
+R1 vs R4 is the cleanest possible measurement: (1.464 - 1.222) / 1.464 = **17.05%**.
+This is the definitive number for the 65 / 39 / 17-21 / 2-4 confusion: repulsion is
+**17% of the optimizer step**, and the 2-4% figure was a units error (see the
+correction section above).
+
+## 2. Repulsion is strongly load-bearing -- the control settles it
+
+Without it, expert output alignment sits at **0.43 and RISES to 0.50**. It never
+decays. Every repulsion arm decays sharply instead. So the earlier hypothesis that
+"experts settle into their own niche and repulsion becomes unimportant" is **wrong
+as stated**: the decay is CAUSED by the force, not by the experts settling. Remove
+the force and alignment goes to ~0.5 and stays.
+
+## 3. But the benefit is steeply front-loaded
+
+  0   -> 0.5 apps : alignment 0.43 -> 0.092  (4.7x better) for 2.5% of the step
+  0.5 -> 4.0 apps : alignment 0.092 -> 0.021 (4.4x better) for 15% of the step
+
+A little repulsion does most of the work almost free. The current setting pays 15%
+of the step for the last factor of ~4. **So the "2 pairs every 4 steps" idea is
+better than I first credited** -- R3 captures 86% of the maximum available saving
+(1.18x of 1.20x) and still holds alignment 5.2x better than nothing.
+
+Alignment ordering is monotone in apps at every step, and the arms partially
+CONVERGE late (at step 280: R1 0.034, R3 0.038) -- but that late phase is confounded
+by this probe's compressed LR schedule (warmup 50, decay 250), so do not read the
+convergence as a scale-free result.
+
+## 4. ⚠ WHAT THIS PROBE CANNOT ANSWER: the quality question
+
+lm_loss at matched steps, mean delta against R1 over n>=18 shared steps:
+
+    R2 1 pair    -0.0126
+    R3 2p/1-in-4 -0.0313
+    R4 NONE      -0.0248
+
+**Every one of these is INSIDE the measured run-to-run noise floor of 0.038**
+(established earlier from the A-vs-A' byte-identical replicate). So at 300 steps,
+**repulsion has no measurable effect on lm_loss in any configuration, including
+switching it off entirely.** The apparent "R4 is slightly better" is noise and must
+not be read as "repulsion hurts".
+
+The alignment differences are large (20-40x) and unambiguous; their QUALITY
+consequence is simply not resolvable at this horizon. The only long-horizon signal
+we have is indirect: the `nofix` arm (mis-specified `signed` repulsion) carries 2.8x
+the expert weight-alignment of the shipped arm and scored 0.38pp lower Avg11
+(43.53 vs 43.91) with 1.83 worse PPL, at 30k steps -- a 100x longer horizon than
+this probe.
+
+**Therefore: this sweep settles the COST and the ALIGNMENT consequences. It does not
+license dropping or reducing repulsion on quality grounds.** That needs a run long
+enough to eval downstream.
+
+## 5. Recommendation
+
+1. **Ship `fused_experts` now** (1.61x, exact, resume-compatible). Unambiguous.
+2. **Do not drop repulsion.** R4's alignment is 20-40x worse and rising, and the one
+   long-horizon datapoint links alignment to quality.
+3. **Prefer `repulsion_space="weight"` over intermittent firing** to collect the
+   ~17%: 3.5x cheaper per call at N=4096 (6.4x at 8192), N-independent,
+   sparse-kernel compatible, and it keeps FULL strength EVERY step rather than
+   buying speed by weakening the regulariser. Needs a `repulsion_coef` re-sweep
+   because weight cosines are ~5-25x smaller than output cosines.
+4. **R3 (2 pairs, 1-in-4) is the fallback** if weight-space does not hold output
+   alignment: 1.18x, 86% of the available saving, alignment 5.2x better than none.
+5. The real prize remains the 61% elementwise bucket (fuse the chain; true
+   sparsity), not repulsion's 17%.
