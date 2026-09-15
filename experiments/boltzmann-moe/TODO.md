@@ -228,6 +228,22 @@ Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
       `FusedMoEContainer` that the builder returns, so a probe reading the container gets
       `None` for everything and will happily report whatever its fallback branch says.
 
+- [ ] **The `nofix` negative control is no longer the published ablation.** Setting
+      `temperature: 1.0` on every rerun arm silently removed one of the FOUR knobs that
+      the published "top-2 of 16, no fixes" row reverted (`sec/appendix.tex` `app:frontier`,
+      Avg11 **43.53**): nofix used tau 1.0 and its baseline used 0.35, so tau was itself one
+      of the reverted knobs. The rerun control now reverts THREE knobs at matched tau
+      (`hopfield_grad_scale`, `routing_norm`, `repulsion_form`).
+      This is defensible and arguably cleaner -- tau stops being a confound bundled into
+      "the fixes", and the arm stays genuinely degenerate because the `app:degenerate`
+      failure REQUIRES tau ~ 1 (raw Hopfield energies are tiny relative to it, so
+      `routing_norm: none` drives routing uniform). But the new number is **not** a
+      like-for-like replacement for 43.53, and the appendix must say which comparison it is
+      reporting. A true like-for-like rerun would need the baseline back at tau 0.35, which
+      contradicts the tau=1.0 decision the whole batch rests on.
+      Same trap to check for elsewhere: a bundled ablation whose "reverted" set happens to
+      include a knob the rerun normalises.
+
 - [ ] **True sparsity is NOT implemented** (never was). `top_k` is a post-hoc MASK: all
       K experts' forward AND back projections are computed, then multiplied by a `p` that
       is zero for K-k of them. Two separable pieces:

@@ -1,3 +1,23 @@
+# ⚠ THE ABLATION'S DEFINITION CHANGED, DELIBERATELY. READ BEFORE COMPARING TO THE PAPER.
+#
+# The published "top-2 of 16, no fixes" row (sec/appendix.tex app:frontier, Avg11 43.53)
+# reverted FOUR knobs relative to its baseline: hopfield_grad_scale, routing_norm,
+# repulsion_form AND temperature (nofix used tau 1.0, the fixed arm used 0.35).
+#
+# This rerun sets tau 1.0 on EVERY arm, so this control now reverts THREE knobs at MATCHED
+# tau. That is deliberate and, I would argue, a better ablation -- tau is no longer a
+# confound bundled into the "fixes" -- but it is NOT the published comparison, so the new
+# number is not a like-for-like replacement for 43.53.
+#
+# The ablation still demonstrates the same thing: the degeneracy of app:degenerate REQUIRES
+# tau ~ 1, because the raw Hopfield energies are numerically tiny relative to it, so
+# `routing_norm: none` drives the softmax toward uniform. Holding tau at 1.0 keeps this arm
+# degenerate and leaves the baseline well-conditioned via zscore. What changes is only that
+# the contrast is now attributable to the three prefactor/normalisation knobs alone.
+#
+# If a like-for-like reproduction of the 43.53 row is wanted instead, the baseline
+# iclr_hop_K16_top2_sink must go back to tau 0.35 -- which contradicts the tau=1.0 decision
+# this whole batch rests on. Pick one and say which in the paper.
 # CORRECTED-SIGN + SINKHORN RERUN of iclr_flops/iclr_hop_K16_top2_nofix (2026-09-15).
 #
 # The paper will report the CORRECTED model, so every EnergyFF_BoltzmannMoE arm in the
