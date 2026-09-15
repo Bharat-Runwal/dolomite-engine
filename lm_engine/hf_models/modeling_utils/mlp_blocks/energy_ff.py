@@ -493,6 +493,13 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         renormalize_topk: bool = False,
         track_load: bool = True,
         balance_rate: float = 0.0,
+        repulsion_interval: int = 1,
+        repulsion_scale_comp: bool = True,
+        fused_experts: bool = False,
+        fused_spec: dict | None = None,
+        proxy_rank: int = 0,
+        proxy_loss_coef: float = 0.0,
+        proxy_route: bool = False,
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -561,9 +568,94 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             itertools.combinations(range(self.n_experts), 2)
         )
 
+        # ------------------------------------------------------------------ #
+        # INTERMITTENT REPULSION (2026-09-15)                                #
+        # ------------------------------------------------------------------ #
+        # Repulsion measured +65% of the MoE block in the isolated microbench
+        # (19.29 -> 11.70 ms/call without it). Firing it on ~1 call in `interval`
+        # and scaling the coefficient by `interval` keeps E[repulsion gradient]
+        # unchanged while paying the cost 1/interval of the time.
+        # interval == 1 -> prob 1.0, coef x1 -> byte-identical to the old path,
+        # so no existing config or checkpoint changes.
+        # NOTE: the Phase-B profiler put repulsion at only ~2-4% of the FULL step
+        # (the 65% was one isolated block-call), so this is a safe near-free win,
+        # NOT the headline lever. The headline lever is `fused_experts` below.
+        assert repulsion_interval >= 1
+        self.repulsion_interval = int(repulsion_interval)
+        self.repulsion_scale_comp = bool(repulsion_scale_comp)
+
+        # ------------------------------------------------------------------ #
+        # FUSED EXPERT PATH (2026-09-15) -- EXACT, the real speedup           #
+        # ------------------------------------------------------------------ #
+        # The `_Fused*Holder` classes already keep ONE weight tensor and hand each
+        # expert a CONTIGUOUS ROW-SLICE of it. So the per-expert loop
+        #     out = sum_k p_k * pref * (gated_k @ W_k)
+        # is algebraically one GEMM against the fused weight:
+        #     out = ((pref * p) (x) gated_all) @ W_fused
+        # because W_fused is the vertical stack of the W_k and gated_all the
+        # horizontal concat of the gated_k. Same for the forward projection.
+        # This replaces 2*K slice-GEMMs (64 at K=32) with 2 GEMMs, which is what
+        # the profiler's 79.5k kernels/step and GPU-busy 1.71s << 6.75s wall says
+        # is the actual cost. The arithmetic is IDENTICAL -- this is not an
+        # approximation, so the loss curve must match to numerical tolerance.
+        self.fused_experts = bool(fused_experts)
+        self._fused_spec = fused_spec
+        if self.fused_experts:
+            assert fused_spec is not None, "fused_experts=True needs fused_spec"
+            widths = {e.intermediate_size for e in experts}
+            assert len(widths) == 1, f"fused path needs equal expert widths, got {widths}"
+            assert fused_spec["kind"] == "hopfield", (
+                "fused_experts is implemented for expert_kind='hopfield' only "
+                f"(got {fused_spec['kind']!r}); the w1w2 line still uses the loop"
+            )
+            self._expert_I = experts[0].intermediate_size
+
+        # ------------------------------------------------------------------ #
+        # LEARNABLE RANK-r PROXY ROUTER (2026-09-15)                          #
+        # ------------------------------------------------------------------ #
+        # Offline study (HANDOFF 7.6): the naive spectral proxy ||W_k x||^2 FAILS
+        # (~0% top-1 agreement -- gelu(z)^2 is not pointwise proportional to z^2).
+        # What works is the exact energy restricted to a rank-r subspace: r=8 gave
+        # 0.94 top-1 / 0.90 top-2 at 98.3K MACs against the exact router's 12.58M,
+        # i.e. ~128x cheaper. That study needed an SVD of a TRAINED W plus a head
+        # fitted on cached (x, E_k) pairs, so it cannot route a run from scratch.
+        #
+        # This is the trainable version: a learned per-expert projection V_k plus a
+        # diagonal-quadratic head, distilled ONLINE against the exact routing
+        # distribution via an aux loss. It costs d*r*K per token (~3% of the block
+        # at r=8) and -- crucially -- it does NOT touch the main forward path unless
+        # `proxy_route` is set, so it cannot degrade training. Its measured top-k
+        # agreement is logged every step, so we learn whether r is sufficient
+        # BEFORE trusting it for inference.
+        self.proxy_rank = int(proxy_rank)
+        self.proxy_loss_coef = float(proxy_loss_coef)
+        self.proxy_route = bool(proxy_route)
+        if self.proxy_rank > 0:
+            r = self.proxy_rank
+            self.proxy_V = nn.Parameter(
+                torch.randn(self.n_experts, hidden_size, r) / (hidden_size ** 0.5)
+            )
+            # Diagonal quadratic + linear head on the r coefficients: the true
+            # Hopfield energy is quadratic in W_k x, so a quadratic form in the
+            # projection is the right inductive bias (and is 2r+1 params/expert).
+            self.proxy_quad = nn.Parameter(torch.ones(self.n_experts, r) / r)
+            self.proxy_lin = nn.Parameter(torch.zeros(self.n_experts, r))
+            self.proxy_bias = nn.Parameter(torch.zeros(self.n_experts))
+            self.register_buffer("_proxy_agree_sum", torch.zeros((), dtype=torch.float32),
+                                 persistent=False)
+            self.register_buffer("_proxy_agree_n", torch.zeros((), dtype=torch.float32),
+                                 persistent=False)
+        else:
+            self.proxy_V = None
+
     # --- public surface --------------------------------------------------- #
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fused_experts:
+            return self._forward_fused(x)
+        return self._forward_looped(x)
+
+    def _forward_looped(self, x: torch.Tensor) -> torch.Tensor:
         # Collect each expert's descent gradient AND its per-token energy.
         # We do this with the cache-flag flipped on so the experts populate
         # ``_last_energy_per_token`` regardless of self.training — the wrapper
@@ -593,6 +685,34 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # "lower energy = better"). ``e_sign="pos"`` matches the validated
         # W1W2-MoE class which computed softmax(+E_k/τ) on its (negative)
         # routing energy — same effect, different sign convention.
+        p, logits = self._route(E_k)
+        self._track_load(p)
+
+
+        # Aggregate gradients: ∇_h E_total = Σ_k w_k · ∇_h E_k.
+        expert_grads = torch.stack(expert_outs, dim=-2)        # (..., n_experts, hidden)
+        out = torch.einsum("...e,...eh->...h", p, expert_grads)
+
+        # E_total per token: -τ · LSE_k(logits) — same sign convention as
+        # the legacy classes.
+        if self.training and self._capture_energy:
+            self._last_energy_per_token = -self.temperature * torch.logsumexp(logits, dim=-1)
+        else:
+            self._last_energy_per_token = None
+
+        if self.training and self.repulsion_coef > 0:
+            self._add_repulsion_loss(expert_grads)
+
+        if not torch.compiler.is_compiling():
+            self._log_metrics(p, out)
+
+        return out
+
+    # --- shared routing (used by BOTH the looped and fused paths, so they can
+    # --- never drift apart) ------------------------------------------------- #
+
+    def _route(self, E_k: torch.Tensor):
+        """Energies -> (p, logits). Verbatim the pre-2026-09-15 routing block."""
         logits = self._logits(E_k)
         p = F.softmax(logits, dim=-1)
         if self.top_k is not None and self.top_k < self.n_experts:
@@ -610,7 +730,9 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             # it is a real asymmetry in the comparison, so expose the matched option.
             if self.renormalize_topk:
                 p = p / p.sum(-1, keepdim=True).clamp_min(1e-9)
+        return p, logits
 
+    def _track_load(self, p: torch.Tensor) -> None:
         # Traceable load accounting: tensor ops only, no .item(), no host sync, so this
         # survives torch.compile where _log_metrics does not.
         if self.track_load and self.training:
@@ -643,24 +765,128 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                     self.load_balance_bias += upd.to(self.load_balance_bias.dtype)
                     self.load_balance_bias.clamp_(-self._BIAS_MAX, self._BIAS_MAX)
 
-        # Aggregate gradients: ∇_h E_total = Σ_k w_k · ∇_h E_k.
-        expert_grads = torch.stack(expert_outs, dim=-2)        # (..., n_experts, hidden)
-        out = torch.einsum("...e,...eh->...h", p, expert_grads)
 
-        # E_total per token: -τ · LSE_k(logits) — same sign convention as
-        # the legacy classes.
+    # --- fused-GEMM path ---------------------------------------------------- #
+
+    def _fused_W(self) -> torch.Tensor:
+        return self._fused_spec["weight_fn"]()
+
+    def _forward_fused(self, x: torch.Tensor) -> torch.Tensor:
+        """EXACT equivalent of _forward_looped for equal-width Hopfield experts.
+
+        Replaces 2*K slice-GEMMs with 2 GEMMs against the fused weight. See the
+        `fused_experts` note in __init__ for why this is algebraically identical.
+        """
+        spec = self._fused_spec
+        W = self._fused_W()                      # (K*I_e, hidden)
+        K, I_e = self.n_experts, self._expert_I
+        pref = _hopfield_grad_prefactor(I_e, spec["hopfield_grad_scale"])
+
+        Wx = x @ W.t()                           # ONE forward GEMM, all experts
+        gelu_Wx, gelu_prime = _gelu_and_grad(Wx, spec["gelu_grad_method"])
+
+        lead = Wx.shape[:-1]
+        g = gelu_Wx.view(*lead, K, I_e)
+        E_k = (g * g).mean(dim=-1)               # (..., K) -- same as per-expert mean
+
+        p, logits = self._route(E_k)
+        self._track_load(p)
+
+        if self.proxy_rank > 0:
+            self._proxy_step(x, E_k, logits)
+
+        gated = (gelu_Wx * gelu_prime).view(*lead, K, I_e)
+        gw = (gated * (pref * p).unsqueeze(-1)).reshape(*lead, K * I_e)
+        out = gw @ W                             # ONE backward-projection GEMM
+
         if self.training and self._capture_energy:
             self._last_energy_per_token = -self.temperature * torch.logsumexp(logits, dim=-1)
         else:
             self._last_energy_per_token = None
 
         if self.training and self.repulsion_coef > 0:
-            self._add_repulsion_loss(expert_grads)
+            self._add_repulsion_loss_fused(gated, W, pref)
 
         if not torch.compiler.is_compiling():
             self._log_metrics(p, out)
 
         return out
+
+    def _add_repulsion_loss_fused(self, gated: torch.Tensor, W: torch.Tensor,
+                                  pref: float) -> None:
+        """Repulsion without materialising all K expert outputs.
+
+        Only the experts appearing in the sampled pairs are needed (<=2*n_pairs of
+        K, so <=8 of 32), so we back-project just those via one bmm instead of all
+        K. Identical VALUE to the looped version, a fraction of the cost -- and on
+        a non-firing intermittent step it costs nothing at all.
+        """
+        if not self._repulsion_fires():
+            return
+        i_idx, j_idx = self._sample_pairs()
+        ids = sorted(set(i_idx) | set(j_idx))
+        pos = {e: n for n, e in enumerate(ids)}
+        K, I_e = self.n_experts, self._expert_I
+
+        W_sel = W.view(K, I_e, self.hidden_size)[ids]              # (S, I_e, hidden)
+        gated_sel = gated.reshape(-1, K, I_e)[:, ids, :]           # (N, S, I_e)
+        eg = pref * torch.einsum("nsi,sih->nsh", gated_sel, W_sel)  # (N, S, hidden)
+        eg_norm = F.normalize(eg, dim=-1)
+
+        ii = [pos[e] for e in i_idx]
+        jj = [pos[e] for e in j_idx]
+        cos = (eg_norm[:, ii, :] * eg_norm[:, jj, :]).sum(-1)
+        add_aux_loss(self._repulsion_coef_now() * _repulsion_penalty(cos, self.repulsion_form))
+
+    # --- learnable rank-r proxy router -------------------------------------- #
+
+    def _proxy_energies(self, x: torch.Tensor) -> torch.Tensor:
+        """Cheap approximate per-expert energies from a rank-r projection.
+
+        Cost d*r per expert (K*d*r total) against the exact router's K*d*I_e --
+        at r=8, I_e=1280 that is 160x fewer MACs for the routing decision.
+        """
+        # x is DETACHED: the proxy is a passive observer that learns to predict the
+        # exact router's decision from the hidden state. Without the detach, the
+        # distillation KL back-propagates into the backbone and reshapes
+        # representations to be cheaply-routable -- which may well be desirable, but
+        # it changes what the model computes and so could move quality. Keeping the
+        # proxy strictly off the main gradient path is what makes "enabling it cannot
+        # degrade training" true. Shaping is a separate experiment, not a default.
+        a = torch.einsum("...h,khr->...kr", x.detach(), self.proxy_V.to(x.dtype))
+        q = self.proxy_quad.to(x.dtype)
+        l = self.proxy_lin.to(x.dtype)
+        return (q * a * a).sum(-1) + (l * a).sum(-1) + self.proxy_bias.to(x.dtype)
+
+    def _proxy_step(self, x: torch.Tensor, E_k: torch.Tensor,
+                    logits: torch.Tensor) -> None:
+        """Distil the proxy against the exact routing distribution, and MEASURE its
+        top-k agreement. Off the main forward path: this adds an aux loss and a
+        metric, and changes nothing the model computes (unless proxy_route).
+
+        The measurement matters more than the loss. HANDOFF 7.9 records that
+        `torch.isin` silently fakes top-k agreement, so agreement is computed here
+        as a genuine per-row set overlap: |top-k(proxy) INTERSECT top-k(exact)| / k.
+        """
+        E_hat = self._proxy_energies(x)
+        logits_hat = self._logits(E_hat)
+
+        if self.training and self.proxy_loss_coef > 0:
+            tgt = F.softmax(logits.detach(), dim=-1)
+            add_aux_loss(
+                self.proxy_loss_coef
+                * F.kl_div(F.log_softmax(logits_hat, dim=-1), tgt, reduction="batchmean")
+            )
+
+        if self.track_load and self.training:
+            with torch.no_grad():
+                k = self.top_k if self.top_k is not None else 1
+                k = min(k, self.n_experts)
+                a = logits.detach().reshape(-1, self.n_experts).topk(k, dim=-1).indices
+                b = logits_hat.detach().reshape(-1, self.n_experts).topk(k, dim=-1).indices
+                hit = (a.unsqueeze(-1) == b.unsqueeze(-2)).any(-1).float().sum(-1)
+                self._proxy_agree_sum += hit.sum() / k
+                self._proxy_agree_n += hit.shape[0]
 
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
         e_list = [expert.energy_per_token(x) for expert in self.experts]
@@ -708,16 +934,35 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             s = s + self.load_balance_bias.to(s.dtype)
         return s / self.temperature
 
-    def _add_repulsion_loss(self, expert_grads: torch.Tensor) -> None:
-        """Repulsion on random expert output pairs. See ``repulsion_form``."""
-        eg = expert_grads.reshape(-1, self.n_experts, self.hidden_size)
-        eg_norm = F.normalize(eg, dim=-1)
+    def _repulsion_fires(self) -> bool:
+        """Stochastic 1-in-`interval` gate. Bernoulli rather than a step counter
+        because this path is already stochastic (`random.sample` of pairs) and the
+        block is called 48x per optimizer step (6 recurrence x 8 grad-accum), so a
+        counter would need extra bookkeeping to mean '1 in N OPTIMIZER steps' and
+        could desync from grad-accum. Equivalent in expectation, needs no state."""
+        if self.repulsion_interval <= 1:
+            return True
+        return random.random() < 1.0 / self.repulsion_interval
+
+    def _repulsion_coef_now(self) -> float:
+        if self.repulsion_scale_comp and self.repulsion_interval > 1:
+            return self.repulsion_coef * self.repulsion_interval
+        return self.repulsion_coef
+
+    def _sample_pairs(self):
         k = min(self.n_repulsion_pairs, len(self._all_pairs))
         sampled = random.sample(self._all_pairs, k)
-        i_idx = [p[0] for p in sampled]
-        j_idx = [p[1] for p in sampled]
+        return [p[0] for p in sampled], [p[1] for p in sampled]
+
+    def _add_repulsion_loss(self, expert_grads: torch.Tensor) -> None:
+        """Repulsion on random expert output pairs. See ``repulsion_form``."""
+        if not self._repulsion_fires():
+            return
+        eg = expert_grads.reshape(-1, self.n_experts, self.hidden_size)
+        eg_norm = F.normalize(eg, dim=-1)
+        i_idx, j_idx = self._sample_pairs()
         cos = (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1)
-        add_aux_loss(self.repulsion_coef * _repulsion_penalty(cos, self.repulsion_form))
+        add_aux_loss(self._repulsion_coef_now() * _repulsion_penalty(cos, self.repulsion_form))
 
     def pop_load_metrics(self) -> dict[str, float] | None:
         """Read and reset the traced load buffers. Call from the trainer, never in-graph.
@@ -741,6 +986,16 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             }
             if self.balance_rate > 0.0 and self.load_balance_bias is not None:
                 m["load_bias_absmax"] = self.load_balance_bias.abs().max().item()
+            # Proxy-router fidelity. This is the number that decides whether the
+            # cheap router is usable: it is the fraction of the exact router's
+            # top-k set that the rank-r proxy also picks. Offline study got 0.94
+            # top-1 at r=8; if this stays well below that, raise proxy_rank.
+            if self.proxy_rank > 0 and self._proxy_agree_n > 0:
+                m["proxy_topk_agree"] = (
+                    self._proxy_agree_sum / self._proxy_agree_n.clamp_min(1.0)
+                ).item()
+                self._proxy_agree_sum.zero_(); self._proxy_agree_n.zero_()
+            m["repulsion_interval"] = float(self.repulsion_interval)
             self._load_sum.zero_(); self._ent_sum.zero_(); self._tok_sum.zero_()
         return m
 
@@ -1018,6 +1273,12 @@ def build_boltzmann_moe(
     renormalize_topk: bool = False,
     track_load: bool = True,
     balance_rate: float = 0.0,
+    repulsion_interval: int = 1,
+    repulsion_scale_comp: bool = True,
+    fused_experts: bool = False,
+    proxy_rank: int = 0,
+    proxy_loss_coef: float = 0.0,
+    proxy_route: bool = False,
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -1052,6 +1313,18 @@ def build_boltzmann_moe(
     else:
         raise ValueError(f"unknown expert_kind ({expert_kind})")
     experts = holder.make_experts()
+    # The fused path needs the single shared weight tensor + the scalars the
+    # per-expert forward would have applied. `weight_fn` is a closure so FSDP
+    # re-gathers are picked up (same reason the expert W_slice closures exist).
+    if expert_kind == "hopfield":
+        fused_spec = {
+            "kind": "hopfield",
+            "weight_fn": (lambda: holder.W.weight),
+            "gelu_grad_method": gelu_grad_method,
+            "hopfield_grad_scale": hopfield_grad_scale,
+        }
+    else:
+        fused_spec = {"kind": expert_kind}
     moe = BoltzmannMoEFFEnergy(
         experts,
         hidden_size=hidden_size,
@@ -1066,5 +1339,12 @@ def build_boltzmann_moe(
         renormalize_topk=renormalize_topk,
         track_load=track_load,
         balance_rate=balance_rate,
+        repulsion_interval=repulsion_interval,
+        repulsion_scale_comp=repulsion_scale_comp,
+        fused_experts=fused_experts,
+        fused_spec=fused_spec,
+        proxy_rank=proxy_rank,
+        proxy_loss_coef=proxy_loss_coef,
+        proxy_route=proxy_route,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)
