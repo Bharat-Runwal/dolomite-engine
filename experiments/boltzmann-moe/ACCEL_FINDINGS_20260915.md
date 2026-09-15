@@ -13,10 +13,14 @@ Cluster GPUs verified homogeneous (4928 x H100 80GB), so cross-host ratios are v
 
 | arm | knobs | s/step | vs base |
 |---|---|---:|---:|
-| A base | current `main` | 2.356 | 1.00x |
+| A base | current `main` | 2.359 | 1.00x |
+| A' base replicate | (control, identical to A) | 2.374 | 0.99x |
 | **B fused** | `fused_experts` | **1.463** | **1.61x** |
-| C fused+rep10 | `+ repulsion_interval=10` | 1.212 | 1.94x |
-| D fused+rep10+proxy8 | `+ proxy_rank=8` | 1.253 | 1.88x |
+| C fused+rep10 | `+ repulsion_interval=10` | 1.210 | 1.95x |
+| D fused+rep10+proxy8 | `+ proxy_rank=8` | 1.244 | 1.90x |
+
+**The A' replicate lands within 0.6% of A (2.374 vs 2.359), so the timing itself is
+reproducible across hosts and the 1.61x is a real effect, not host variation.**
 
 - **Fusion alone buys 1.61x** and is exact arithmetic (float64: max rel diff
   1.227e-15 vs `main`). On the production 16-GPU shape that projects 6.75 ->
@@ -87,18 +91,19 @@ the change worth making instead.
 also picks (genuine set overlap; HANDOFF 7.9 records that `torch.isin` fakes this).
 Chance at k=2, K=32 is 0.0625.
 
-- Buggy build (KL inflated ~4096x by the `batchmean` bug): **0.800** by step 120.
-- Fixed build (correctly per-token KL, coef 0.01): **0.170** by step 100.
+- Buggy build (KL inflated ~4096x by the `batchmean` bug): 0.800 by step 120.
+- Fixed build (per-token KL, coef 0.01): 0.170 at step 100, but **0.915 by step 260**.
 
-The inflated loss was accidentally acting as a much larger learning signal for
-the proxy. With a correctly scaled KL at coef 0.01 the proxy learns far too
-slowly to be usable. **Next: raise `proxy_loss_coef` (0.1-1.0)** -- it is now
-correctly normalised and the input is detached, so a larger coefficient is safe
-provided the global grad norm is watched (see the clipping note below).
+**I was wrong to call the fixed build "too slow to be usable" from the step-100
+reading.** It was still climbing: 0.170 -> 0.915 between steps 100 and 260, which
+is close to the 0.94 the offline fitted-head study reached at r=8, and far above
+the 0.0625 chance level. A rank-8 learnable proxy trained online by KL does
+recover the exact router's top-2 choice ~92% of the time. No coefficient change
+is needed after all.
 
-Note this only ever buys INFERENCE time. Skipping the forward projection for
+This only ever buys INFERENCE time: skipping the forward projection for
 unselected experts needs the sparse-dispatch kernel, and the earlier bench found
-the grouped-loop form 0.59x (i.e. slower) in training at N=4096.
+the grouped-loop form 0.59x (slower) in training at N=4096.
 
 ## Bugs found (chronological), and what each one teaches
 
@@ -143,6 +148,66 @@ the grouped-loop form 0.59x (i.e. slower) in training at N=4096.
    repulsion inflates ~10x on firing steps. Now newest-log-only with the job id
    printed, comparisons on `lm_loss` at SHARED steps, and mean aux reported
    separately as the direct test of E[repulsion].
+
+## Arm D's divergence: hypothesis refuted, real cause found
+
+D's `lm_loss` diverged 0.096 against an A-vs-A' noise floor of 0.022 (4.4x),
+while arm C -- same `repulsion_interval`, no proxy -- stayed inside the floor.
+
+My first explanation was gradient clipping: the proxy's parameters are in
+`model.parameters()`, so an inflated proxy gradient would raise the global norm
+and scale the backbone down. **Measured and REFUTED:** `grad_norm` never reached
+the 1.0 threshold on either arm (A max 0.9235, D max 0.8959; 0/24 steps clipped).
+
+The actual cause: `torch.randn` for `proxy_V` consumed the GLOBAL RNG stream in
+`__init__`, shifting the initialisation of every parameter created after that
+block. Enabling the proxy therefore gave the model a **different init**, not a
+different computation -- so D was never comparable to A on loss. Fixed with a
+dedicated `torch.Generator`; verified that expert `W` and the post-construction
+RNG stream are now identical with and without the proxy.
+
+## OPEN: effK diverges more than run-to-run noise, and I cannot yet explain it
+
+Restricted to the steps A' has reached (10-110), so the comparison is like-for-like:
+
+| metric | A-vs-A' floor | B | C | D |
+|---|---:|---:|---:|---:|
+| `lm_loss` | 0.0219 | 0.0190 **within** | 0.0155 **within** | 0.0964 (init confound, above) |
+| `effK` | 0.985 | 2.775 **above** | 3.636 **above** | 4.333 **above** |
+
+`lm_loss` -- the quantity that matters -- is INSIDE the nondeterminism floor for
+both B and C. `effK` is ~2.8x the floor for B, which is the exact-arithmetic arm.
+
+I tried to attribute this to bf16 reduction-order differences feeding a DISCRETE
+top-k, and **the test was inconclusive: on CPU the fused and looped paths produced
+bit-identical bf16 energies (max|dE_k| = 0.000e+00) and 100% identical top-2 sets,
+so it reproduced no divergence at all.** It therefore neither explains nor rules
+out the GPU behaviour, which involves FSDP and different GEMM kernels. Do not cite
+that test as support.
+
+What is established: the fusion is exact to 1.227e-15 in float64 and bit-identical
+in bf16 on CPU, and GPU `lm_loss` is within noise. What is not established: why
+`effK` moves more than run-to-run noise.
+
+**The cheap way to settle it is the adoption path itself.** Resuming the live arm
+from its own checkpoint with `fused_experts: true` is a far tighter comparison
+than two independent runs -- identical weights, optimizer state and data position,
+so effK should simply CONTINUE its existing trajectory. If it steps
+discontinuously at the flip, that is the signal to stop and investigate.
+
+## Recommendation
+
+1. **Adopt `fused_experts: true` on the live 32B Boltzmann arm by RESUME** (not
+   restart): exact arithmetic, `lm_loss` within the noise floor, checkpoint
+   compatible, ~1.6x throughput -> 32B tokens in ~3.0 days instead of ~4.8.
+   Watch `load_effective_n_experts` across the flip as the effK test.
+2. **Do NOT ship `repulsion_interval`** for the headline run (weaker regulariser,
+   above). Pursue weight-space repulsion instead: 3.5x cheaper, sparse-compatible,
+   and applicable every step so the regulariser keeps its character.
+3. **Leave the proxy off the headline run** (it adds parameters, so it cannot be
+   enabled on a resume). Its result -- 0.915 top-2 agreement at r=8, trained
+   online -- is an inference-time asset to develop separately, and it needs the
+   sparse-dispatch kernel before it converts into speed.
 
 ## Open at time of writing
 

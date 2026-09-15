@@ -139,12 +139,22 @@ if A:
 # should sit at or below this floor. Judging "close enough" by eye is exactly the
 # mistake this replicate exists to prevent.
 # ---------------------------------------------------------------------------
-def diverge(arm, field):
+def diverge(arm, field, restrict=None):
+    """Mean |arm - A| for `field`, optionally restricted to a given step set.
+
+    RESTRICTION MATTERS. The A' floor can only be measured over the steps A' has
+    reached, while a finished arm spans the whole run -- and effK falls from ~11 to
+    ~4 across it. Comparing a floor measured on steps 60-100 against a divergence
+    measured on 60-290 is not a comparison. Every verdict below is therefore
+    computed on the INTERSECTION of steps that A, A' and the arm all have.
+    """
     d, ref = data[arm], data[ARMS[0]]
     if not d or not ref:
         return None
     common = [k for k in d if k in ref
               and d[k].get(field) is not None and ref[k].get(field) is not None]
+    if restrict is not None:
+        common = [k for k in common if k in restrict]
     if not common:
         return None
     return st.mean([abs(d[k][field] - ref[k][field]) for k in common]), len(common)
@@ -157,9 +167,13 @@ for f, label in (("lm", "lm_loss"), ("eff", "effK")):
         print(f"  {label}: A' replicate has no overlapping steps yet -- floor unknown, "
               f"so no verdict can be drawn on the other arms for this metric.")
         continue
-    print(f"  {label}: noise floor (A vs A', n={fl[1]}) = {fl[0]:.5f}")
+    # the step set the floor is actually measured on
+    ap, A_ = data["accel_A2_base_replicate"], data[ARMS[0]]
+    span = {k for k in ap if k in A_ and ap[k].get(f) is not None and A_[k].get(f) is not None}
+    print(f"  {label}: noise floor (A vs A', n={fl[1]}, steps {min(span)}-{max(span)}) = {fl[0]:.5f}")
+    print(f"           all arms below restricted to those same steps")
     for arm in ARMS[2:]:
-        r = diverge(arm, f)
+        r = diverge(arm, f, restrict=span)
         if not r:
             print(f"      {arm:30s} n/a"); continue
         verdict = "within noise" if r[0] <= fl[0] * 1.5 else "ABOVE noise -- investigate"

@@ -632,8 +632,18 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         self.proxy_route = bool(proxy_route)
         if self.proxy_rank > 0:
             r = self.proxy_rank
+            # DEDICATED GENERATOR, not the global RNG. torch.randn here would consume
+            # the global stream and shift the initialisation of every parameter created
+            # AFTER this block -- so merely enabling the proxy gave the whole model a
+            # different init. That is what made arm D's lm_loss diverge 4.4x the
+            # A-vs-A' noise floor while arm C, which shares every other knob, stayed
+            # inside it: a different starting point, not a different computation.
+            # (The gradient-clipping explanation I first reached for was refuted --
+            # grad_norm never touched the 1.0 threshold on either arm.)
+            _g = torch.Generator().manual_seed(0xB01742 + (layer_idx or 0))
             self.proxy_V = nn.Parameter(
-                torch.randn(self.n_experts, hidden_size, r) / (hidden_size ** 0.5)
+                torch.randn(self.n_experts, hidden_size, r, generator=_g)
+                / (hidden_size ** 0.5)
             )
             # Diagonal quadratic + linear head on the r coefficients: the true
             # Hopfield energy is quadratic in W_k x, so a quadratic form in the
