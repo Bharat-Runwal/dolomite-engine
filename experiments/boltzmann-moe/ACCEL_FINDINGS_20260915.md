@@ -23,6 +23,33 @@ Cluster GPUs verified homogeneous (4928 x H100 80GB), so cross-host ratios are v
   ~4.2 s/step, i.e. 32B tokens in ~3.0 days instead of ~4.8.
 - The rank-8 proxy costs ~3% (1.212 -> 1.253), matching the predicted K*d*r.
 
+## FINDING: `fused_experts` is a PURE RESUME -- no banked steps are lost
+
+The obvious objection to adopting the fusion on the live 32B arm was that
+restarting discards the ~7000 steps already trained. **It does not require a
+restart at all.** The fusion changes the computation, not the parameterisation:
+experts remain views over the same fused `W`, so the checkpoint is unchanged.
+
+Verified directly (float64, CPU):
+
+```
+looped state_dict keys : 1
+fused  state_dict keys : 1     identical to looped? True
+strict load of a LOOPED state_dict into the FUSED model: OK
+max |looped(x) - fused(x)| after cross-load: 5.4e-19
+```
+
+So the adoption path for the headline run is: **stop the arm, add
+`fused_experts: true` to the MoE block, resume from
+`latest_checkpointed_iteration.json`**. Same weights, same optimizer state, same
+data position, ~1.6x the throughput, and the loss curve continues where it left
+off. `save_interval: 1000` and `max_to_keep: 40` mean a recent checkpoint is
+always available.
+
+**One exception:** `proxy_rank > 0` DOES add four parameters
+(`moe.proxy_V/quad/lin/bias`), so the proxy cannot be switched on mid-run under a
+strict load. Enable it only at the start of a fresh run, or allow missing keys.
+
 ## FINDING: intermittent repulsion is a WEAKER REGULARISER, not a free win
 
 The drafted patch argued that multiplying the coefficient by `interval` keeps the
