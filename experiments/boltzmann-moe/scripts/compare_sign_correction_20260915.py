@@ -109,7 +109,11 @@ for new, old in sorted(PAIRS.items()):
     if an is None:
         pending.append((name, f"rerun INCOMPLETE: {en}")); continue
     d = None if ao is None else an - ao
-    rows.append((name, ao, an, d, sep(rn, "mmlu", "acc"), sep(rn, "gsm8k_cot", "acc"), new))
+    # GSM8K-CoT is exact_match with the flexible-extract filter, NOT "acc" -- my first
+    # version asked for "acc" and silently printed n/a for a column the paper reports.
+    # Matches compute_avg11.py:110 (prefer the explicit filter, fall back to prefix match).
+    rows.append((name, ao, an, d, sep(rn, "mmlu", "acc"),
+                 sep(rn, "gsm8k_cot", "exact_match,flexible-extract") or sep(rn, "gsm8k_cot", "exact_match"), new))
     print(f"{name:34s} {('%.2f'%ao) if ao is not None else '   n/a':>10} {an:10.2f} "
           f"{('%+.2f'%d) if d is not None else '   n/a':>8}   "
           f"{('%.2f'%(rows[-1][4] or 0)) if rows[-1][4] is not None else '  n/a':>6} "

@@ -682,6 +682,39 @@ logged AFTER the last `wandb: Syncing run`: `~10` means scratch, `~ckpt+10` mean
 
 Prevention: every `configs/iclr_sink/*.yml` now carries `load_args.load_path`.
 
+### 2026-09-15: FIRST corrected-sign Avg11 results (3 of 14 arms)
+
+Metric via the canonical `compute_avg11.py`; the comparison script's `--selftest`
+reproduces five published `tab:frontier` values to <0.02pp, and the published GSM8K reads
+2.43, matching the paper exactly. So the deltas below are trustworthy.
+
+| arm | published | corrected | delta | MMLU | GSM8K |
+|---|---:|---:|---:|---:|---:|
+| iclr_hop_K16_top2 | 43.91 | 43.50 | **-0.41** | 25.21 | 2.05 |
+| iclr_hop_K16_top2_renorm | 43.74 | **44.54** | **+0.81** | 23.86 | 2.43 |
+| iclr_hop_K16_top2_nofix* | 43.53 | 43.40 | -0.13 | 23.92 | 2.12 |
+
+\*NOT like-for-like: tau normalised to 1.0 removed one of its four reverted knobs.
+
+**1. The sign correction is QUALITY-NEUTRAL.** Mean delta **+0.09pp**. Consistent with the
+sign making no resolvable `lm_loss` difference over 300 steps (+0.006..+0.013 vs a 0.038
+noise floor) -- which is exactly why the bug survived the whole grid unnoticed. The paper's
+PARITY claims therefore survive the correction; what the bug corrupted is the
+routing-HEALTH narrative, not the quality numbers.
+
+**2. It REVERSES a stated claim.** `sec:experiments` says "Making ours renormalise *costs*
+0.17pp (43.91 -> 43.74)" and concludes masking-without-renormalising is right. Corrected:
+renorm **44.54** vs top2 **43.50**, i.e. renorm LEADS by 1.04pp -- opposite sign.
+Plausible mechanism: under anti-routing the weights were near-meaningless so renormalising
+them changed little; with correct routing the weight MAGNITUDES carry signal, so
+normalising them can matter. Hypothesis on n=1, not a claim.
+
+**3. The caveat governing both readings.** The three deltas span **1.22pp**
+(-0.41 .. +0.81), wider than the ~0.5pp threshold. So NO individual per-arm delta is
+interpretable at this scale; only the aggregate (no systematic shift) is supportable.
+Do not rewrite `tab:frontier` rows off single deltas -- wait for the full set, and treat
+the renorm row as the one claim the correction might genuinely overturn.
+
 **ENERGY STABILITY — the feared runaway does not happen.** The energy is evaluated on
 `ln_x = self.ln(x)` (RMSNorm), not the raw residual, so it cannot grow through the
 residual; only `||W||` remains, opposed by `weight_decay 0.1`. Measured
