@@ -412,3 +412,62 @@ space regardless of where the loss acts) against R1's 0.011-0.040 trajectory: th
 is the direct test of whether holding WEIGHTS apart also holds OUTPUTS apart, which
 is the assumption the whole weight-space substitution rests on and which is
 currently unverified.
+
+---
+
+# NEGATIVE RESULT: ReLU does NOT rescue the spectral `||Wx||^2` router (2026-09-15)
+
+**Hypothesis tested.** HANDOFF 7.6 found the cheap `||W_k x||^2` proxy fails and
+blamed *the nonlinearity*: `gelu(z)^2` is not pointwise proportional to `z^2`. If
+that diagnosis were right, ReLU should fix it, since
+`relu(z)^2 = z^2 * 1[z>0]` -- the positive half of exactly what the proxy computes.
+The supporting argument: for roughly symmetric pre-activations,
+`sum_{z>0} z^2 ~ 1/2 sum_i z^2` with relative fluctuation ~`1/sqrt(I_e)` (~4% at
+I_e=512), negligible against a measured per-token inter-expert energy spread
+comparable to the mean (~96%).
+
+**Measured on trained weights (`iclr_hop_K32_top2`, K=32, I_e=512, d=768),
+identical inputs for both energies:**
+
+| `||Wx||^2` proxy ranked against | top-1 | top-2 | top-4 |
+|---|---:|---:|---:|
+| GELU energy `mean(gelu(Wx)^2)` | 0.1462 | 0.2142 | 0.3079 |
+| ReLU energy `mean(relu(Wx)^2)` | **0.1399** | **0.2094** | 0.3010 |
+| chance (K=32) | 0.0312 | 0.0625 | 0.1250 |
+
+per-token corr(proxy, energy) across the 32 experts: **0.503 GELU / 0.494 ReLU**.
+
+**ReLU is marginally WORSE, not better.** And the rank-r spectral version is at or
+BELOW chance: top-2 = 0.016 / 0.021 / 0.034 / 0.049 at r = 2 / 4 / 8 / 16.
+
+**Why the reasoning was wrong.** The `1/2`-factor argument holds for the SUM, but the
+**positive-part FRACTION varies per expert per token, and that variation carries the
+discriminative signal.** `||Wx||^2` sums over all `i` and discards it. So the binding
+constraint was never GELU's smoothness -- it is the information the proxy throws
+away. Attributing 7.6's failure to "the nonlinearity" named the wrong culprit, and
+this test inherited that framing before disproving it.
+
+**Also clarifies a conflation in the notes.** 7.6's *working* r=8 result (0.94 top-1)
+kept the NONLINEARITY INSIDE the rank-r subspace -- `mean(gelu(W^(r) x)^2)` -- which
+is a different and costlier construction than the spectral `||W^(r) x||^2`. Those two
+have been referred to interchangeably; they are not the same, and only the first works.
+
+**Caveats -- this is suggestive, not decisive:**
+- ReLU was applied to GELU-TRAINED weights. A model trained with ReLU from scratch
+  could develop structure where the proxy ranks better. Not tested.
+- Inputs were isotropic Gaussian; real hidden states are strongly anisotropic (7.6
+  reported 0.68 top-1 on synthetic input where this test gets 0.146, so the input
+  distribution matters a great deal). The ABSOLUTE numbers here are not trustworthy.
+- What IS internally valid is the GELU-vs-ReLU comparison: same weights, same inputs,
+  no benefit.
+
+**What survives.** `relu'(z) = 1[z>0]`, so `gated = relu(z) * 1[z>0] = relu(z)` --
+the SAME tensor already computed for the energy. That removes an entire
+[N, K*I_e] materialisation and a multiply, attacking the 61% elementwise bucket
+directly. Worth an A/B as a pure compute reduction, independent of routing. (Note the
+precedent for activation swaps here is bad: `tanh_exact` lost 2.2pp avg / +3.4 PPL.)
+
+**And the practical route to sparsity is already measured:** the LEARNABLE rank-8
+proxy reached **0.942** top-2 agreement, trained online. The spectral shortcut is
+dead; the learned one works. The gap to true sparsity is the DISPATCH KERNEL, not
+routing accuracy.
