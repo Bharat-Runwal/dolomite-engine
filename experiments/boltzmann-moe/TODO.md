@@ -215,6 +215,19 @@ Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
       **Do not judge a rerun arm's balance before ~step 600** -- effK dips to 8-13
       first (see the transient table in `PROGRESS.md`).
 
+- [ ] **Log the routing sign as a training metric.** `e_sign` is NOT in
+      `train_utils.py:get_metrics()`, so the single setting that silently inverted the
+      entire 22-arm grid is invisible in every wandb run. `sinkhorn_iters`,
+      `repulsion_interval` and `repulsion_space_is_weight` ARE logged; the sign is the one
+      that mattered and it is missing. Add `ffwd.e_sign_is_pos` (1.0/0.0) alongside them.
+      **Deliberately NOT done on 2026-09-15**: `energy_ff.py` is loaded by 15 running jobs
+      and the rule is not to touch running-job model code without a green light. It is a
+      pure additive metric with no numerical effect, so it is safe to land at the next
+      natural gap. Until then, verify a config's sign by RESOLVING it, not by reading YAML:
+      `build_boltzmann_moe(**kw).moe.e_sign` -- note `e_sign` lives on `.moe`, NOT on the
+      `FusedMoEContainer` that the builder returns, so a probe reading the container gets
+      `None` for everything and will happily report whatever its fallback branch says.
+
 - [ ] **True sparsity is NOT implemented** (never was). `top_k` is a post-hoc MASK: all
       K experts' forward AND back projections are computed, then multiplied by a `p` that
       is zero for K-k of them. Two separable pieces:

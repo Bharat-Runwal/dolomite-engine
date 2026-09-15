@@ -1,3 +1,19 @@
+# RENAMED from *_bal_sink: this arm is the CONTROL, not a Sinkhorn arm.
+#
+# It carries `balance_rate: 0.003` (the clamped proportional-control balancer). Stacking
+# `sinkhorn_iters: 3` on top trips the assertion in energy_ff.py:703 -- the two are two
+# solutions to the SAME batch-marginal constraint and enabling both double-counts it. The
+# first generated version DID stack them and would have crashed at model construction;
+# caught while still PEND, before it consumed a start.
+#
+# Rather than zero balance_rate (which would make this a duplicate of
+# iclr_pure_hop_isoP_sink), sinkhorn is turned OFF here, so the arm becomes:
+#     corrected sign + tau 1.0 + CLAMPED proportional control
+# against iclr_pure_hop_isoP_sink's
+#     corrected sign + tau 1.0 + EXACT dual (sinkhorn)
+# i.e. a grid-scale replication of the 134M M2-vs-M3 comparison, differing ONLY in the
+# balancing mechanism. tau is deliberately 1.0 (not the original 0.35) so that stays the
+# single difference.
 # CORRECTED-SIGN + SINKHORN RERUN of iclr_balance/pure_hop_isoP_bal (2026-09-15).
 #
 # The paper will report the CORRECTED model, so every EnergyFF_BoltzmannMoE arm in the
@@ -164,19 +180,19 @@ model_args:
         gelu_grad_method: sigmoid
         # ---- corrected variant ----
         e_sign_override: "pos"
-        sinkhorn_iters: 3
+        sinkhorn_iters: 0   # OFF: balance_rate below already solves this constraint
         repulsion_tensor_idx: true
         activation_function: gelu
         add_bias: false
 
 load_args:
-  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_sink/pure_hop_isoP_bal_sink
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_sink/pure_hop_isoP_bal_corr
 
 tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_sink/pure_hop_isoP_bal_sink
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_sink/pure_hop_isoP_bal_corr
   save_interval: 1000
   max_to_keep: 2
 
@@ -190,7 +206,7 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: pure_hop_isoP_bal_sink
+    name: pure_hop_isoP_bal_corr
 
 training_parameters:
   num_training_steps: 30000
