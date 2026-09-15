@@ -353,6 +353,11 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   LOCAL per-rank batch -- see ROUTING_SIGN_BUG_20260915.md.
     #   Mutually exclusive with balance_rate: both solve the same constraint.
     sinkhorn_iters: int = 0
+    # Keep a running estimate of the Sinkhorn dual and USE IT AT EVAL. Off by default:
+    # it adds a persistent buffer, and the checkpoint loader is strict, so enabling it on a
+    # run that already has checkpoints breaks resume. See energy_ff.py for the 5.33pp
+    # measurement that motivates it.
+    sinkhorn_persist_mu: bool = False
     # repulsion_tensor_idx: draw the repulsion pair indices with torch RNG into a TENSOR
     #   instead of Python `random` into lists. dynamo cannot trace Python random and
     #   specialises on the list values, so repulsion currently costs 2-3 graph breaks and

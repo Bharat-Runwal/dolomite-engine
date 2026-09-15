@@ -206,6 +206,7 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             repulsion_space=getattr(block, "repulsion_space", "output"),
             e_sign_override=getattr(block, "e_sign_override", None),
             sinkhorn_iters=getattr(block, "sinkhorn_iters", 0),
+            sinkhorn_persist_mu=getattr(block, "sinkhorn_persist_mu", False),
             repulsion_tensor_idx=getattr(block, "repulsion_tensor_idx", False),
             init_method=config.init_method,
             initializer_range=config.initializer_range,

@@ -216,6 +216,11 @@ def _gelu_and_grad(x: torch.Tensor, method: str) -> tuple[torch.Tensor, torch.Te
 # --------------------------------------------------------------------------- #
 
 
+# EMA momentum for the running Sinkhorn dual. 0.01 => ~100-step time constant, fast
+# enough to converge inside any real run and inside a short calibration pass.
+_SINKHORN_MU_MOMENTUM = 0.01
+
+
 class FFEnergyBase(nn.Module):
     """Abstract base for plug-and-play FF energy modules.
 
@@ -504,6 +509,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         cos_probe_pairs: int = 8,
         repulsion_space: str = "output",
         sinkhorn_iters: int = 0,
+        sinkhorn_persist_mu: bool = False,
         repulsion_tensor_idx: bool = False,
     ) -> None:
         super().__init__()
@@ -707,6 +713,37 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         if self.sinkhorn_iters > 0:
             self.register_buffer("_sink_mu_absmax", torch.zeros((), dtype=torch.float32),
                                  persistent=False)
+        # ---- RUNNING mu, so balancing survives into eval (2026-09-15) ----------------
+        # mu is a BATCH statistic solved under no_grad and, until now, applied only when
+        # self.training. So a model trained with mu-tilted routing was EVALUATED with
+        # mu = 0: a train/test shift in the router itself. Exactly the BatchNorm
+        # situation, and the fix is the same -- keep a running estimate and use it at eval.
+        #
+        # MEASURED COST of not doing this (two pure-energy isoP arms, identical but for the
+        # balancer): the clamped `load_balance_bias`, which is a persistent buffer with NO
+        # self.training gate and therefore DOES survive to eval, scored Avg11 41.49; the
+        # Sinkhorn twin, whose mu was dropped, scored 36.16. A 5.33pp gap from eval-time
+        # treatment alone. Hybrids barely notice (1 MoE block of 7, six GPT layers immune);
+        # pure-energy stacks are all-MoE so it compounds every iteration.
+        #
+        # OPT-IN, and deliberately so. The checkpoint loader is STRICT: adding a persistent
+        # buffer to an arm that already has checkpoints fails its resume with
+        #   "Missing key in checkpoint state_dict: ...ffwd.moe.load_balance_bias"
+        # which is documented above and already cost slope90k_1blk a resume. Four sinkhorn
+        # arms were mid-training when this landed, so the default keeps their state_dict
+        # shape byte-identical.
+        self.sinkhorn_persist_mu = bool(sinkhorn_persist_mu)
+        assert not (self.sinkhorn_persist_mu and self.sinkhorn_iters == 0), (
+            "sinkhorn_persist_mu has nothing to persist with sinkhorn_iters=0"
+        )
+        if self.sinkhorn_persist_mu:
+            self.register_buffer("sinkhorn_mu", torch.zeros(len(experts), dtype=torch.float32),
+                                 persistent=True)
+            self.register_buffer("sinkhorn_mu_count", torch.zeros((), dtype=torch.float32),
+                                 persistent=True)
+        else:
+            self.sinkhorn_mu = None
+            self.sinkhorn_mu_count = None
         assert repulsion_interval >= 1
         self.repulsion_interval = int(repulsion_interval)
         self.repulsion_scale_comp = bool(repulsion_scale_comp)
@@ -1180,9 +1217,32 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             # precision, and the implicit promotion failed during fake-tensor tracing.
             s = s + self.load_balance_bias.to(s.dtype)
         logits = s / self.temperature
-        if self.sinkhorn_iters > 0 and self.training:
-            logits = logits - self._solve_sinkhorn_mu(logits).to(logits.dtype)
+        if self.sinkhorn_iters > 0:
+            if self.training:
+                mu = self._solve_sinkhorn_mu(logits)
+                if self.sinkhorn_persist_mu:
+                    self._update_running_mu(mu)
+                logits = logits - mu.to(logits.dtype)
+            elif self.sinkhorn_persist_mu and float(self.sinkhorn_mu_count) > 0:
+                # EVAL: use the running estimate rather than nothing. Without this the
+                # router is evaluated untilted while it was trained tilted.
+                logits = logits - self.sinkhorn_mu.to(logits.dtype)
         return logits
+
+    @torch.no_grad()
+    def _update_running_mu(self, mu: torch.Tensor) -> None:
+        """Running estimate of the per-batch dual, for use at eval.
+
+        CUMULATIVE AVERAGE that decays into an EMA: weight = max(momentum, 1/count). For the
+        first ~1/momentum batches this is an exact running mean (low variance, which is what a
+        short calibration pass needs); afterwards it is a fixed-momentum EMA (tracks drift as
+        mu falls over training -- measured 3.44 -> 1.97 at 134M). A plain EMA would have made
+        a 64-batch calibration essentially a ONE-batch estimate, since after seeding, each
+        later batch would move it only 1%."""
+        cnt = float(self.sinkhorn_mu_count) + 1.0
+        w = max(_SINKHORN_MU_MOMENTUM, 1.0 / cnt)
+        self.sinkhorn_mu.mul_(1.0 - w).add_(mu.float(), alpha=w)
+        self.sinkhorn_mu_count += 1.0
 
     @torch.no_grad()
     def _solve_sinkhorn_mu(self, logits: torch.Tensor) -> torch.Tensor:
@@ -1313,6 +1373,9 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 # Compare against load_bias_absmax, which pinned at the 1.0 clamp.
                 m["sinkhorn_mu_absmax"] = self._sink_mu_absmax.item()
                 m["sinkhorn_iters"] = float(self.sinkhorn_iters)
+                if self.sinkhorn_persist_mu:
+                    m["sinkhorn_mu_running_absmax"] = float(self.sinkhorn_mu.abs().max())
+                    m["sinkhorn_mu_count"] = float(self.sinkhorn_mu_count)
             if self.cos_probe_interval > 0 and self._cos_n > 0:
                 m["expert_cos_abs_mean"] = (self._cos_sum / self._cos_n.clamp_min(1.0)).item()
                 self._cos_sum.zero_(); self._cos_n.zero_()
@@ -1604,6 +1667,7 @@ def build_boltzmann_moe(
     repulsion_space: str = "output",
     e_sign_override: str | None = None,
     sinkhorn_iters: int = 0,
+    sinkhorn_persist_mu: bool = False,
     repulsion_tensor_idx: bool = False,
     init_method: str = "normal",
     initializer_range: float = 0.02,
@@ -1693,6 +1757,7 @@ def build_boltzmann_moe(
         cos_probe_pairs=cos_probe_pairs,
         repulsion_space=repulsion_space,
         sinkhorn_iters=sinkhorn_iters,
+        sinkhorn_persist_mu=sinkhorn_persist_mu,
         repulsion_tensor_idx=repulsion_tensor_idx,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)
