@@ -305,7 +305,10 @@ block call = `n_repulsion_pairs / repulsion_interval`.
 | R1 4 pairs, every step (**current**) | 4.0 | 1.464 | 1.00x | 0.0112 | 0.0400 | 21.5x |
 | R2 1 pair, every step | 1.0 | 1.331 | 1.10x | 0.0301 | 0.0586 | 8.8x |
 | R3 2 pairs, 1-in-4, coef x4 | 0.5 | 1.244 | **1.18x** | 0.0348 | 0.0377 | 5.2x |
-| R4 **NONE** (control) | 0.0 | 1.222 | **1.20x** | 0.4070 | 0.5046 | 1.0x |
+| R4 **NONE** (control) | 0.0 | 1.227 | **1.19x** | 0.4070 | **0.5141** | 1.0x |
+
+All four reached step 300. R4's alignment rose monotonically across the entire run
+(0.427 -> 0.514), never once decaying — the clearest statement of the result.
 
 ## 1. Repulsion costs 17% of the step -- measured directly
 
@@ -376,3 +379,36 @@ enough to eval downstream.
    alignment: 1.18x, 86% of the available saving, alignment 5.2x better than none.
 5. The real prize remains the 61% elementwise bucket (fuse the chain; true
    sparsity), not repulsion's 17%.
+
+
+## Weight-space coefficient: calibrated, and the two criteria DISAGREE
+
+Verified at the production MoE shape (K=32, I_e=1280, d=1536), one forward+backward,
+`repulsion_coef=0.1` in both spaces:
+
+| space | aux | grad_W norm | output cos (probe) |
+|---|---:|---:|---:|
+| output | 0.031005 | 1.700e-2 | 0.3129 |
+| weight | 0.000084 | 2.520e-3 | 0.3129 |
+
+So at equal coefficient, weight-space produces a **370x smaller aux** but only a
+**6.7x smaller gradient on W**. The two natural ways to port the coefficient
+therefore disagree by ~6x:
+
+- **match the aux magnitude**: coef ~ 0.1 x (output_cos / weight_cos). At trained
+  400M values (output ~0.10, weight ~0.0025) that is **~4.0**.
+- **match the gradient pressure on W**: coef ~ 0.1 x 6.75 = **~0.7**.
+
+**Gradient-matching is the better guide** — what shapes training is how hard the
+term pushes on W, not the scalar's size. But this was measured at INIT, where the
+weight blocks are already near-orthogonal (|cos| 0.00060 against a random baseline
+of 0.00071), so weight-space repulsion has almost nothing to push against yet and
+its gradient will grow as weight alignment rises during training. The init ratio
+therefore probably UNDERSTATES the needed coefficient.
+
+**Recommended sweep: `repulsion_coef` in {0.5, 2, 8}** for `repulsion_space="weight"`,
+bracketing both estimates. Read `expert_cos_abs_mean` (which always measures OUTPUT
+space regardless of where the loss acts) against R1's 0.011-0.040 trajectory: that
+is the direct test of whether holding WEIGHTS apart also holds OUTPUTS apart, which
+is the assumption the whole weight-space substitution rests on and which is
+currently unverified.
