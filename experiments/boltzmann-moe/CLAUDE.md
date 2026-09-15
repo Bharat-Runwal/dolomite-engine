@@ -1,24 +1,89 @@
 # Boltzmann MoE — Experiment Guide
 
+> ## 📄 ACTIVE PAPER — the ICLR draft is the ONLY paper we are writing right now
+>
+> **Path: `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`**
+> (Overleaf remote `https://git@git.overleaf.com/6a9ace75a92fce262f38ec18`, branch `main`.)
+> Files: `main.tex` + `sec/{intro,theory,experiments,appendix}.tex`.
+> Table locations: `tab:frontier`, `tab:pure`, `tab:cost`, `tab:threeway` in
+> `sec/experiments.tex`; `app:frontier`, `app:eval` (metric definition), `app:scale400`,
+> `app:threeway`, `tab:attribution` in `sec/appendix.tex`.
+>
+> **ALL of its numbers are `Avg11`** as of 2026-09-15 (migrated from `avg10` that day; see
+> `AVG11_ICLR_MIGRATION.md`). MMLU and GSM8K-CoT are reported as SEPARATE columns, never in
+> the mean.
+>
+> **⚠ Do NOT read the older drafts unless a task specifically requires them — they burn
+> context and they use SUPERSEDED metric conventions.** The NeurIPS draft
+> (`~/Code/energy/energy-GPT-neurips2026/`) and the talk
+> (`~/Code/overleaf/energy-GPT-reformulation-2026/`) are **reference/archive only**; their
+> tables are still on `avg10`/`avg9`. If you find yourself opening `paper_v2.tex` or
+> `boltz_moe.tex` to answer an ICLR question, stop — you are in the wrong paper.
+
+> ## 🔴 TWO 2026-09-15 FINDINGS THAT INVALIDATE EARLIER CONCLUSIONS — READ BEFORE TRUSTING ANY ROUTING OR s/step CLAIM
+>
+> **1. The composable Boltzmann router is SIGN-INVERTED.**
+> `ROUTING_SIGN_BUG_20260915.md`. Measured on a trained checkpoint: the router selects
+> the experts with the **LOWEST** `||gelu(W_k x)||^2` — 0.62x the average expert's
+> overlap, exactly the lowest-overlap set. `_HopfieldExpert` stores an energy that
+> GROWS with overlap and `e_sign="neg"` then picks the smallest. The legacy
+> `BoltzmannMoE_Energy_MLP` does it correctly (`E = +overlap`, `softmax(+E/tau)`).
+> Affects **every `EnergyFF_BoltzmannMoE` run**: the whole 22-arm ICLR grid and the
+> live 400M. NOT the learned-gate/Switch arms, not gptswitch, not the legacy
+> `h1_*`/`b*`/`c*` series.
+> Correcting it (`e_sign_override: "pos"`) revives the FF branch **20–100x**
+> (`ffwd/output_norm` 0.03 → 12) and **collapses routing** (effK 8.5 → 1.9 of 32),
+> because anti-routing was acting as an accidental load balancer. So TWO paper claims
+> are affected: "the energy-FF branch is essentially dead" (caused by the bug) and
+> "Boltzmann routing does not collapse and needs no load-balancing loss" (may hold
+> only because of it). A third — "energy routing is at parity with a learned gate" —
+> was measured under the inverted sign. **Do not restate the routing-health results.**
+> Note: across 300 steps the sign made NO resolvable `lm_loss` difference
+> (+0.006..+0.013 vs a 0.038 noise floor), which is why it went unnoticed.
+>
+> **2. The "~5x slower than gptswitch" figure is substantially a HOST-PLACEMENT artifact.**
+> `PLACEMENT_ARTIFACT_20260915.md`. Same unfused code, same config, resumed from the
+> same checkpoint on a different host pair: **6.72–6.81 → 2.45–2.53 s/step**, i.e.
+> 2.7x from placement alone. Identical GPU model/driver/`gpu_factor`, no MIG; sibling
+> contention ruled out (median 6.739 before gptswitch finished vs 6.784 after).
+> Likely dataloader starvation from shared CPU slots — per-rank GPU-busy is 1.71 s, so
+> 25% utilisation at 6.76 s wall vs 68% at 2.49 s. **Consequences:** the real ratio to
+> gptswitch is ~1.9x (still not placement-controlled), and the "launch-overhead bound /
+> 79.5k kernels" reading is largely void at 68% utilisation.
+> **Rule: no multi-node s/step claim is admissible unless placement-controlled** —
+> same hosts for both arms, or several placements with the spread reported.
+>
+> Acceleration work: `ACCEL_FINDINGS_20260915.md`. `fused_experts` is EXACT (1.227e-15)
+> and 1.61x at **4 GPU / 1 node**, but it **WEDGES at 16 GPU / 2 nodes** and is
+> reverted on the live arm — validated single-node only.
+
 > ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
 >
-> Every "Avg" / "Avg acc" figure below is **`avg9`**: the mean over **nine** tasks
-> with **MMLU EXCLUDED**, and `acc_norm` used on all six tasks that report it
-> (including `sciq`). MMLU was left out of the average because of a dataset
-> installation problem at the time; `race` and `lambada_openai` were also absent
-> (an Arrow/parquet reader bug, fixed 2026-08-03 by pinning `pyarrow>=20`).
+> **CANONICAL (2026-09-14 onward): `Avg11`**, the paper `tab:scaling` recipe, the
+> SAME number the EGPT-RL / FET colleagues headline — so ours are directly
+> comparable to theirs. **Compute it with `experiments/eval_scripts/compute_avg11.py`**
+> (validated to reproduce the colleagues' stored Avg11 on the two shared
+> `math_egptdual` seed checkpoints to +0.004pp). Recipe:
+> - **11-task unweighted mean.** `acc_norm`: arc_challenge, arc_easy, hellaswag,
+>   openbookqa, piqa, sciq. `acc`: boolq, copa, winogrande, **race**, **lambada_openai**.
+> - **MMLU (acc) and GSM8K-CoT (flex-extract) are reported SEPARATELY**, never averaged in.
+> - Source of truth: `~/Code/GPT-experiments/projects/EGPT-RL/RESULTS.md:247-249`.
 >
-> The **current** convention (`compute_aggregates.py`, and the FET series in
-> `~/Code/GPT-experiments/projects/EGPT-action/RESULTS.md`) is **`avg10`**: ten tasks
-> with **MMLU INCLUDED**, `acc_norm` on five (`sciq` uses plain `acc`).
+> **Two older conventions appear in tables below — never mix them with Avg11:**
+> - **`avg9`**: 9 tasks, MMLU EXCLUDED, race/lambada absent (the pre-`pyarrow>=20`
+>   Arrow/parquet bug, fixed 2026-08-03). `acc_norm` on all six that report it.
+> - **`avg10`** (old `compute_aggregates.py`): 10 tasks, **MMLU INCLUDED**,
+>   race/lambada EXCLUDED. `compute_aggregates.py` is now **DEPRECATED for headlines**.
 >
-> **`avg10` is 1.2–2.7pp LOWER than `avg9`** because MMLU sits near chance (~24–28%)
-> at these scales. **Do not put avg9 and avg10 numbers in the same table** — doing so
-> flatters every pre-2026-06 run by roughly 1.5pp.
+> **Avg11 runs ~3pp BELOW avg10** because race (~0.28) and lambada (~0.23) sit near
+> chance at our scale — a scoring-convention gap, not a model effect. avg10 is
+> 1.2–2.7pp below avg9. **Do not put avg9 / avg10 / Avg11 numbers in the same table.**
 >
-> Restated values for every run with a stored eval:
-> `python experiments/eval_scripts/restate_avg9_to_avg10_20260912.py --md`
-> Corrected headline numbers are in `AVG10_RESTATED.md`.
+> Restated ICLR-grid Avg11 table: `python experiments/eval_scripts/compute_avg11.py <run_dir>`
+> (all 22 iclr_* runs already have race+lambada, so all yield a COMPLETE Avg11).
+> Bulk-restate EVERY stored eval to Avg11 (marks INCOMPLETE runs):
+> `python experiments/eval_scripts/restate_to_avg11_20260914.py --md`.
+> Legacy avg9→avg10 restatement: `restate_avg9_to_avg10_20260912.py --md` / `AVG10_RESTATED.md`.
 
 This directory documents the **BoltzmannMoE Energy FFN** experiments (series B1–B5).
 The goal was to replace the standard Energy\_MLP feedforward in deep EGPT with a
@@ -339,16 +404,19 @@ Full detail and the gelu_grad / h2 A/B studies are in `PROGRESS.md`.
 
 ## Key paper and reports
 
+- **★ ACTIVE — ICLR 2026 paper** (Overleaf): `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`
+  — main file: `main.tex`; sections in `sec/{intro,theory,experiments,appendix}.tex`
+  — remote: `https://git@git.overleaf.com/6a9ace75a92fce262f38ec18` (branch `main`)
+  — **all numbers are `Avg11`**; metric defined in `sec/appendix.tex` `\label{app:eval}`
+  — **this is the only paper being written. Start and finish here.**
 - **Local report**: `experiments/boltzmann-moe/paper/report.pdf` (10 pages)
 - **Scatter plot script**: `experiments/boltzmann-moe/paper/make_moe_scatter.py`
   — generates `paper/figs/moe_scatter_total_params.pdf` and `moe_scatter_active_params.pdf`
-- **NeurIPS 2026 paper** (Overleaf): `~/Code/energy/energy-GPT-neurips2026/`
-  — main file: `nima/paper_v2.tex`
-  — BoltzMoE appendix: `nima/sec/appendices/boltz_moe.tex`
-  — figures: `nima/figs/` (symlink or copy scatter PDFs here for compilation)
-- **Talk slides**: `~/Code/overleaf/energy-GPT-reformulation-2026/talk_v3.tex`
-  — includes MoE results table frame and scatter plot frame (after BoltzMoE 400M frame)
-  — figures path: `figures/` relative to that directory
+- **NeurIPS 2026 paper — ARCHIVE, still on `avg10`, do not read unless asked**:
+  `~/Code/energy/energy-GPT-neurips2026/` (main `nima/paper_v2.tex`,
+  appendix `nima/sec/appendices/boltz_moe.tex`)
+- **Talk slides — ARCHIVE, still on `avg10`/`avg9`**:
+  `~/Code/overleaf/energy-GPT-reformulation-2026/talk_v3.tex`
 - **Analysis scripts**: `experiments/energy-inference/scripts/multi-block-ablation/`
   - `analyze_boltz_moe_routing_20260428.py` — routing collapse curves from training logs
   - `analyze_boltz_expert_specialization_20260429.py` — basic PCA/heatmaps (60 samples)
