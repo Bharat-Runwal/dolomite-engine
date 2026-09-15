@@ -878,10 +878,24 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         logits_hat = self._logits(E_hat)
 
         if self.training and self.proxy_loss_coef > 0:
-            tgt = F.softmax(logits.detach(), dim=-1)
+            # PER-TOKEN normalisation. F.kl_div(reduction="batchmean") divides by dim 0
+            # ONLY, so on a (batch, seq, K) tensor it sums over seq*K and divides by
+            # batch -- inflating the loss by the sequence length. Measured: aux_loss
+            # 29.47 against an lm_loss of 7.52 at seq=4096, i.e. the proxy term was ~4x
+            # the language model. Flattening to (tokens, K) first makes batchmean a true
+            # per-token mean, so the term is O(proxy_loss_coef).
+            #
+            # This mattered for more than cosmetics. The proxy input is detached, so the
+            # proxy cannot reshape the backbone through the graph -- but the trainer
+            # clips on the GLOBAL grad norm (gradient_clipping: 1), and the proxy's
+            # parameters are in model.parameters(). An inflated proxy gradient therefore
+            # raises the global norm and scales the BACKBONE gradients down. Detaching
+            # blocks the graph path; it does not decouple the optimizer.
+            flat_hat = logits_hat.reshape(-1, self.n_experts)
+            flat_tgt = F.softmax(logits.detach().reshape(-1, self.n_experts), dim=-1)
             add_aux_loss(
                 self.proxy_loss_coef
-                * F.kl_div(F.log_softmax(logits_hat, dim=-1), tgt, reduction="batchmean")
+                * F.kl_div(F.log_softmax(flat_hat, dim=-1), flat_tgt, reduction="batchmean")
             )
 
         if self.track_load and self.training:
