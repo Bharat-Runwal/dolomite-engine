@@ -504,6 +504,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         cos_probe_pairs: int = 8,
         repulsion_space: str = "output",
         sinkhorn_iters: int = 0,
+        repulsion_tensor_idx: bool = False,
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -586,6 +587,39 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         self._all_pairs: list[tuple[int, int]] = list(
             itertools.combinations(range(self.n_experts), 2)
         )
+
+        # ------------------------------------------------------------------ #
+        # TENSOR-INDEXED REPULSION SAMPLING (2026-09-15)                      #
+        # ------------------------------------------------------------------ #
+        # WHY. `_sample_pairs` uses `random.sample`, and the resulting PYTHON LISTS are
+        # used to index tensors. dynamo cannot trace Python's `random` ("Attempted to
+        # call function marked as skipped") and it specialises on the list VALUES, so
+        # every new draw is a new graph. Measured with dynamo.explain at K=8:
+        #     looped, no repulsion : 1 graph,  0 breaks,  1 frame  / 8 calls
+        #     looped + repulsion   : 4 graphs, 3 breaks, 17 frames / 8 calls
+        #     fused,  no repulsion : 1 graph,  0 breaks,  1 frame
+        #     fused + repulsion    : 3 graphs, 2 breaks, 17 frames
+        # So the FUSED GEMM is compile-clean and REPULSION is what breaks the graph --
+        # in the existing looped path too. Past dynamo's cache-size limit that region
+        # falls back to eager, a standing performance loss, and it is the leading
+        # suspect for why `fused_experts` wedged a 2-node job.
+        #
+        # FIX. Draw with torch RNG into a TENSOR of pair indices. Tensor indices are
+        # DATA, not graph constants, so there is nothing to specialise on and nothing to
+        # recompile. Bonus: torch RNG is restored by activation checkpointing where
+        # Python's `random` is not, so the forward and its recompute finally draw the
+        # SAME pairs -- fixing a pre-existing inconsistency where the repulsion gradient
+        # was computed against different pairs than the forward loss.
+        #
+        # DEFAULT OFF: it changes which pairs are drawn, so existing runs stay
+        # bit-identical. Enable per config alongside `fused_experts`.
+        self.repulsion_tensor_idx = bool(repulsion_tensor_idx)
+        if self.repulsion_tensor_idx:
+            self.register_buffer(
+                "_pairs_t",
+                torch.tensor(self._all_pairs, dtype=torch.long).reshape(-1, 2),
+                persistent=False,
+            )
 
         # ------------------------------------------------------------------ #
         # INTERMITTENT REPULSION (2026-09-15)                                #
@@ -994,8 +1028,13 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # looped path never hit this (its cos is always (N, n_pairs)). Cost is
         # 2*n_pairs=8 expert back-projections instead of <=8 unique: same work,
         # shape-stable.
-        ei = pref * torch.einsum("npi,pih->nph", g[:, i_idx, :], Wv[i_idx])
-        ej = pref * torch.einsum("npi,pih->nph", g[:, j_idx, :], Wv[j_idx])
+        if torch.is_tensor(i_idx):
+            gi, gj = g.index_select(1, i_idx), g.index_select(1, j_idx)
+            Wi, Wj = Wv.index_select(0, i_idx), Wv.index_select(0, j_idx)
+        else:
+            gi, gj, Wi, Wj = g[:, i_idx, :], g[:, j_idx, :], Wv[i_idx], Wv[j_idx]
+        ei = pref * torch.einsum("npi,pih->nph", gi, Wi)
+        ej = pref * torch.einsum("npi,pih->nph", gj, Wj)
         cos = (F.normalize(ei, dim=-1) * F.normalize(ej, dim=-1)).sum(-1)
         add_aux_loss(self._repulsion_coef_now() * _repulsion_penalty(cos, self.repulsion_form))
 
@@ -1021,7 +1060,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         j_idx = [p[1] for p in sampled]
         if W is None:
             eg = eg_or_gated.reshape(-1, self.n_experts, self.hidden_size)
-            ei, ej = eg[:, i_idx, :], eg[:, j_idx, :]
+            ei, ej = eg[:, i_idx, :], eg[:, j_idx, :]  # probe is no_grad; lists are fine
         else:
             K, I_e = self.n_experts, self._expert_I
             Wv = W.view(K, I_e, self.hidden_size)
@@ -1172,8 +1211,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             W = torch.cat([e._W_slice() for e in self.experts], dim=0)
         Wv = W.reshape(self.n_experts, -1)
         i_idx, j_idx = self._sample_pairs()
-        a = F.normalize(Wv[i_idx].float(), dim=-1)
-        b = F.normalize(Wv[j_idx].float(), dim=-1)
+        if torch.is_tensor(i_idx):
+            wi, wj = Wv.index_select(0, i_idx), Wv.index_select(0, j_idx)
+        else:
+            wi, wj = Wv[i_idx], Wv[j_idx]
+        a = F.normalize(wi.float(), dim=-1)
+        b = F.normalize(wj.float(), dim=-1)
         cos = (a * b).sum(-1)
         add_aux_loss(self._repulsion_coef_now()
                      * _repulsion_penalty(cos, self.repulsion_form).to(W.dtype))
@@ -1202,7 +1245,14 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         return self.repulsion_coef
 
     def _sample_pairs(self):
+        """Return (i_idx, j_idx). Python lists by default (bit-identical to every
+        trained run); TENSORS when `repulsion_tensor_idx` is set, which keeps the
+        indices out of the dynamo graph as constants. See the __init__ note."""
         k = min(self.n_repulsion_pairs, len(self._all_pairs))
+        if self.repulsion_tensor_idx:
+            sel = torch.randint(self._pairs_t.shape[0], (k,), device=self._pairs_t.device)
+            ij = self._pairs_t.index_select(0, sel)
+            return ij[:, 0], ij[:, 1]
         sampled = random.sample(self._all_pairs, k)
         return [p[0] for p in sampled], [p[1] for p in sampled]
 
@@ -1213,7 +1263,9 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         eg = expert_grads.reshape(-1, self.n_experts, self.hidden_size)
         eg_norm = F.normalize(eg, dim=-1)
         i_idx, j_idx = self._sample_pairs()
-        cos = (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1)
+        cos = (eg_norm.index_select(1, i_idx) * eg_norm.index_select(1, j_idx)).sum(-1) \
+            if torch.is_tensor(i_idx) else \
+            (eg_norm[:, i_idx, :] * eg_norm[:, j_idx, :]).sum(-1)
         add_aux_loss(self._repulsion_coef_now() * _repulsion_penalty(cos, self.repulsion_form))
 
     def pop_load_metrics(self) -> dict[str, float] | None:
@@ -1552,6 +1604,7 @@ def build_boltzmann_moe(
     repulsion_space: str = "output",
     e_sign_override: str | None = None,
     sinkhorn_iters: int = 0,
+    repulsion_tensor_idx: bool = False,
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -1640,5 +1693,6 @@ def build_boltzmann_moe(
         cos_probe_pairs=cos_probe_pairs,
         repulsion_space=repulsion_space,
         sinkhorn_iters=sinkhorn_iters,
+        repulsion_tensor_idx=repulsion_tensor_idx,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)

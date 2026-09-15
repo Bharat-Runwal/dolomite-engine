@@ -353,6 +353,15 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   LOCAL per-rank batch -- see ROUTING_SIGN_BUG_20260915.md.
     #   Mutually exclusive with balance_rate: both solve the same constraint.
     sinkhorn_iters: int = 0
+    # repulsion_tensor_idx: draw the repulsion pair indices with torch RNG into a TENSOR
+    #   instead of Python `random` into lists. dynamo cannot trace Python random and
+    #   specialises on the list values, so repulsion currently costs 2-3 graph breaks and
+    #   ~17 recompiles per 8 calls -- in the EXISTING looped path too, and it is the
+    #   leading suspect for the fused_experts multi-node hang. Tensor indices are data,
+    #   not graph constants. Also makes activation-checkpoint recompute draw the SAME
+    #   pairs as the forward (torch RNG is restored, Python's is not). Default OFF
+    #   because it changes which pairs are drawn.
+    repulsion_tensor_idx: bool = False
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).
     track_load: bool = True

@@ -145,8 +145,16 @@ model_args:
         # ---- the corrected variant ----
         e_sign_override: "pos"
         sinkhorn_iters: 3
-        cos_probe_interval: 20
-        cos_probe_pairs: 8
+        # repulsion_tensor_idx: REQUIRED here. Repulsion's Python-`random` index lists
+        # cost 3 dynamo graph breaks and ~17 recompiles per 8 calls; the first attempt at
+        # this arm (job 1666288) STALLED multi-node for 13+ min with zero inductor cache
+        # writes -- the fused_experts signature. Tensor indices remove the breaks.
+        repulsion_tensor_idx: true
+        # cos_probe DISABLED: `_cos_probe_fires` calls Tensor.item(), which is an
+        # unconditional graph break ("consider capture_scalar_outputs"). It is pure
+        # diagnostics and not worth a break in a multi-day run. Re-enable only on
+        # single-node probes.
+        # cos_probe_interval: 20
         # fused_experts REVERTED 2026-09-15. It is exact and 1.61x on a 4-GPU
         # SINGLE-NODE probe, but at the production shape (16 GPU / 2 NODES) the job
         # wedged: 17+ min with zero inductor cache writes and no first step, against

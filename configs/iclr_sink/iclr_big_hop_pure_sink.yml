@@ -1,0 +1,151 @@
+# CORRECTED-SIGN + SINKHORN RERUN of iclr_big/iclr_big_hop_pure (2026-09-15).
+#
+# The paper will report the CORRECTED model, so every EnergyFF_BoltzmannMoE arm in the
+# grid is rerun with the routing sign fixed and balance supplied by the exact dual.
+# Changes from the original, and ONLY these:
+#   e_sign_override: "pos"     the original ANTI-ROUTES (selects the worst-matching
+#                              experts, 0.62x average overlap) -- ROUTING_SIGN_BUG_20260915.md
+#   temperature: 1.0           0.35 was calibrated UNDER the inverted sign; 1.0 is what
+#                              the tau x balance sweep selected (T5) and 134M M3 validated
+#   sinkhorn_iters: 3          exact chemical-potential balancing, no clamp, no gain
+#   repulsion_tensor_idx: true REQUIRED: repulsion's Python-random index lists cost 3
+#                              dynamo graph breaks and ~17 recompiles per 8 calls, and
+#                              stalled a 2-node job for 13 min. Tensor indices: 1 graph,
+#                              0 breaks. NOT optional on a long run.
+#   save_interval: 1000        REQUIRED on preemptable: at 5000 an arm can be preempted
+#                              before ever reaching a checkpoint and make ZERO net
+#                              progress (observed on two pure-GPT baselines, 28 and 27
+#                              submissions with nothing to show).
+# NOT changed: architecture, tokens, steps, LR schedule, seed -- so these are directly
+# comparable to the originals at matched steps.
+#
+# NOTE cos_probe is deliberately absent: `_cos_probe_fires` calls Tensor.item(), an
+# unconditional graph break. Diagnostics only; use it on single-node probes.
+# 8-GPU (2026-09-13): ga 16->8 so 8 GPU x mbs1 x ga8 x 4096 = same tokens/step.
+# OOM FIX (2026-09-13): first attempt OOM'd on 80GB (tried to alloc 3.06 GiB with
+# ~1.9 GiB free). At d=1024 with I_e=17920 the per-expert activations at
+# micro_batch_size=4 x 4096 tokens do not fit. Reduced to mbs=1 / ga=16, which
+# holds tokens-per-step identical, and enabled block gradient checkpointing.
+#
+# iclr_big_hop_pure
+#
+# PURE single block, ENERGY router, no GPT layers, ~400M
+#
+# ~400M TIER. d=1024, T=4 iterations, 15000 steps (~15.8B tokens).
+# NOTE T=4 not 8 and 15000 not 30000: at T=8 a 400M single-block model is ~23h/run
+# because the shipped code computes ALL experts densely, so FLOPs ~ I_tot*T. This tier
+# is therefore its own iso-token/iso-depth group and is NOT directly comparable to the
+# 134M T=8 30k-step arms. Compare within the tier.
+#
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [4]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 286720
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 3
+        repulsion_tensor_idx: true
+        activation_function: gelu
+        add_bias: false
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_sink/iclr_big_hop_pure_sink
+  save_interval: 1000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: iclr_big_hop_pure_sink
+
+training_parameters:
+  num_training_steps: 15000
+  eval_interval: 5000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 8
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 1000
+  num_constant_steps: 0
+  num_decay_steps: 15000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0
