@@ -771,3 +771,53 @@ but validated SINGLE-NODE only (it wedged at 2 nodes); repulsion is 17-21% of th
 rather than 2-4% (a units error) and is load-bearing; and the learnable rank-8 proxy
 router reaches 0.942 top-2 agreement while the spectral `||Wx||^2` proxy fails with
 ReLU just as it does with GELU.
+
+### 2026-09-15 (RETRACTION + the real result): SINKHORN breaks PURE-ENERGY stacks
+
+I proposed TWO mechanisms for the pure-energy degradation. Both are now REFUTED by
+measurement. The refutations are the useful part, so they are recorded rather than quietly
+replaced.
+
+**Refuted #1 -- "cross-iteration diversity collapse".** Predicted worse balance in the
+recurrent arm. Its routing metrics are marginally BETTER than the hybrid's (effK 15.93/16 vs
+15.84; max_share 0.0769 vs 0.0733). No collapse.
+
+**Refuted #2 -- "train/eval mu mismatch".** mu was solved under no_grad and applied only when
+`self.training`, so eval ran with mu = 0. That IS real and is now fixed
+(`sinkhorn_persist_mu`), but it is NOT the cause. Post-hoc calibration on held-out training
+data (|mu|max 0.626) then re-evaluation moved `pure_1blk` only
+  Avg11 38.76 -> 38.95   WikiPPL 177.09 -> 175.16
+about 2% of a 107-point perplexity gap.
+
+**The actual result**, from the control pair built for exactly this comparison (two pure-energy
+isoP arms identical but for the balancer) with a hybrid reference:
+
+| variant | Avg11 | WikiPPL |
+|---|---:|---:|
+| PURE isoP published (inverted sign) | 40.14 | 61.45 |
+| PURE isoP corrected + SINKHORN | 36.16 | **316.21** |
+| PURE isoP corrected + CLAMPED bias | **41.49** | 61.65 |
+| HYBRID K16 corrected + SINKHORN | 43.50 | 40.71 |
+
+**The corrected SIGN is fine on pure-energy stacks.** With clamped balancing it matches the
+published perplexity (61.65 vs 61.45) and BEATS published Avg11 by 1.35pp. **SINKHORN is what
+breaks them** (PPL 316 vs 61), and since applying mu at eval does not help, the damage is to the
+TRAINED WEIGHTS, not to inference.
+
+**Hypothesis, explicitly untested.** Sinkhorn re-solves mu on every forward CALL. A pure stack
+calls the shared block 8x per forward, so routing is re-tilted differently at each iteration AND
+each batch -- batch-dependent noise injected into what is meant to be a recurrent fixed-point
+iteration. The clamped bias is a slowly-updated persistent buffer: one tilt, everywhere. Hybrids
+are protected because only 1 block of 7 is a MoE and six GPT layers stabilise the residual.
+Discriminating test: a pure arm with Sinkhorn but mu FROZEN after warmup.
+FREE CONFIRMATION PENDING: `pure_hop_T12_sink` is also a pure stack (num_layers 1) with sinkhorn,
+at 23000/30000. It should show the same blowup; if it does not, this hypothesis is wrong too.
+
+**CONSEQUENCES, including one that corrects advice already given:**
+1. The paper's pure-energy rows should use the CLAMPED variant -- a BETTER result than published,
+   not a worse one.
+2. **Sinkhorn is for HYBRIDS.** Do not recommend it for pure-energy / recurrence-heavy stacks
+   until the mechanism is understood. Earlier guidance for colleagues' reruns called sinkhorn
+   sound in general; that was too broad.
+3. `sinkhorn_persist_mu` stays -- train/eval consistency is right on its own merits -- but must
+   not be described as fixing the pure-energy problem.
