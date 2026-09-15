@@ -291,8 +291,12 @@ while true; do
         # name exists, adopt its jid into the state file and skip the resubmit entirely.
         # 2026-09-15: SSUSP/USUSP/PSUSP ADDED. They were missing, and on the preemptable
         # queue that is a live duplicate-submission bug: LSF preempts by SUSPENDING
-        # (SSUSP, "preempted by a higher priority job"), the job KEEPS its allocation and
-        # resumes by itself, but this guard did not count it as live. So a preempted arm
+        # (SSUSP, "preempted by a higher priority job"). OBSERVED behaviour here is
+        # SSUSP -> PEND, i.e. it is then REQUEUED and loses its allocation (it does NOT
+        # resume in place, so the run restarts from the last checkpoint -- which is why
+        # save_interval must be 1000 on this queue). PEND was already accepted below; the
+        # hole was the SSUSP window itself, during which the job is alive, still holds its
+        # jid, and must NOT be duplicated. So a preempted arm
         # plus a stale/missing state line => "dead" => a DUPLICATE submitted onto the same
         # save_path, which is exactly the over-quota TERM_OWNER loss described above. The
         # main liveness switch already accepted SSUSP|USUSP; only this guard disagreed.
