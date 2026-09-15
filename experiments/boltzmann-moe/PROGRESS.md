@@ -821,3 +821,43 @@ at 23000/30000. It should show the same blowup; if it does not, this hypothesis 
    sound in general; that was too broad.
 3. `sinkhorn_persist_mu` stays -- train/eval consistency is right on its own merits -- but must
    not be described as fixing the pure-energy problem.
+
+### 2026-09-15 (RESOLVED): it IS the train/eval mu transition, measured directly
+
+The retraction two entries above was WRONG, and the reason was the test, not the hypothesis.
+Two measurements settle it.
+
+**1. word_perplexity was inflating the effect size.** `word_perplexity = exp(bits_per_byte *
+3.7066)` reproduces every arm to 0.00% (the constant is ln2 * bytes_per_word ~ 5.35 for
+wikitext). So a 1.55x regression in bits/byte reads as a 7.8x one in word_ppl:
+
+| arm | iters | word_ppl | bits/byte |
+|---|---:|---:|---:|
+| hybrid K16 + sinkhorn (1 MoE of 7) | 6 | 40.71 | 1.0000 |
+| PURE isoP + clamped | 8 | 61.65 | 1.1119 |
+| PURE big + sinkhorn | 4 | 103.78 | 1.2524 |
+| PURE 1blk + sinkhorn | 8 | 177.09 | 1.3966 |
+| PURE isoP + sinkhorn | 8 | 316.21 | 1.5530 |
+
+**Report bits/byte, not word_perplexity**, for cross-model comparison at this scale. Describing
+316 vs 62 as the effect overstated it; the real regression is 1.112 -> 1.553 bits/byte.
+
+**2. The discontinuity is the train->eval MODE switch, on identical data.** CE on the SAME
+held-out web batches (`eval_mode_vs_data_20260915.py`), so no dataset or metric confound:
+
+| arm | train CE | eval CE | delta |
+|---|---:|---:|---:|
+| PURE isoP + sinkhorn | 3.4088 | **4.9959** | **+1.587** |
+| PURE isoP + clamped | 3.3360 | 3.3365 | +0.0005 |
+| HYBRID K16 + sinkhorn | 2.9454 | 2.9486 | +0.0032 |
+
+Loader reported no missing/unexpected keys on any arm, so nothing was half-initialised. The
+pure+sinkhorn arm loses **1.59 nats purely from switching mode**, while the arm whose balancing
+is a persistent buffer loses 0.0005 and the hybrid 0.003. That is the mu tilt disappearing at
+eval, and it scales with how much of the network depends on it: all 8 iterations for a pure
+stack, 1 block of 7 for a hybrid.
+
+CONCLUSION. Sinkhorn does not damage training -- pure+sinkhorn trains to CE 3.41, slightly
+BETTER than pure+clamped at 3.34 on the hybrid's scale... in fact essentially the same. It
+damages INFERENCE, by evaluating a router that was trained tilted with no tilt at all. The fix
+is the per-iteration mu buffer; the target is to recover the 1.587 nats.
