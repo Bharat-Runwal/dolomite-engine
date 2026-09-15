@@ -155,3 +155,90 @@ sweep — `e_sign_override: pos` x `temperature in {0.35, 1.0, 3.0}` x
 and whether the no-load-balancing claim survives.
 
 Do NOT restate the paper's routing-health results until this is settled.
+
+---
+
+# PRINCIPLED REFRAMING: load balancing is a CHEMICAL POTENTIAL, not an auxiliary loss
+
+Proposed 2026-09-15 in response to "I want to convert this accidental finding into a
+principled approach". This is **theory plus a testable prediction**, not a measured
+result — the sweep (`tb_T2..T5`) is the test.
+
+## The derivation
+
+The Boltzmann weights are not an arbitrary choice: `p_k ∝ exp(E_k/tau)` is exactly the
+solution of the entropy-regularised assignment problem
+
+    max_p  sum_k p_k E_k  +  tau H(p)
+
+i.e. the softmax IS the entropy-regularised argmax. Now impose load balance as a
+constraint on the batch-marginal occupancy rather than as a penalty:
+
+    subject to   sum_{tokens} p_k(x)  ~  N/K   for every k
+
+Introducing a Lagrange multiplier `mu_k` for that constraint gives
+
+    p_k  ∝  exp( (E_k - mu_k) / tau )
+
+In statistical mechanics `mu_k` is a **chemical potential**: the quantity conjugate to
+occupancy, and the thermodynamically standard way to constrain an average particle
+number. It is a dual variable, not a loss term.
+
+## Why this is the right frame for THIS paper
+
+- It uses the vocabulary the paper is already built on (Boltzmann weights, partition
+  function, free energy `E_total = -tau LSE_k(E_k/tau)`). Balancing becomes another
+  thermodynamic quantity rather than an imported MoE heuristic.
+- **It strengthens rather than concedes the "no auxiliary loss, no gate parameters"
+  claim.** `mu_k` has no gradient pathway and introduces no learned gate — exactly the
+  property `load_balance_bias` was implemented with (and the reason the existing code
+  comment argues the claim survives it).
+- It cleanly separates two roles that the sign bug had collapsed into one:
+  **`E_k` decides which expert FITS; `mu_k` decides how CROWDED it is.**
+
+## The accident, re-read
+
+Anti-routing (the inverted sign) is a **fixed, crude chemical potential**. "Prefer the
+expert you match least" is a static proxy for "prefer the expert that is
+under-occupied" — the two correlate, because under-used experts tend to be poorly
+matched, which is why routing stayed balanced for the whole project. But it buys
+balance by inverting the SELECTION, which destroys what the router is for (measured:
+the FF branch was 20-100x weaker). The chemical potential achieves the same balance
+without touching the selection.
+
+So the finding converts from "we had a bug that accidentally helped" into "the
+balance property has a derivation, and the bug was implementing a degenerate case
+of it".
+
+## Testable prediction (this is what tb_T2..T5 measures)
+
+Corrected sign + adaptive `mu_k` should keep **both**:
+- the FF-branch revival (from correct `E_k`): `ffwd/output_norm` ~ 10, not ~0.03
+- the load balance (from `mu_k`): `load_effective_n_experts` back toward S1's 4-8,
+  not S2's 1.0-2.3
+
+If T4/T5 (`balance_rate: 0.001`) show that combination, the reframing is supported and
+the paper can state balance as a constrained-variational result. If `mu_k` saturates
+at the +-1.0 `_BIAS_MAX` clamp without restoring `effK`, the bias is too weak for
+K=32 and needs a larger clamp or a Sinkhorn-style exact normalisation instead.
+Watch `load_bias_absmax` for exactly that.
+
+## Two orthogonal refinements
+
+- **Sinkhorn** enforces the marginal EXACTLY (a few normalisation sweeps; the
+  canonical ensemble), where the adaptive bias tracks it approximately (grand
+  canonical, `mu` estimated online). The bias is cheaper and needs no inner loop; the
+  Sinkhorn version is the one to reach for if the bias proves too soft.
+- **Deterministic annealing on tau** is a separate lever: large `tau` gives
+  near-uniform occupancy for free. Plausibly the inverted sign was ALSO mimicking
+  this, since the Hopfield energy scale left `E << tau` (HANDOFF 7.4). `tb_T2/T3`
+  separate the tau effect from the `mu` effect.
+
+## What is NOT claimed here
+
+That the corrected router is better for quality. Across 300 steps the sign made no
+resolvable difference to `lm_loss` (mean delta +0.006 to +0.013 against a 0.038
+noise floor), consistent with 7.5's finding that deleting the FF branch entirely
+moved perplexity by +0.0003. At this scale the branch is not load-bearing for the LM
+loss in either sign. The chemical-potential frame is a claim about the ROUTING
+MECHANISM being principled, not yet about it winning.
