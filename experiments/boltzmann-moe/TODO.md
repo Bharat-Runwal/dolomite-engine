@@ -164,6 +164,72 @@ Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
       baseline gap), `iclr_balance/pure_hop_isoP_bal`, and the two live
       `iclr_scale/scale32B_*` arms. Skipped: `pure_hop_isoP_bal_DIVERGED_*`.
 
+## 2026-09-15: IF WE ADOPT SINKHORN, THE PAPER'S MODEL CLAIMS MUST BE CORRECTED
+
+- [ ] **Correct every model/routing claim in the ICLR draft if the Sinkhorn variant
+      becomes the reported model.** The adopted config differs from every trained arm in
+      the paper on THREE axes: routing sign (`e_sign_override: pos`), temperature
+      (1.0 vs 0.35), and balancing (`sinkhorn_iters: 3`). Specifically:
+      * **`sec/theory.tex`** — add the exact derivation: `p_k ∝ exp(E_k/tau)` is the
+        entropy-regularised argmax, and load balance is the DUAL of a capacity
+        constraint, i.e. a chemical potential `p_k ∝ exp((E_k - mu_k)/tau)`. This is
+        needed in the MAIN paper, not just the appendix, because it changes what the
+        routing rule IS.
+      * **`app:eval` / `app:routing` / `app:collapse`** — the routing-health numbers
+        (effective experts 12.3-12.8 of 16, max share 0.17-0.18) were all measured under
+        the INVERTED sign. Re-measure or relabel.
+      * **`tab:threeway` / `sec:balance`** — "no gate parameters and no load-balancing
+        loss" survives literally (the chemical potential has no gradient pathway and no
+        learned gate) but "the energy supplies for free what a learned router must be
+        regularised to maintain" does NOT: balance now comes from an explicit dual
+        variable. Rewrite as balance-as-constrained-variational-result.
+      * **`app:degenerate`** — the `routing_norm: zscore` patch exists because the
+        Hopfield energy scale is arbitrary. If we also weight-normalise the energy the
+        patch is retired; note whichever we ship.
+      * Every `Avg11` number in the paper is from an INVERTED-sign checkpoint. Adopting
+        the corrected variant means the whole grid would need re-running before those
+        tables describe the shipped model. **Decide explicitly whether the paper reports
+        the shipped (inverted) model or the corrected one — do not mix.**
+      Refs: `ROUTING_SIGN_BUG_20260915.md`, `HANDOFF.md` §11.
+
+      **DECIDED 2026-09-15: the paper reports the CORRECTED model.** The rerun is
+      LAUNCHED — 14 arms, `configs/iclr_sink/*_sink.yml`, jobs 1667233-1667246, on
+      preemptable with `save_interval: 1000`, watchdog-tracked, plus the 400M
+      `scale32B_boltz_sinkhorn` (1667174). Every arm carries
+      `e_sign_override: "pos"` + `temperature: 1.0` + `sinkhorn_iters: 3` +
+      `repulsion_tensor_idx: true`, and no `cos_probe_interval`.
+
+      **Scope is 14 arms, not 22.** Two classes need NO rerun and keep their numbers:
+      the 11 learned-gate / Switch arms (`TopK_Energy_MoE_MLP`, `MoE`) have no energy
+      sign, and the 6 legacy `BoltzmannMoE_Energy_MLP` arms (`w1w2_K32_top2`,
+      `iclr_w1w2_K16_top2`, 4x `iclr_seeds/iclr_boltz*`) already route CORRECTLY --
+      that class is the one the composable refactor mis-copied. So `tab:frontier`'s
+      w1w2 rows, all Switch rows and the `iclr_seeds` replicates stand as published.
+
+      **TRAP for whoever regenerates configs: the sign fix is direction-dependent.**
+      Measured overlap(chosen)/overlap(avg): hopfield default `neg` = 0.68 (worst-match),
+      override `"pos"` = 1.42 (best-match); composable w1w2 default `pos` = -69.2
+      (worst-match), override `"neg"` = +70.2. A blanket `"pos"` is correct for hopfield
+      and a SILENT NO-OP for composable w1w2. All 14 launched arms are hopfield.
+
+      **Do not judge a rerun arm's balance before ~step 600** -- effK dips to 8-13
+      first (see the transient table in `PROGRESS.md`).
+
+- [ ] **True sparsity is NOT implemented** (never was). `top_k` is a post-hoc MASK: all
+      K experts' forward AND back projections are computed, then multiplied by a `p` that
+      is zero for K-k of them. Two separable pieces:
+      * **back-projection** — needs no router (p is known by then), ~13-15% of the step.
+        Requires capacity-based dispatch (gather -> one bmm -> scatter-add); the NAIVE
+        grouped-loop form was measured at **0.59x, i.e. SLOWER**, so this is a real
+        kernel task, not a flag.
+      * **forward projection** — cannot be skipped by the exact router at all, since it
+        needs all K energies to decide (the `1/2(1+k/K)` floor, "cannot beat 2x"). Needs
+        the proxy router (measured 0.942 top-2 agreement at r=8). This is the big one:
+        it cuts the **61% elementwise** bucket ~16x, not just GEMM.
+      **Do NOT block the 400M Sinkhorn run on this.** Sinkhorn is +0.46%, so the run is
+      already ~as fast as the current 400M arm; sparsity is a separate multi-hour change
+      with real bug risk (see the activation-checkpointing failure in ACCEL_FINDINGS).
+
 ## After Mon 2026-06-01 talk
 
 ### A/B test: tanh_exact φ' (DONE — surprising negative result, follow-up needed)

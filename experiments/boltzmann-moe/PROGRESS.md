@@ -619,6 +619,38 @@ confirms the clamp was the binding constraint. Trends: the shipped arm's balance
 **degrades** (effK 19.9 -> 5.7) while both balanced corrected arms **improve**
 (M2 8.3 -> 13.3, M3 9.4 -> 26.6).
 
+**FINAL 134M NUMBERS, step 1700** (the three arms ran to 1700 before M2/M3 were stopped
+to free GPUs for the 400M; these are the numbers the ICLR appendix `app:sinkhorn`
+quotes, so they need a repo source):
+
+| arm | lm_loss | effK/32 | max_share | E_mean | mu_absmax |
+|---|---:|---:|---:|---:|---:|
+| M1 shipped (INVERTED) | 3.7215 | 7.80 | 0.3066 | 0.3975 | -- |
+| M2 corrected + clamped bias | 3.7393 | 16.31 | 0.0805 | 0.2716 | 1.000 |
+| **M3 corrected + SINKHORN** | **3.7234** | **30.80** | **0.0573** | 0.2286 | 1.97 |
+
+Note the loss ordering CHANGED between step 340 and step 1700: at 340 Sinkhorn had the
+lowest loss, at 1700 the shipped arm is ahead by 0.0019. Both gaps are far inside the
+0.038 replicate noise floor, so **the honest claim is no measurable quality cost, not a
+gain** -- which is what the appendix says. This is the same non-monotone trap that made
+me retract the step-30 tau reading; a 340-step ordering does not survive.
+
+`mu_absmax` FALLING 3.44 -> 1.97 is the load-balancing job getting easier as experts
+specialise: less tilt is needed to keep the marginals uniform. It also means the clamp
+would have stopped binding eventually -- but only after the damage at 340.
+
+**The early effK dip is a transient, not a failure.** Both Sinkhorn arms fall hard
+before recovering, because the experts are still near-identical at init so the dual has
+nothing to separate:
+
+| step | 10 | 30 | 40 | 70 | 200 | 600 | 1000 | 1600 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 134M M3 effK | 31.58 | 18.08 | 8.62 | 12.01 | 22.57 | 29.77 | 30.56 | 30.77 |
+| 400M arm effK | 31.95 | 27.53 | 24.87 | 13.06 | -- | -- | -- | -- |
+
+The 400M is tracing the same shape with a shallower dip (13.06 min vs 8.62) and had
+already turned up by step 80. **Do not read a Sinkhorn arm's balance before ~step 600.**
+
 **ENERGY STABILITY — the feared runaway does not happen.** The energy is evaluated on
 `ln_x = self.ln(x)` (RMSNorm), not the raw residual, so it cannot grow through the
 residual; only `||W||` remains, opposed by `weight_decay 0.1`. Measured
