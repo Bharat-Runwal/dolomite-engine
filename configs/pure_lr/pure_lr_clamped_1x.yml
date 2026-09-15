@@ -1,0 +1,254 @@
+# PURE-ENERGY LEARNING-RATE SENSITIVITY SWEEP (2026-09-15).
+#
+# The pure-energy stack inherited the HYBRID's lr=2e-3 and was never tuned for it. It is a
+# very different optimisation problem: ONE block iterated 8x (layer_iterations [8]) versus
+# 6 GPT layers + 1 energy block iterated 6x, i.e. far greater effective depth per parameter.
+# Measured evidence it is under-converged: the log-log slope of lm_loss over the last half of
+# training is -0.097 (pure) against -0.082 (hybrid) -- the pure arm is still descending
+# FASTER at 30k steps than the hybrid is.
+#
+# All sweep arms share a SHORT schedule (6000 steps, 200 warmup, cosine) so the LRs are
+# directly comparable to each other. They are NOT comparable to the 30k production arms,
+# whose schedule differs; that is why a 1x reference arm is included in the sweep itself.
+#
+# NOTE no `load_args`: these start from scratch, and a load_path pointing at an empty
+# directory is not a resume. The watchdog appends load_args once a checkpoint exists.
+# THIS ARM: lr=2e-3 (clamped_1x), balancer=clamped
+# RENAMED from *_bal_sink: this arm is the CONTROL, not a Sinkhorn arm.
+#
+# It carries `balance_rate: 0.003` (the clamped proportional-control balancer). Stacking
+# `sinkhorn_iters: 3` on top trips the assertion in energy_ff.py:703 -- the two are two
+# solutions to the SAME batch-marginal constraint and enabling both double-counts it. The
+# first generated version DID stack them and would have crashed at model construction;
+# caught while still PEND, before it consumed a start.
+#
+# Rather than zero balance_rate (which would make this a duplicate of
+# iclr_pure_hop_isoP_sink), sinkhorn is turned OFF here, so the arm becomes:
+#     corrected sign + tau 1.0 + CLAMPED proportional control
+# against iclr_pure_hop_isoP_sink's
+#     corrected sign + tau 1.0 + EXACT dual (sinkhorn)
+# i.e. a grid-scale replication of the 134M M2-vs-M3 comparison, differing ONLY in the
+# balancing mechanism. tau is deliberately 1.0 (not the original 0.35) so that stays the
+# single difference.
+# CORRECTED-SIGN + SINKHORN RERUN of iclr_balance/pure_hop_isoP_bal (2026-09-15).
+#
+# The paper will report the CORRECTED model, so every EnergyFF_BoltzmannMoE arm in the
+# grid is rerun with the routing sign fixed and balance supplied by the exact dual.
+# Changes from the original, and ONLY these:
+#   e_sign_override: "pos"     the original ANTI-ROUTES (selects the worst-matching
+#                              experts, 0.62x average overlap) -- ROUTING_SIGN_BUG_20260915.md
+#   temperature: 1.0           0.35 was calibrated UNDER the inverted sign; 1.0 is what
+#                              the tau x balance sweep selected (T5) and 134M M3 validated
+#   sinkhorn_iters: 3          exact chemical-potential balancing, no clamp, no gain
+#   repulsion_tensor_idx: true REQUIRED: repulsion's Python-random index lists cost 3
+#                              dynamo graph breaks and ~17 recompiles per 8 calls, and
+#                              stalled a 2-node job for 13 min. Tensor indices: 1 graph,
+#                              0 breaks. NOT optional on a long run.
+#   save_interval: 1000        REQUIRED on preemptable: at 5000 an arm can be preempted
+#                              before ever reaching a checkpoint and make ZERO net
+#                              progress (observed on two pure-GPT baselines, 28 and 27
+#                              submissions with nothing to show).
+# NOT changed: architecture, tokens, steps, LR schedule, seed -- so these are directly
+# comparable to the originals at matched steps.
+#
+# NOTE cos_probe is deliberately absent: `_cos_probe_fires` calls Tensor.item(), an
+# unconditional graph break. Diagnostics only; use it on single-node probes.
+# ROUTING-COLLAPSE FIX TEST (2026-09-13). iclr_pure_hop_isoP + balance_rate: 0.003.
+#
+# THE DEFECT THIS TARGETS. Auditing checkpoints (scripts/audit_expert_collapse.py) showed
+# the pure single-block arms have COLLAPSED their routing:
+#     iclr_pure_hop_isoP   effective_n_experts 1.38 / 16, max_load 0.994
+#     iclr_pure_hop_1blk   effective_n_experts 2.52 / 16, max_load 0.694
+#     7-block hybrids      effective_n_experts 4.2-4.6 / 16, max_load 0.14-0.26
+# One expert wins 99% of inputs. Verified NOT an expert-width artefact: at identical
+# I_e=1024 the hybrid gives 4.64 and the pure arm 1.45, and within the pure arm the number
+# is flat in I_e (1.454 -> 1.381 from 1024 -> 4480).
+#
+# WHY REPULSION DID NOT PREVENT IT. Repulsion penalises expert-WEIGHT cosine similarity and
+# it works -- cos_mean <= 0.021 with zero dead experts on every arm. Weight diversity simply
+# does not imply routing diversity: the experts stay distinct while one of them wins anyway.
+# The missing mechanism operates in ROUTING space, not weight space.
+#
+# THE MECHANISM. balance_rate > 0 enables DeepSeek-V3-style aux-loss-free balancing: a
+# per-expert additive bias on the routing logits, nudged under no_grad toward under-loaded
+# experts. It is NOT a loss term and adds no gate parameters, so the paper's "no
+# load-balancing loss, no gate params" claim survives. Verified functional in isolation
+# (forcing bias[0]=+5 moves effective_n from 7.76 to 1.005) and verified byte-identical to
+# the unmodified module when balance_rate=0.
+#
+# WHAT THIS ARM ANSWERS. If balancing restores effective_n toward the hybrids' ~4.6 AND
+# closes part of the 0.32-nat single-block deficit, then that deficit is substantially a
+# ROUTING-COLLAPSE problem rather than an inherent limit of single-block recurrence -- which
+# would change the paper's conclusion. If routing balances but the loss does not improve,
+# collapse was a symptom rather than the cause, which is equally worth knowing.
+# Compare against iclr_pure_hop_isoP at matched step.
+# iclr_pure_hop_isoP
+#
+# single recurrent block, NO prefix, ENERGY router, top-2 of 16
+#
+# PURPOSE: attribute the single-block failure. The 2026-09-12 wave had a
+# single-block ENERGY arm at 104.60M that scored 42.94 avg10 / 69.66 ppl vs ~40 ppl
+# for the 134.49M hybrids -- but that comparison was confounded TWICE: it was 22%
+# smaller AND there was no single-block learned-router control. These two arms fix
+# both: identical single-block architecture (num_layers=1, layer_iterations=[8], no
+# GPT prefix), iso-total-param at ~134.5M, iso-token, same k/K=0.125, differing
+# ONLY in router. If BOTH fail, the single-block design is at fault. If only the
+# energy arm fails, energy routing is at fault.
+#
+# iclr_pure_hop_K16_top2_1blk
+#
+# PURE Boltzmann-MoE: NO GPT prefix. ALL parameters live in ONE energy block
+# applied 8x (num_layers=1, layer_iterations=[8]). This is the regime where the
+# MoE is ~99% of per-token FLOPs, so top-k savings are end-to-end rather than
+# diluted by a dense prefix and the lm_head (which cap the hybrid at ~-22%).
+# Hopfield experts K=16 x I_e=2048, top-2 (k/K=0.125), with the 2026-09-12 fixes.
+# Exploratory: also tests whether a single recurrent block trains at all here.
+#
+# energy router, HOPFIELD experts (single W -> 2x experts at iso-param), K=16, top-2 (k/K=0.125)
+#
+# FLOPS-frontier wave (2026-09-12). Backbone FIXED across ALL arms:
+#   d=768, 7 blocks, layer_iterations [1,1,1,1,1,1,6], 12 heads, GPT ffn 2048,
+#   30000 steps = 7.86B tokens, lr 2e-3 cosine. ONLY the MoE block differs.
+# Iso-total-params in the MoE block (12.58M): w1w2 and the learned-router
+#   class use 2*I_tot*d, hopfield uses I_tot*d, so hopfield carries 2x the
+#   experts for the same parameters -> half the k/K at equal top_k.
+# Question: quality vs k/K frontier against a learned-router MoE at each K.
+#
+# h1_boltz_moe_fullsize: direct BoltzmannMoE equivalent of h1_topk_egpt_moe
+# Architecture identical to h1_topk; only the EGPT FFN routing differs:
+#   h1_topk:            TopK_Energy_MoE_MLP  (sparse, learned linear router, load-balance loss)
+#   h1_boltz_fullsize:  BoltzmannMoE_Energy_MLP (soft Boltzmann routing, energy-based router)
+#
+# KEY FIX vs h1_boltz_egpt_moe (existing): full-size experts, NOT iso-param.
+#   OLD (iso-param): intermediate_size=2048 total → 4×512 per expert (tiny, same fail as B-series)
+#   NEW (full-size): intermediate_size=8192 total → 4×2048 per expert (matches h1_topk capacity)
+#
+# This isolates routing mechanism (Boltzmann vs TopK) from expert capacity.
+# Paired with repulsion λ=0.1 (best from B4) to discourage load collapse.
+#
+# Layers 1-6: softmax_attention + standard MLP (int=2048) — GPT prefix
+# Layer 7:    energy_attention  + BoltzmannMoE_Energy_MLP (×6 recurrent)
+#               4 experts × 2048 per expert = 8192 total intermediate
+#
+# Param count: ~145M (same order as h1_topk ~145M)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [8]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 71680   # K=16 x I_e=4480; iso-param with the hybrids
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        balance_rate: 0.003   # 2026-09-13: aux-loss-FREE per-expert logit bias
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 0   # OFF: balance_rate below already solves this constraint
+        repulsion_tensor_idx: true
+        activation_function: gelu
+        add_bias: false
+
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/pure_lr/pure_lr_clamped_1x
+  save_interval: 1000
+  max_to_keep: 2
+
+# NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
+# copying a parent config; only save_path was updated, so every derived arm logged to
+# wandb under the PARENT's name and collided there. Local results under save_path were
+# always correct (that is what the reported numbers come from), but the wandb view was
+# missing or merged. wandb name must equal the config basename.
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: pure_lr_clamped_1x
+
+training_parameters:
+  num_training_steps: 6000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 200
+  num_constant_steps: 0
+  num_decay_steps: 5800
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
