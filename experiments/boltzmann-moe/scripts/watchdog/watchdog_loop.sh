@@ -289,8 +289,17 @@ while true; do
         #
         # bjobs by name is authoritative and costs one call. If a RUN/PEND job with this
         # name exists, adopt its jid into the state file and skip the resubmit entirely.
+        # 2026-09-15: SSUSP/USUSP/PSUSP ADDED. They were missing, and on the preemptable
+        # queue that is a live duplicate-submission bug: LSF preempts by SUSPENDING
+        # (SSUSP, "preempted by a higher priority job"), the job KEEPS its allocation and
+        # resumes by itself, but this guard did not count it as live. So a preempted arm
+        # plus a stale/missing state line => "dead" => a DUPLICATE submitted onto the same
+        # save_path, which is exactly the over-quota TERM_OWNER loss described above. The
+        # main liveness switch already accepted SSUSP|USUSP; only this guard disagreed.
+        # Observed within 15 min of putting 14 arms on preemptable
+        # (iclr_hop_K32_top2_sink, preempted by job 1667394).
         live_jid=$(bjobs -noheader -o "jobid stat" -J "$name" 2>/dev/null \
-                   | awk '$2=="RUN"||$2=="PEND"||$2=="PROV"{print $1; exit}')
+                   | awk '$2=="RUN"||$2=="PEND"||$2=="PROV"||$2=="SSUSP"||$2=="USUSP"||$2=="PSUSP"{print $1; exit}')
         if [ -n "$live_jid" ]; then
             log "$name: already in queue as jid=$live_jid ($(bjobs -noheader -o stat "$live_jid" 2>/dev/null | tr -d ' ')); adopting, NOT resubmitting"
             grep -v "^$name " "$STATE" > "$STATE.tmp" 2>/dev/null || true
