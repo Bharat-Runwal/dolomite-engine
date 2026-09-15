@@ -2,23 +2,221 @@
 
 > ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
 >
-> Every "Avg" / "Avg acc" figure below is **`avg9`**: the mean over **nine** tasks
-> with **MMLU EXCLUDED**, and `acc_norm` used on all six tasks that report it
-> (including `sciq`). MMLU was left out of the average because of a dataset
-> installation problem at the time; `race` and `lambada_openai` were also absent
-> (an Arrow/parquet reader bug, fixed 2026-08-03 by pinning `pyarrow>=20`).
+> **CANONICAL (2026-09-14 onward): `Avg11`** — the paper `tab:scaling` recipe and
+> the SAME headline the EGPT-RL / FET colleagues use, so ours are directly
+> comparable. Compute with `experiments/eval_scripts/compute_avg11.py` (recipe
+> matches the colleagues' exactly; the COMPLETE in-repo `math_egptdual` seeds
+> reproduce as Avg11 51.88 / 50.75 — see the provenance note in that script, and
+> the correction below: the earlier "+0.004pp vs 49.35/49.67" claim was on the
+> 9/11-INCOMPLETE step-dirs and has been retracted). Recipe: 11-task unweighted mean — `acc_norm` on
+> {arc_challenge, arc_easy, hellaswag, openbookqa, piqa, sciq}, `acc` on
+> {boolq, copa, winogrande, **race**, **lambada_openai**}; **MMLU (acc) and
+> GSM8K-CoT (flex) reported SEPARATELY**. Source: `EGPT-RL/RESULTS.md:247-249`.
 >
-> The **current** convention (`compute_aggregates.py`, and the FET series in
-> `~/Code/GPT-experiments/projects/EGPT-action/RESULTS.md`) is **`avg10`**: ten tasks
-> with **MMLU INCLUDED**, `acc_norm` on five (`sciq` uses plain `acc`).
+> **Legacy conventions in old tables — never mix with Avg11:**
+> - **`avg9`**: 9 tasks, MMLU excluded, race/lambada absent (pre-`pyarrow>=20` bug,
+>   fixed 2026-08-03). `acc_norm` on all six that report it.
+> - **`avg10`** (`compute_aggregates.py`, now DEPRECATED for headlines): 10 tasks,
+>   MMLU included, race/lambada excluded.
 >
-> **`avg10` is 1.2–2.7pp LOWER than `avg9`** because MMLU sits near chance (~24–28%)
-> at these scales. **Do not put avg9 and avg10 numbers in the same table** — doing so
-> flatters every pre-2026-06 run by roughly 1.5pp.
+> **Avg11 ≈ 3pp BELOW avg10** (race ~0.28 + lambada ~0.23 near chance at our scale);
+> avg10 is 1.2–2.7pp below avg9. **Do not put avg9 / avg10 / Avg11 in one table.**
 >
-> Restated values for every run with a stored eval:
-> `python experiments/eval_scripts/restate_avg9_to_avg10_20260912.py --md`
-> Corrected headline numbers are in `AVG10_RESTATED.md`.
+> Legacy avg9→avg10: `restate_avg9_to_avg10_20260912.py --md` / `AVG10_RESTATED.md`.
+
+## 2026-09-14 — MoE training-step benchmark → repulsion is the cheap win; two-stage is not
+
+Goal: find where the Boltzmann arm's ~6.75 s/step goes vs gptswitch's ~1.34 s/step
+(5.0×), and whether the intermittent-repulsion / proxy-router tricks pay off.
+
+**Benchmark** `scripts/bench_moe_train_step_20260914.py` — fwd+BWD at the exact
+`scale32B_boltz_hop` MoE-block shape (d=1536, K=32 hopfield, I_e=1280, top-2,
+τ=0.35, zscore), 1 GPU, results in `results/router_analysis/bench_moe_train_step_20260914.json`.
+At **N=4096** (production per-GPU tokens = mbs1×seq4096), ms/call fwd+bwd:
+
+| path | ms/call | vs shipped | note |
+|------|---------|-----------|------|
+| shipped (all-K + top-k mask + output repulsion) | 19.29 | 1.00× | as-trained |
+| shipped_norep | 11.70 | **1.65×** | repulsion = **+65%** of the block |
+| two_stage (all-K energy + grouped top-k 2nd matmul) | 32.64 | **0.59× (SLOWER)** | grouped-loop backward |
+| proxy (linear router → top-k, selected-only both matmuls) | 12.65 | 1.52× | no 16× FLOP saving at N=4096 |
+| repulsion marginal | +7.59 | — | single largest MoE-block cost |
+| output repulsion **1-in-10** (amortized) | ~12.46 | **1.55× block** | with magnitude comp |
+| **weight-space** repulsion marginal | +2.20 | — | **3.5× cheaper AND sparse-compatible** |
+
+Findings:
+- **Two-stage is not the lever — it is actively SLOWER in training** (0.48–0.69×
+  across N), because the grouped per-expert loop's backward dominates. Consistent
+  with the existing `project_sparse_boltz_perf` finding. Do not pursue it for the
+  dense arm.
+- **Repulsion is the surprise cheap win.** It is +65% of the MoE block; running it
+  1-in-10 (with magnitude compensation) gives a **1.55× block speedup** at the same
+  time-averaged pressure. This is your "repulsion once in 10 steps, bump magnitude"
+  idea, and the bench confirms it lands.
+- **Proxy needs a fused grouped-GEMM kernel** to matter: at the production token
+  count (4096/call, fixed by mbs1×seq4096; recurrence is sequential) the Python
+  per-expert loop's fixed overhead erases the 16× FLOP saving (only 2.99× at N=8192).
+- **The 5× boltz-vs-gptswitch gap is probably NOT MoE density.** boltz_hop runs
+  block-7 recurrence 6× + energy attention; gptswitch has NO recurrence. Estimated
+  MoE share ≈14% of the step (48 MoE calls/step = 6 recurrence × 8 grad-accum ×
+  19.3ms). **This was an INFERENCE — and Phase B (below) REFUTED it: the dense MoE
+  is not a 14% slice, it dominates. `recurrence × dense-32-expert` compounds.**
+
+**Phase B (a) — profiler config submitted.** `configs/iclr_scale/scale32B_boltz_hop_PROFILE.yml`
+(throwaway: scratch save/wandb, fresh init, 15 steps) enables the engine's built-in
+`TorchProfiler` via `logging_args.torch_profiler_trace_path`; trace →
+`results/profiler/boltz_hop_trace`. Submitted job **1658324** on 4 preemptable GPUs.
+It does NOT touch the headline pair (1647293 boltz_hop / 1647503 gptswitch). The
+active-step trace splits recurrence vs energy-attention vs dense-MoE to confirm the
+~14% MoE estimate before we commit to any kernel.
+
+**Phase B RESULT (2026-09-15).** Job 1658324 completed clean (15 steps, 379 MB
+trace). Parsed with `scripts/parse_profiler_trace_20260915.py` (pure-stdlib, runs on
+the compute node). One optimizer step = **1712.99 ms of GPU kernel time**, one rank.
+By kernel family:
+
+| family | ms | % | what it is |
+|--------|----|----|-----------|
+| **elementwise** | 1045.16 | **61.0%** | per-expert energy `mean(gelu(Wx)²)` (gelu/pow/sigmoid/mean ×3072 each) + MoE combine-add (add ×9385, unary ×14064) + gc-recompute |
+| **GEMM** | 433.42 | **25.3%** | dominated by the I_e=1280 expert projections (see shapes) |
+| attention | 73.43 | 4.3% | cudnn flash fprop 27.6 + bprop 36.5 ms — negligible |
+| copy/memset | 63.50 | 3.7% | cat / fills |
+| reduce/norm | 53.91 | 3.1% | energy `mean`, repulsion `F.normalize` |
+| FSDP_comms | 6.24 | 0.4% | negligible on this shape |
+| triton_fused | 4.44 | 0.3% | |
+
+Matmul shape attribution (top 5, all the **I_e=1280 dense-expert projections**):
+`[4096,1536]@[1536,1280]` 131.5 ms ×4608 · `[1,4096,1536]@[1536,1280]` 134.7 ms
+×3072 · `[4096,1280]@[1280,1536]` 119.8 ms ×4608 · `[1,4096,1280]@[1280,1536]`
+124.0 ms ×3072 · `[1280,4096]@[4096,1536]` 62.9 ms ×3072. The prefix FFN
+(3072/4608/8192-wide) is single-digit ms each, ×96. **The counts decode the cost
+structure exactly:** ×3072 = `32 experts × 6 recurrence × 8 grad-accum × 2` (fwd +
+gc recompute); ×4608 = `…× 3` (fwd + recompute + weight-grad bwd). So the expert
+projections fire **1536× per optimizer step** (32×6×8) before recompute/bwd — the
+dense-32-expert MoE run 6× via recurrence, with gc doubling the forward.
+
+**Verdict — the 5× gap is `recurrence × dense-32-expert`, not repulsion/attn/comms.**
+The ~14% MoE estimate was wrong: both the 61% elementwise AND the 25% GEMM are
+overwhelmingly the dense MoE. gptswitch is cheap because it is top-1 *sparse* with no
+recurrence; boltz computes **all 32 experts' fwd projection + energy every one of the
+6 iterations**, then combines top-2. Attention (4.3%), comms (0.4%), and — at
+whole-step scale — repulsion (~2–4%) are all small.
+
+**Reconciling with the microbench — ⚠ THE ORIGINAL RECONCILIATION BELOW WAS WRONG,
+corrected 2026-09-15.** It read: *"the expert compute fires 1536× while repulsion
+fires ~48×, so repulsion is only ~2–4% of the whole step."* That divides
+48 / 1536 = 3.1%, but the two counts are in **different units**: 1536 counts
+*per-expert projections* (32 experts × 6 recurrence × 8 grad-accum) while 48 counts
+*block calls*, and the bench's 7.59 ms marginal was measured **per block call,
+already covering all 32 experts**. Dividing one by the other double-counts the 32×.
+
+**Correct arithmetic:** 7.59 ms/call × 48 calls = **~364 ms of the 1713 ms step =
+21%**. Independently confirmed by a direct A/B on 4×H100 (arm B, 4 pairs every step,
+1.463 s/step vs arm C, 1-in-10, 1.210 s/step = **17%**). Two methods, 17–21%.
+
+So repulsion IS a headline-sized lever, ~20% of the step — not 2–4%. See
+`ACCEL_FINDINGS_20260915.md` on the `boltz-accel` branch. Generalisable lesson:
+when reconciling a microbench against a whole-step profile, check that the event
+counts are in the same units before taking a ratio; and prefer an A/B with the
+feature disabled, since per-family kernel attribution cannot isolate a cost that is
+spread across a shared bucket (repulsion's `F.normalize` landed in reduce/norm while
+its dominant backward landed in the generic elementwise bucket).
+
+**But intermittent firing is still not the right way to collect it** — measured
+2026-09-15, it buys speed by weakening the regulariser (expert alignment rises
+2.7–4.4×). Prefer **weight-space repulsion**: 2.20 vs 7.59 ms/call in the same
+bench, sparse-compatible, and applicable at full strength every step.
+
+**Also notable:** ~79.5 k kernel launches in a single step (unary ×14064, add ×9385)
+— the dense per-expert path emits a torrent of tiny kernels, so the step is partly
+launch-overhead bound (GPU-busy 1.71 s ≪ the 6.75 s production wall). **Fusing the
+per-expert energy loop into one grouped kernel would cut both the elementwise time
+and the launch overhead** — plausibly a bigger win than any FLOP cut.
+
+**Ranked levers to actually close the gap (biggest first):**
+1. **Sparsify the back-projection.** `[·,1280]@[1280,1536]` (119.8+124.0 ≈ 244 ms
+   GEMM + matched elementwise) is computed for all 32 experts but only top-2 used —
+   15/16 waste. A fused top-k kernel removes most of it. The fwd projection + energy
+   for all 32 stays (routing needs it).
+2. **Rank-r proxy router** (TODO line 28; Hopfield ceiling 96.7% top-1 @ r=16)
+   replaces the all-32 fwd projection `[·,1536]@[1536,1280]` (131.5+134.7 ≈ 266 ms)
+   with an ~80× cheaper low-rank score, then full fwd only for top-2. Together (1)+(2)
+   attack the whole ~510 ms of expert GEMM + its elementwise tail.
+3. **Fuse the per-expert energy loop** (grouped-GEMM + fused gelu²-mean) → cuts
+   elementwise share and the launch-overhead gap.
+4. **Reduce recurrence-× on the MoE / route-once-reuse** — only if routing is stable
+   across the 6 iterations for THIS Hopfield config (TODO line 54 saw 0.87–0.90
+   iter-argmax agreement on the Hopfield line, but flagged it as a degenerate-uniform
+   artifact — must re-verify on the trained scale32B config, not assume).
+5. **Intermittent repulsion (patch b)** — ~2–3% of step; ship it, but it is a
+   rounding error against 1–4.
+
+**Intermittent-repulsion patch (b) — DRAFTED, not applied.**
+`results/router_analysis/intermittent_repulsion_20260914.patch`. Adds config fields
+`repulsion_interval` (default 1 = current behavior, byte-identical) and
+`repulsion_scale_comp` (default true = coef × interval on firing steps) to
+`BoltzmannMoEFFEnergy`; the fire decision is a Bernoulli(1/interval) gate inside
+`_add_repulsion_loss`. Opt-in per config; zero effect on existing/running runs.
+Needs sign-off before it touches model source. Weight-space repulsion is offered as
+the sparse-compatible alternative (cheaper) for a future fused kernel.
+
+## 2026-09-14 — adopted colleague-consistent `Avg11` headline metric
+
+Switched the headline eval metric to **`Avg11`** to match the EGPT-RL / FET
+colleagues (their `tab:scaling` recipe). Why: our old `avg10` averaged MMLU *in*
+and dropped `race`+`lambada_openai`; theirs does the opposite. Averaging 10 while
+they average 11 (different composition) made our numbers look ~3pp better than
+theirs for a pure scoring-convention reason — the same footgun as the documented
+avg9/avg10 gap.
+
+- Nothing was broken: `race`+`lambada` had failed on a pre-`pyarrow>=20`
+  Arrow/parquet bug (fixed 2026-08-03; eval venv now has pyarrow 25.0.0). All 22
+  `iclr_*` runs already have both scored — the deficit was purely in the
+  aggregation script, not the eval run.
+- New canonical aggregator: **`experiments/eval_scripts/compute_avg11.py`**.
+  RECIPE validated against EGPT-RL (task list + metric-per-task identical). NUMBER
+  provenance corrected 2026-09-14: the earlier "reproduces 49.35/49.67 to +0.004pp"
+  was WRONG — those came from the colleague's OWN complete-task eval (not in repo),
+  while the in-repo step-dirs (seed42@16100, seed1234@16200) are 9/11 INCOMPLETE
+  and the script correctly FLAGS them. The COMPLETE final unsharded dirs reproduce
+  in-repo as **Avg11 51.88 (seed42) / 50.75 (seed1234)**. `compute_aggregates.py`
+  is now deprecated for headlines.
+  The script REFUSES to emit a plain "Avg11" if any of the 11 tasks is missing
+  (prints `INCOMPLETE k/11`) so a partial mean can't be mistaken for a real one.
+- Recipe: 11-task unweighted mean — `acc_norm` {arc_challenge, arc_easy,
+  hellaswag, openbookqa, piqa, sciq}, `acc` {boolq, copa, winogrande, race,
+  lambada_openai}; MMLU (acc) + GSM8K-CoT (flex) reported separately.
+
+**ICLR grid restated in Avg11** (latest eval per run; all 22 COMPLETE):
+
+| run | Avg11 | MMLU | GSM_cot | PPL |
+|-----|------:|-----:|--------:|----:|
+| iclr_moebase/iclr_switch_K16_top2 | 44.83 | 24.18 | 1.90 | 40.02 |
+| iclr_flops/iclr_hop_K16_dense | 44.78 | 24.64 | 2.20 | 40.73 |
+| iclr_ctrl/iclr_learn_K16_dense | 44.70 | 24.74 | 2.05 | 39.60 |
+| iclr_gptmoe/gptmoe_last_isoP | 44.43 | 25.17 | 1.90 | 40.76 |
+| iclr_flops/iclr_hop_K32_top2 | 44.38 | 25.17 | 1.82 | 40.59 |
+| iclr_slope/slope90k_hyb | 44.32 | 25.66 | 1.97 | 39.89 |
+| iclr_gptmoe/gptmoe_last_3x | 44.20 | 24.51 | 1.97 | 38.98 |
+| iclr_flops/iclr_hop_K32_top1 | 44.12 | 24.33 | 2.20 | 40.77 |
+| iclr_moebase/iclr_switch_K16_top2_shared | 43.96 | 24.94 | 1.82 | 40.11 |
+| iclr_flops/iclr_hop_K16_top2 | 43.91 | 26.55 | 2.43 | 40.49 |
+| iclr_flops/iclr_learn_K16_top2 | 43.83 | 24.57 | 2.35 | 40.13 |
+| iclr_flops/iclr_w1w2_K16_top2 | 43.83 | 25.49 | 2.27 | 40.00 |
+| iclr_ctrl/iclr_hop_K16_top2_renorm | 43.74 | 24.55 | 2.05 | 40.36 |
+| iclr_flops/iclr_hop_K16_top2_nofix | 43.53 | 25.09 | 1.59 | 42.32 |
+| iclr_moebase/iclr_learn_K16_top2_noLB | 43.12 | 25.07 | 1.67 | 40.08 |
+| iclr_gptmoe/gptmoe_all_isoP | 43.05 | 23.91 | 2.05 | 44.03 |
+| iclr_1blk/iclr_pure_learn_isoP | 41.58 | 24.84 | 1.90 | 57.08 |
+| iclr_gptmoe/pure_hop_T12 | 41.19 | 26.42 | 1.67 | 57.68 |
+| iclr_flops/iclr_pure_hop_K16_top2_1blk | 40.21 | 24.73 | 1.82 | 69.66 |
+| iclr_1blk/iclr_pure_hop_isoP | 40.14 | 25.39 | 2.27 | 61.45 |
+| iclr_big/iclr_big_hop_pure | 40.02 | 24.53 | 1.36 | 69.42 |
+| iclr_big/iclr_big_learn_pure_1node | 39.83 | 24.98 | 1.67 | 61.87 |
+
+(These are mid-run checkpoints; treat as relative ranking, not final.)
+
+---
 
 ## Overview
 
@@ -277,3 +475,93 @@ Cached routing arrays: `experiments/boltzmann-moe/results/routing_cache/routing_
 
 4. **Scale h1_topk**: lift the best h1_topk architecture to d=1024 / 24 layers
    for a direct comparison with V9 GPT at 354M params.
+
+---
+
+## 2026-09-15: ICLR draft migrated avg10 → Avg11 (pushed to Overleaf)
+
+**Decision taken:** the ICLR draft is the active paper and standardises on the
+colleague-consistent **Avg11** (`experiments/eval_scripts/compute_avg11.py`). The NeurIPS
+draft and the talk are archive and stay on avg10 — do not touch them for metric work.
+
+**No GPU re-eval was required.** All 22 `iclr_*` runs already had race + lambada_openai,
+so every cited arm yields a COMPLETE Avg11 by re-aggregation from stored per-task JSON.
+
+**Mapping was pinned by reproducing each `avg10` from source, not by run name** — this
+mattered: `iclr_gptmoe/*` configs declare `model_type: energy` but, with softmax attention
+and no recurrence, they *are* the energy-free plain-stack baseline. Name-based mapping
+would have mislabelled `tab:pure`.
+
+**Headline consequence — the `§sec:pure` claim reversed to parity.** Under avg10 Boltzmann
+led the energy-free transformer by 0.22pp at matched params; under Avg11 the energy-free
+iso-param stack scores **44.43** against **44.38** for Hopfield K=32 — 0.05pp the other
+way. Per user direction the paper now claims **parity** (the slight Boltzmann advantage is
+expected to come from the larger 32B runs, still training). Boltzmann still leads the
+3×-budget stack, 44.38 vs 44.20. Backbone/routing decomposition moved 0.68/0.46 →
+**0.40/0.45**, so the "most of the benefit is the encoder" claim was withdrawn.
+
+**Two documentation bugs found and fixed while migrating:**
+1. The paper's prose described `avg10` as scoring `sciq` with plain `acc`; every stored
+   number in fact used `acc_norm` (plain `acc` would raise each arm ≈0.7pp). Published
+   numbers were self-consistent; the prose was not.
+2. The appendix asserted the energy-free GPT-MoE baselines "are queued / have no numbers
+   yet" while `sec/experiments.tex` already reported them — an internal contradiction.
+   Now updated with the three measured values (44.43 / 44.20 / 43.05).
+
+MMLU and GSM8K-CoT are now **separate columns everywhere**, never in the mean: at 134M
+both are at chance (MMLU 24.2–26.6% vs 25% random; GSM8K-CoT 1.6–2.4%), so averaging them
+in compresses the spread between arms.
+
+Full number-by-number record: **`AVG11_ICLR_MIGRATION.md`**.
+
+---
+
+## 2026-09-15: the seven previously-UNEVALUATED sharded ICLR arms now have Avg11
+
+Driver: **`experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`**
+(`{verify|submit|resubmit|status|report}`). These arms had `global_step*/model/*.distcp`
+shards but **no `unsharded*` dir and no `harness_results_*.json`**, so unlike the 55-arm
+race+lambada top-up they needed the full chain in one 1-GPU job: `lm_engine.unshard` →
+`eval_harness.py` over the full `$EVAL_TASKS` (15 tasks) → `compute_avg11.py`. Because the
+eval scores race + lambada directly, every output json is a **COMPLETE 11/11 Avg11** file
+with no merge step. All 7 jobs succeeded; none failed.
+
+| arm | step / target | Avg11 | MMLU | GSM8K-CoT | WikiPPL |
+|---|---|---|---|---|---|
+| `iclr_scale/scale32B_gptswitch` **FINISHED** | 61035/61035 (32.00B tok) | **50.25** | 25.69 | 2.43 | **25.00** |
+| `iclr_scale/scale32B_gptswitch` (intermediate) | 58000/61035 | 49.70 | 25.55 | 2.27 | 25.25 |
+| `iclr_scale/scale32B_boltz_hop` *(PARTIAL, still training)* | 6000/61035 (9.8%) | 44.64 | 24.11 | 2.05 | 42.30 |
+| `iclr_decide/w1w2_K32_top2` *(PARTIAL)* | 10000/30000 (33%) | 41.63 | 25.23 | 2.20 | 56.00 |
+| `iclr_slope/slope90k_1blk` *(PARTIAL)* | 40000/90000 (44%) | 41.07 | 24.66 | 2.65 | 61.28 |
+| `iclr_balance/pure_hop_isoP_bal` *(PARTIAL)* | 16000/30000 (53%) | 39.79 | 23.37 | 1.74 | 80.27 |
+| `iclr_big/iclr_big_hop_sandwich` *(PARTIAL)* | 4000/15000 (27%) | 39.61 | 23.56 | 1.52 | 78.38 |
+
+**First 400M/32B headline number: `scale32B_gptswitch` = Avg11 50.25 at 25.00 word-PPL.**
+Its Boltzmann partner is only at step ~7000/61035, so the pair is NOT yet comparable —
+32B-scale Boltzmann-vs-Switch remains open.
+
+> ### ⚠ DO NOT QUOTE THE FIVE PARTIAL ROWS AS RESULTS
+> All five yield a task-COMPLETE 11/11 Avg11, which is exactly what makes them easy to
+> misread: task-completeness is not training-completeness. They are undertrained
+> snapshots, not comparable to the finished 30k-step grid.
+>
+> **In particular `w1w2_K32_top2` (41.63) does NOT resolve Hopfield-vs-W1W2.** It sits at
+> a third of the token budget of Hopfield K=32's 44.38, and its PPL 56.00 vs 40.59 reads
+> as undertrained rather than as a worse expert form. The expert-form decision stands
+> unresolved; the arm is still `#PAUSED-20260914` in `watchdog_jobs.conf`.
+
+**Method note — how the two live `iclr_scale` arms were read without touching the trainers.**
+Both were mid-run (LSF 1647293/1647503) with `save_interval: 1000, max_to_keep: 2`;
+gptswitch landed a checkpoint every ~23 min, so its "latest" shard is pruned by the trainer
+within ~45 min — shorter than queue + 4.5 GB unshard. So at 02:12 UTC the completed
+iteration named by each `latest_checkpointed_iteration.json` was **copied** (pure read) to
+`results/iclr_scale_eval_staging/<arm>/global_step<N>/{model,metadata.json,training_config.yml}`,
+which is all `load_checkpoint_and_unshard()` reads (`async_checkpointing: false` ⇒ `model/`
+only, never `optimizer/`). Eval jobs pointed at the staging copy, so no eval job ever opened
+a live training dir. After 1647503 reached its 61035 target and went DONE, that arm's real
+run dir became safe to write and holds the final `unsharded_step61035/`; it is safe from
+pruning because `watchdog_loop.sh:249` marks an arm DONE at `cur_step >= num_training_steps`
+and never resubmits, and pruning only removes `global_step*` dirs.
+
+**SKIPPED:** `iclr_balance/pure_hop_isoP_bal_DIVERGED_unclamped_bias_20260914` — diverged
+(unclamped load-balance bias), not a valid result.
