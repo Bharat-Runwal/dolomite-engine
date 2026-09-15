@@ -91,3 +91,67 @@ stated in the paper.
 Note also: the cheap-router proxy tests run today ranked by LOWEST energy, i.e. they
 faithfully proxy the DEPLOYED (inverted) router. If the sign is corrected, those
 agreement numbers must be re-measured in the corrected direction.
+
+---
+
+# A/B RESULT (early, step 20-30): the sign is confirmed causal — and correcting it collapses routing
+
+4 GPU, 300 steps, identical seed/data/knobs except the routing sign.
+S1 = deployed (`e_sign=neg`, anti-routing). S2 = `e_sign_override: pos` (best-match).
+
+| metric | S1 deployed | S2 corrected | change |
+|---|---:|---:|---|
+| `ffwd/output_norm` | 0.0294 | **3.6562** | **124x larger** |
+| `load_effective_n_experts` (of 32) | 9.18 | **1.03** | collapsed |
+| `ffwd/n_dominant_experts` | 2.0 | **1.0** | a single expert |
+| `ffwd/mean_token_entropy_norm` | 0.1014 | **0.0002** | ~zero |
+| `expert_cos_abs_mean` | 0.1812 | 0.2217 | — |
+| `lm_loss` | 7.79 @ step 30 | 8.02 @ step 20 | not yet matched-step |
+
+## 1. The dead FF branch is CAUSED by the inverted sign — confirmed
+
+HANDOFF 7.5 measured `||ffwd_out|| = 0.0050` against `||attn_out|| = 18.53` and
+concluded "the energy-FF branch is essentially dead", treating it as a property of
+the architecture / energy scale. It is not: correcting the routing sign makes the
+branch **124x stronger** with nothing else changed. Routing to the worst-matching
+experts produced a small incoherent FF contribution, exactly as predicted.
+
+## 2. But the inverted sign was ACCIDENTALLY ACTING AS A LOAD BALANCER
+
+S2 collapses to one expert within 20 steps. The mechanism is a sign flip in the
+feedback loop:
+
+- **Anti-routing (deployed)** is self-LIMITING: the worst-matching expert is
+  selected, receives gradient, becomes better-matched, and therefore stops being
+  selected. Negative feedback -> load spreads on its own.
+- **Correct routing** is self-REINFORCING: the best-matching expert is selected,
+  receives gradient, becomes even better-matched, and is selected more. Positive
+  feedback -> winner-take-all. This is the standard MoE collapse that
+  load-balancing losses exist to prevent.
+
+**This puts a second paper claim at risk.** Not only "the FF branch is dead", but
+the formulation's headline property — *"Boltzmann routing does not collapse and needs
+no gate parameters and no load-balancing loss"* (measured: effective experts
+12.3-12.8 of 16, max share 0.17-0.18) — may hold **only because the sign was
+inverted**, i.e. because anti-routing is inherently self-balancing. The
+correctly-signed router collapses immediately with no balancing.
+
+## 3. Caveats — this is step 20-30, not a verdict
+
+- Early-training collapse sometimes resolves; needs a few hundred steps.
+- `temperature: 0.35` and `routing_norm: zscore` were BOTH tuned under the inverted
+  sign. Under the corrected sign the effective sharpness differs, so tau may simply
+  be too low now.
+- `balance_rate` (the aux-loss-free DeepSeek-V3-style balancing already implemented,
+  default OFF) is available and untested here. The collapse says it is now
+  load-bearing rather than optional.
+
+## 4. The configuration that has never been tested
+
+Corrected sign + retuned temperature (and/or `balance_rate > 0`). Neither the
+paper nor any run has explored it: every arm to date used the inverted sign. A small
+sweep — `e_sign_override: pos` x `temperature in {0.35, 1.0, 3.0}` x
+`balance_rate in {0, 0.001}` — would establish whether the corrected router is usable
+and whether the no-load-balancing claim survives.
+
+Do NOT restate the paper's routing-health results until this is settled.
