@@ -342,6 +342,17 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   GROWS with overlap, so "pos" routes to the BEST-matching experts and the
     #   default "neg" routes to the worst -- see ROUTING_SIGN_BUG_20260915.md.
     e_sign_override: str | None = None
+    # sinkhorn_iters: 0 (default) = off. >0 solves the EXACT dual variables
+    #   (chemical potentials) that equalise expert load, by log-domain Sinkhorn:
+    #       mu <- mu + log(load(mu) * K)
+    #   This is the same constraint `balance_rate` targets, but solved rather than
+    #   controlled -- no +-1.0 clamp to saturate against (both balance_rate arms in
+    #   the corrected-sign sweep pinned at the clamp), no gain to tune, and exact
+    #   rather than lagged. Solved under no_grad, so no gradient pathway and no
+    #   auxiliary loss. TRAIN-ONLY (load is a batch property), and the load is the
+    #   LOCAL per-rank batch -- see ROUTING_SIGN_BUG_20260915.md.
+    #   Mutually exclusive with balance_rate: both solve the same constraint.
+    sinkhorn_iters: int = 0
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).
     track_load: bool = True

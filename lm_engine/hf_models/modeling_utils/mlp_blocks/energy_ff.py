@@ -503,6 +503,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         cos_probe_interval: int = 0,
         cos_probe_pairs: int = 8,
         repulsion_space: str = "output",
+        sinkhorn_iters: int = 0,
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -549,6 +550,21 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # routing of every existing checkpoint, so it must be opted into per config.
         self.track_load = bool(track_load)
         self.balance_rate = float(balance_rate)
+        # ------------------------------------------------------------------ #
+        # ENERGY-MAGNITUDE TRACKING (2026-09-15)                              #
+        # ------------------------------------------------------------------ #
+        # Added because correcting the routing sign creates a POSITIVE FEEDBACK
+        # path that the inverted sign did not have: the block ASCENDS the energy
+        # (out = +grad E), and the corrected router now selects the HIGHEST-energy
+        # experts -- so a step toward the best-matching expert raises its overlap,
+        # which raises its energy, which enlarges the next step. The inverted sign
+        # was self-limiting here too, for the same reason it self-balanced.
+        # `ffwd/output_norm` alone cannot distinguish "the branch finally
+        # contributes" from "the branch is running away", so track the ENERGY scale
+        # directly. Pure tensor ops, no .item(), so it traces under torch.compile.
+        self.register_buffer("_E_abs_sum", torch.zeros((), dtype=torch.float32), persistent=False)
+        self.register_buffer("_E_abs_max", torch.zeros((), dtype=torch.float32), persistent=False)
+        self.register_buffer("_E_n", torch.zeros((), dtype=torch.float32), persistent=False)
         self.register_buffer("_load_sum", torch.zeros(self.n_experts), persistent=False)
         self.register_buffer("_ent_sum", torch.zeros((), dtype=torch.float32), persistent=False)
         self.register_buffer("_tok_sum", torch.zeros((), dtype=torch.float32), persistent=False)
@@ -612,6 +628,51 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # (which always measures output-space) is there to answer.
         assert repulsion_space in ("output", "weight")
         self.repulsion_space = repulsion_space
+
+        # ------------------------------------------------------------------ #
+        # SINKHORN BALANCING (2026-09-15) — the EXACT dual of the capacity     #
+        # constraint, i.e. the chemical potential solved rather than          #
+        # controlled. See ROUTING_SIGN_BUG_20260915.md.                       #
+        # ------------------------------------------------------------------ #
+        # `balance_rate` reaches balance with a PROPORTIONAL CONTROL rule on a
+        # per-expert bias, and in the corrected-sign sweep it worked but sat PINNED
+        # at the +-1.0 `_BIAS_MAX` clamp in every arm (T4, T5) — so it was
+        # delivering its result while saturated, and wanted to push harder. Raising
+        # the clamp is the obvious move and a bad one: the bound exists because an
+        # earlier unclamped sign()-based version reached |bias| = 1482 and
+        # destabilised an arm (loss 4.05 -> 5.18, 77 upward jumps).
+        #
+        # Sinkhorn removes the multiplier entirely. Writing the routing distribution
+        # as p_k ∝ exp((E_k - mu_k)/tau), the mu_k that equalise expert load are the
+        # dual variables of the constraint sum_tokens p_k = N/K, and they are the
+        # fixed point of a log-domain iteration:
+        #     mu <- mu + log(load(mu) * K),   load(mu) = mean_tokens softmax(L - mu)
+        # A handful of iterations converges. There is NO clamp, NO gain to tune, and
+        # the solution is exact rather than lagged.
+        #
+        # THREE PROPERTIES THAT MATTER HERE:
+        #  * Solved under no_grad, so mu is a constant w.r.t. differentiation —
+        #    which is correct for a Lagrange multiplier, and keeps the "no gradient
+        #    pathway / no auxiliary loss" property that `balance_rate` has.
+        #  * Deterministic (no RNG), so activation checkpointing recomputes the
+        #    identical mu and cannot trip the metadata check that the fused
+        #    repulsion did.
+        #  * TRAIN-ONLY. The load is a property of the batch, so applying this at
+        #    inference would make routing depend on batch composition. Gated on
+        #    self.training, which is the standard Sinkhorn-router choice and does
+        #    introduce a train/inference mismatch — see the doc.
+        # APPROXIMATION: the load is the LOCAL (per-rank) batch load. The true
+        # constraint is global across data-parallel ranks; doing it locally avoids a
+        # collective, which is deliberate given the multi-node hang the fused path hit.
+        assert sinkhorn_iters >= 0
+        self.sinkhorn_iters = int(sinkhorn_iters)
+        assert not (self.sinkhorn_iters > 0 and balance_rate > 0.0), (
+            "sinkhorn_iters and balance_rate are two solutions to the SAME constraint "
+            "(exact dual vs proportional control); enabling both double-counts it"
+        )
+        if self.sinkhorn_iters > 0:
+            self.register_buffer("_sink_mu_absmax", torch.zeros((), dtype=torch.float32),
+                                 persistent=False)
         assert repulsion_interval >= 1
         self.repulsion_interval = int(repulsion_interval)
         self.repulsion_scale_comp = bool(repulsion_scale_comp)
@@ -754,6 +815,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # routing energy — same effect, different sign convention.
         p, logits = self._route(E_k)
         self._track_load(p)
+        self._track_energy(E_k)
 
 
         # Aggregate gradients: ∇_h E_total = Σ_k w_k · ∇_h E_k.
@@ -804,6 +866,19 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             if self.renormalize_topk:
                 p = p / p.sum(-1, keepdim=True).clamp_min(1e-9)
         return p, logits
+
+    def _track_energy(self, E_k: torch.Tensor) -> None:
+        """Accumulate the per-expert energy SCALE. See the __init__ note: with the
+        corrected sign the energy sits on a positive-feedback path, so a growing
+        `energy_abs_mean` across training is the divergence warning that
+        `output_norm` cannot give on its own."""
+        if not self.track_load:
+            return
+        with torch.no_grad():
+            e = E_k.detach().float()
+            self._E_abs_sum += e.abs().mean()
+            self._E_abs_max.copy_(torch.maximum(self._E_abs_max, e.abs().max()))
+            self._E_n += 1.0
 
     def _track_load(self, p: torch.Tensor) -> None:
         # Traceable load accounting: tensor ops only, no .item(), no host sync, so this
@@ -864,6 +939,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
         p, logits = self._route(E_k)
         self._track_load(p)
+        self._track_energy(E_k)
 
         if self.proxy_rank > 0:
             self._proxy_step(x, E_k, logits)
@@ -1064,7 +1140,28 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             # Cast to the logits' dtype: the buffer is fp32 while s is bf16 under mixed
             # precision, and the implicit promotion failed during fake-tensor tracing.
             s = s + self.load_balance_bias.to(s.dtype)
-        return s / self.temperature
+        logits = s / self.temperature
+        if self.sinkhorn_iters > 0 and self.training:
+            logits = logits - self._solve_sinkhorn_mu(logits).to(logits.dtype)
+        return logits
+
+    @torch.no_grad()
+    def _solve_sinkhorn_mu(self, logits: torch.Tensor) -> torch.Tensor:
+        """Dual variables (chemical potentials) that equalise expert load.
+
+        Fixed point of the log-domain Sinkhorn iteration
+            mu <- mu + log(load(mu) * K),   load(mu) = mean_tokens softmax(logits - mu)
+        Returned in LOGIT units (the tau division has already been applied), so the
+        caller subtracts it directly. fp32 throughout for numerical headroom under bf16.
+        """
+        L = logits.detach().reshape(-1, self.n_experts).float()
+        mu = torch.zeros(self.n_experts, device=L.device, dtype=L.dtype)
+        for _ in range(self.sinkhorn_iters):
+            load = F.softmax(L - mu, dim=-1).mean(0).clamp_min(1e-9)
+            mu = mu + torch.log(load * self.n_experts)
+        if self.track_load:
+            self._sink_mu_absmax.copy_(mu.abs().max())
+        return mu
 
     def _add_repulsion_loss_weight(self) -> None:
         """Repulsion on expert WEIGHT blocks. No token dimension, so O(1) in N."""
@@ -1150,9 +1247,20 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                     self._proxy_agree_sum / self._proxy_agree_n.clamp_min(1.0)
                 ).item()
                 self._proxy_agree_sum.zero_(); self._proxy_agree_n.zero_()
+            if self._E_n > 0:
+                # energy_abs_mean GROWING across training = the positive-feedback
+                # runaway the corrected sign makes possible. Watch its trend, not
+                # its level.
+                m["energy_abs_mean"] = (self._E_abs_sum / self._E_n.clamp_min(1.0)).item()
+                m["energy_abs_max"] = self._E_abs_max.item()
+                self._E_abs_sum.zero_(); self._E_abs_max.zero_(); self._E_n.zero_()
             m["repulsion_interval"] = float(self.repulsion_interval)
             m["repulsion_n_pairs"] = float(self.n_repulsion_pairs)
             m["repulsion_space_is_weight"] = float(self.repulsion_space == "weight")
+            if self.sinkhorn_iters > 0:
+                # Compare against load_bias_absmax, which pinned at the 1.0 clamp.
+                m["sinkhorn_mu_absmax"] = self._sink_mu_absmax.item()
+                m["sinkhorn_iters"] = float(self.sinkhorn_iters)
             if self.cos_probe_interval > 0 and self._cos_n > 0:
                 m["expert_cos_abs_mean"] = (self._cos_sum / self._cos_n.clamp_min(1.0)).item()
                 self._cos_sum.zero_(); self._cos_n.zero_()
@@ -1443,6 +1551,7 @@ def build_boltzmann_moe(
     cos_probe_pairs: int = 8,
     repulsion_space: str = "output",
     e_sign_override: str | None = None,
+    sinkhorn_iters: int = 0,
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -1530,5 +1639,6 @@ def build_boltzmann_moe(
         cos_probe_interval=cos_probe_interval,
         cos_probe_pairs=cos_probe_pairs,
         repulsion_space=repulsion_space,
+        sinkhorn_iters=sinkhorn_iters,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)
