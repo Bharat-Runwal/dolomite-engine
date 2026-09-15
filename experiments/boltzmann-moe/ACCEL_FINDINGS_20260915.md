@@ -367,7 +367,9 @@ enough to eval downstream.
 
 ## 5. Recommendation
 
-1. **Ship `fused_experts` now** (1.61x, exact, resume-compatible). Unambiguous.
+1. ~~**Ship `fused_experts` now** (1.61x, exact, resume-compatible). Unambiguous.~~
+   **RETRACTED 2026-09-15 — see "MULTI-NODE FAILURE" below.** It is exact and 1.61x
+   at 4 GPU / 1 NODE, and it WEDGES at the production 16 GPU / 2 NODE shape.
 2. **Do not drop repulsion.** R4's alignment is 20-40x worse and rising, and the one
    long-horizon datapoint links alignment to quality.
 3. **Prefer `repulsion_space="weight"` over intermittent firing** to collect the
@@ -471,3 +473,62 @@ precedent for activation swaps here is bad: `tanh_exact` lost 2.2pp avg / +3.4 P
 proxy reached **0.942** top-2 agreement, trained online. The spectral shortcut is
 dead; the learned one works. The gap to true sparsity is the DISPATCH KERNEL, not
 routing accuracy.
+
+
+---
+
+# ⚠ MULTI-NODE FAILURE: `fused_experts` wedges at 16 GPU / 2 nodes (2026-09-15)
+
+**Enabled on the live 400M arm, and it hung. Reverted the same session. The live run
+lost ~20 minutes of wall time and NO trained steps.**
+
+## Evidence it was wedged, not merely slow
+
+| | unfused (pre-flip) | fused |
+|---|---|---|
+| first log line -> first step | **98 s** | **never reached** (17+ min, killed) |
+| inductor cache writes in a 2-min window | — | **0** (of 44220 files) |
+| `bpeek` output over 17 min | — | frozen on one dynamo warning |
+| hosts | 2 (`p3-r20-n3:p2-r17-n3`) | 2 (`p3-r20-n3:p5-r16-n1`) |
+
+Zero inductor cache writes is the decisive one: a long compile would still be
+emitting artifacts. No `spmd_check` / `all_gather` / `DistStoreError` signature
+appeared, so the *symptom* differs from the documented hang even though the *class*
+matches.
+
+## What I got wrong, and it is a process error not a code error
+
+The fusion was validated at **4 GPU, SINGLE NODE** and shipped to **16 GPU, 2 NODES**.
+Every test that passed — float64 exactness (1.2e-15), bf16 bit-identity on CPU,
+activation-checkpointing across 8 knob combinations, the A' nondeterminism replicate,
+checkpoint cross-load — is a test of ARITHMETIC or of a single-process contract. None
+of them can see compilation or collectives. **Exactness does not transfer across
+parallelism shapes, and I treated it as if it did.**
+
+Worse, the project memory already warned about exactly this component:
+*"`torch_compile: false` breaks multi-node training here … if you must disable compile
+(e.g. for the inductor `spmd_check` all_gather hang that **data-dependent MoE
+routing** triggers), go single-node at the same time."* The fused path replaces 32
+slice-GEMMs with one `[4096,40960]@[40960,1536]` GEMM in precisely that component. I
+had read that note earlier in the same session and still flipped a 2-node run.
+
+## Status of the fusion
+
+**Not "shipped". Validated single-node only.** 1.61x and exact at 4 GPU / 1 node;
+hangs at 16 GPU / 2 nodes with the cause undiagnosed. The config carries a
+`DO NOT re-enable here until validated MULTI-NODE` note.
+
+## How to actually diagnose it
+
+Use the throwaway `configs/iclr_scale/scale32B_boltz_hop_PROFILE.yml` on **2 nodes**,
+short run, and bisect the three plausible causes:
+1. the single large fused GEMM shape (test `fused_experts` with `repulsion_coef: 0`,
+   which removes the einsum path entirely);
+2. the fused repulsion's `einsum` with data-dependent Python index lists
+   (`Wv[i_idx]`) — a likely dynamo/inductor tripwire under FSDP;
+3. an FSDP-gather interaction with the `weight_fn` closure that reads
+   `holder.W.weight` inside the compiled region.
+(1) vs (2) is one config change apart and would localise it immediately.
+
+Note the ordinary probes remain safe: every 4-GPU single-node arm today ran
+`fused_experts: true` without incident, including the routing-sign A/B.

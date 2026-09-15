@@ -17,35 +17,27 @@
 #
 # SCHEDULE: decay spans the FULL run. The slope arms were misconfigured with a decay length
 # inherited from a 30k schedule, so their LR hit its floor at 30k and sat there for 60k steps.
-# iclr_hop_K32_top2
+# ACTUAL ARCHITECTURE (this file = d=1536 / ~400M; the block below was cloned from the
+# 134M h1 template and its numbers were WRONG — corrected 2026-09-14).
 #
-# energy router, HOPFIELD experts (single W -> 2x experts at iso-param), K=32, top-2 (k/K=0.062)
+# Hybrid: GPT prefix + ONE recurrent energy block.
+#   Backbone: model_type=energy, hidden_size=1536, num_layers=7, 16 heads, rope_dim=64,
+#     layer_iterations [1,1,1,1,1,1,6] -> blocks 1-6 run once, block 7 runs 6x (recurrent),
+#     so effective depth = 6 + 6 = 12 block-applications.
+#   Blocks 1-6 (GPT prefix): softmax_attention + swiglu MLP, intermediate_size=4096.
+#   Block 7 (energy, x6):    energy_attention + EnergyFF_BoltzmannMoE
+#       expert_kind=hopfield, n_experts=32, top_k=2 (k/K=0.062),
+#       intermediate_size=40960 TOTAL across experts -> I_e=1280 per expert,
+#       temperature=0.35, routing_norm=zscore, repulsion_coef=0.1 (abs), n_repulsion_pairs=4,
+#       hopfield_grad_scale=sqrt_consistent, gelu_grad_method=sigmoid.
+#   Training: 61,035 steps x 524,288 tok/step = 32.0B tokens; lr 2e-3 cosine, warmup 2000,
+#     decay 59,035; bf16; FSDP2; gradient_checkpointing=block; torch_compile=true.
 #
-# FLOPS-frontier wave (2026-09-12). Backbone FIXED across ALL arms:
-#   d=768, 7 blocks, layer_iterations [1,1,1,1,1,1,6], 12 heads, GPT ffn 2048,
-#   30000 steps = 7.86B tokens, lr 2e-3 cosine. ONLY the MoE block differs.
-# Iso-total-params in the MoE block (12.58M): w1w2 and the learned-router
-#   class use 2*I_tot*d, hopfield uses I_tot*d, so hopfield carries 2x the
-#   experts for the same parameters -> half the k/K at equal top_k.
-# Question: quality vs k/K frontier against a learned-router MoE at each K.
-#
-# h1_boltz_moe_fullsize: direct BoltzmannMoE equivalent of h1_topk_egpt_moe
-# Architecture identical to h1_topk; only the EGPT FFN routing differs:
-#   h1_topk:            TopK_Energy_MoE_MLP  (sparse, learned linear router, load-balance loss)
-#   h1_boltz_fullsize:  BoltzmannMoE_Energy_MLP (soft Boltzmann routing, energy-based router)
-#
-# KEY FIX vs h1_boltz_egpt_moe (existing): full-size experts, NOT iso-param.
-#   OLD (iso-param): intermediate_size=2048 total → 4×512 per expert (tiny, same fail as B-series)
-#   NEW (full-size): intermediate_size=8192 total → 4×2048 per expert (matches h1_topk capacity)
-#
-# This isolates routing mechanism (Boltzmann vs TopK) from expert capacity.
-# Paired with repulsion λ=0.1 (best from B4) to discourage load collapse.
-#
-# Layers 1-6: softmax_attention + standard MLP (int=2048) — GPT prefix
-# Layer 7:    energy_attention  + BoltzmannMoE_Energy_MLP (×6 recurrent)
-#               4 experts × 2048 per expert = 8192 total intermediate
-#
-# Param count: ~145M (same order as h1_topk ~145M)
+# MEASURED COST (16 GPU / 2 nodes, 2026-09-14): ~6.75 s/step, ~6.7 Btok/day -> 32B ~= 4.8 days.
+#   That is ~5x slower per step than gptswitch (~1.34 s/step), and it is NOT a torch.compile
+#   problem (compile is stable). The cost is algorithmic: the Boltzmann MoE computes ALL 32
+#   experts densely and applies top-2 only as a post-hoc MASK (zero FLOP saving), and that
+#   whole block runs 6x via recurrence. The gptswitch baseline dispatches just 2 of 32 experts.
 
 datasets:
   - class_name: MegatronDataset
@@ -107,7 +99,8 @@ model_args:
       - *gpt_ffn
       - *gpt_ffn
       - *gpt_ffn
-      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      # BoltzmannMoE: 32 hopfield experts, top-2, 40960 total intermediate (I_e=1280/expert).
+      # top-2 is a post-hoc MASK — all 32 experts are computed densely each step (see header).
       - mlp_type: EnergyFF_BoltzmannMoE
         expert_kind: hopfield
         intermediate_size: 40960   # total across K; I_e = 1280
@@ -122,6 +115,15 @@ model_args:
         gelu_grad_method: sigmoid
         activation_function: gelu
         add_bias: false
+        # fused_experts REVERTED 2026-09-15. It is exact and 1.61x on a 4-GPU
+        # SINGLE-NODE probe, but at the production shape (16 GPU / 2 NODES) the job
+        # wedged: 17+ min with zero inductor cache writes and no first step, against
+        # 98 s from first log line to first step on the unfused path. No
+        # spmd_check/all_gather/DistStoreError signature, but this is the documented
+        # multi-node compile + data-dependent-MoE-routing hang class, newly
+        # triggered by the fused graph (one [4096,40960]@[40960,1536] GEMM).
+        # DO NOT re-enable here until it is validated MULTI-NODE. See
+        # ACCEL_FINDINGS_20260915.md.
 
 tuning_args:
   tuning_method: pretraining
@@ -129,7 +131,11 @@ tuning_args:
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_scale/scale32B_boltz_hop
   save_interval: 1000
-  max_to_keep: 2
+  max_to_keep: 40   # was 2. With save_interval 1000 that kept only ~2 checkpoints, so the switch
+                 # arm had already deleted everything before step 32000 -- which would have
+                 # made a MATCHED-TOKEN comparison impossible at any earlier step if the
+                 # slower Boltzmann arm cannot reach 32B. 40 covers the whole run at 1000-step
+                 # granularity for a ~5GB/ckpt model.
 
 logging_args:
   log_interval: 10
