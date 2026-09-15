@@ -336,6 +336,12 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   transfer between the two spaces -- weight cosines are ~5-25x smaller than
     #   output cosines -- so re-sweep it when switching.
     repulsion_space: str = "output"
+    # e_sign_override: None (default) keeps the kind-based routing sign every
+    #   existing checkpoint trained with. "pos" makes softmax favour the LARGEST
+    #   stored energy, "neg" the smallest. For hopfield experts the stored energy
+    #   GROWS with overlap, so "pos" routes to the BEST-matching experts and the
+    #   default "neg" routes to the worst -- see ROUTING_SIGN_BUG_20260915.md.
+    e_sign_override: str | None = None
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).
     track_load: bool = True

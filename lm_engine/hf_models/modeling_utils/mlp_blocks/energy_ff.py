@@ -1442,6 +1442,7 @@ def build_boltzmann_moe(
     cos_probe_interval: int = 0,
     cos_probe_pairs: int = 8,
     repulsion_space: str = "output",
+    e_sign_override: str | None = None,
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -1475,6 +1476,23 @@ def build_boltzmann_moe(
         e_sign = "neg"
     else:
         raise ValueError(f"unknown expert_kind ({expert_kind})")
+    # ------------------------------------------------------------------------ #
+    # ROUTING SIGN. `e_sign` decides whether softmax favours the SMALLEST stored
+    # energy ("neg" -> logits = -E) or the LARGEST ("pos" -> logits = +E).
+    #
+    # The kind-based defaults below are what every existing checkpoint trained
+    # with, and they are RETAINED as the default so nothing changes implicitly.
+    # But they appear to be INVERTED -- see ROUTING_SIGN_BUG_20260915.md:
+    #   _HopfieldExpert stores E = +mean(gelu(Wx)^2), which GROWS with overlap,
+    #   and "neg" then selects the SMALLEST -> the WORST-matching experts
+    #   (measured: 0.62x the average expert's overlap, exactly the lowest set).
+    #   _W1W2Expert stores E = -overlap and uses "pos", which also selects the
+    #   worst match -- whereas the legacy class it was meant to reproduce does
+    #   E = +overlap with softmax(+E/tau), i.e. the BEST match.
+    # Set e_sign_override="pos" on a hopfield MoE to route on HIGH overlap.
+    if e_sign_override is not None:
+        assert e_sign_override in ("neg", "pos")
+        e_sign = e_sign_override
     experts = holder.make_experts()
     # The fused path needs the single shared weight tensor + the scalars the
     # per-expert forward would have applied. `weight_fn` is a closure so FSDP
