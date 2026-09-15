@@ -651,6 +651,37 @@ nothing to separate:
 The 400M is tracing the same shape with a shallower dip (13.06 min vs 8.62) and had
 already turned up by step 80. **Do not read a Sinkhorn arm's balance before ~step 600.**
 
+### 2026-09-15: `max_to_keep` + a scratch restart CORRUPTS the checkpoint pointer
+
+A compound failure that bricks an arm and makes every resubmit die in seconds. Hit
+`iclr_hop_K16_dense_sink` and `slope90k_hyb_sink` during the corrected-sign rerun.
+
+1. LSF preempts by `SSUSP -> PEND -> RUN` on the **same job id**, re-running the original
+   bsub command with the original config. With no `load_args`, dolomite restarts at step 0
+   even though checkpoints are on disk. `save_interval` does not protect against this --
+   the checkpoints existed the whole time and were simply never loaded. The watchdog's
+   auto-resume never fires because the watchdog never resubmitted.
+2. The from-scratch run writes a LOW checkpoint (e.g. `global_step1000`) and points
+   `latest_checkpointed_iteration.json` at it.
+3. `max_to_keep: 2` prunes by **iteration number, keeping the highest**, so it deletes that
+   fresh low checkpoint and retains the two high ones from the earlier run (18000, 19000).
+4. The pointer now names a DELETED directory. Once `load_args` is present, every start dies
+   instantly with `FileNotFoundError: .../global_step1000/training_config.yml`, and the
+   watchdog burns a resubmit every 5 min (#6/400 before it was caught).
+
+Note step 4 only becomes visible once `load_args` exists; without it the arm silently
+restarts from 0 forever, which is worse and looks like slowness.
+
+**Diagnosis:** compare `latest_checkpointed_iteration.json` against the `global_step*` dirs
+present. **Repair:** rewrite the pointer to the highest surviving checkpoint (verify it has
+`training_config.yml` and 7 entries, ~1.6G at 134M, matching a known-good checkpoint).
+
+**Detecting a scratch restart:** `current_step < max_step` is NOT sufficient -- it cannot
+distinguish a scratch restart from a resume at an earlier checkpoint. Use the first step
+logged AFTER the last `wandb: Syncing run`: `~10` means scratch, `~ckpt+10` means resumed.
+
+Prevention: every `configs/iclr_sink/*.yml` now carries `load_args.load_path`.
+
 **ENERGY STABILITY — the feared runaway does not happen.** The energy is evaluated on
 `ln_x = self.ln(x)` (RMSNorm), not the raw residual, so it cannot grow through the
 residual; only `||W||` remains, opposed by `weight_decay 0.1`. Measured
