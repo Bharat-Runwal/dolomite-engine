@@ -35,6 +35,7 @@ Last updated: 2026-09-15 (ICLR draft migrated to Avg11).
 |---|---|---|
 | **HANDOFF.md** (this) | Orientation + 2026-09-12 findings | always, first |
 | **`ROUTING_SIGN_BUG_20260915.md`** | 🔴 The composable router is SIGN-INVERTED (selects worst-matching experts). Affects the whole ICLR grid + live 400M. Includes the chemical-potential reframing of the balance property | **before any routing claim** |
+| **`HANDOFF.md` §11** | 🔴 The 2026-09-15 session: sign inversion, chemical-potential balancing, Sinkhorn, energy stability | **always, with §0** |
 | **`PLACEMENT_ARTIFACT_20260915.md`** | 🔴 The "5x slower" figure is mostly host placement (6.76 → 2.49 s/step, same code). Invalidates the launch-overhead reading | **before any s/step claim** |
 | `ACCEL_FINDINGS_20260915.md` | fused-GEMM 1.61x (single-node ONLY — wedges at 2 nodes), repulsion sweep, proxy router 0.942, ReLU negative result | before optimisation work |
 | **`/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`** | **★ THE ACTIVE PAPER.** `main.tex` + `sec/*.tex`; all numbers `Avg11` | whenever writing or quoting results |
@@ -953,3 +954,255 @@ Fix these when you next touch the docs; they will send you to the wrong code.
 | `CLAUDE.md:200-215` routing metrics | says the collapse metrics are "Logged every 10 steps" | true for the **legacy** classes only. For any `EnergyFF_*` run they were never logged until the §7.8 fix |
 | `configs/multi_block_ablation/math_fet_boltz_hopfield_rep_*.yml:12` | "diagnosed as experts collapsing to uniform routing because (a) per-expert width 1024 is 4× narrower…" | routing *is* uniform (§7.4), but the mechanism is `E_k ≪ τ`, not expert width. And the claim was inferred — the metrics that would have shown it were not being logged |
 | `SCALE_UP_PLAN.md:31-32` | notes the `h1_boltz_moe_580m` YAML header says "~580M" but the real count is 679M | correct as written — keep the warning, the config filename is still misleading |
+
+---
+
+## 11. SESSION FINDINGS — 2026-09-15 (routing sign, balance, Sinkhorn, energy stability)
+
+**This session found a bug that changes how three paper claims should be read, and a
+principled replacement for the property the bug was accidentally providing.** Detail
+docs: `ROUTING_SIGN_BUG_20260915.md` (sign + chemical potential + Sinkhorn + energy),
+`PLACEMENT_ARTIFACT_20260915.md`, `ACCEL_FINDINGS_20260915.md`,
+`AVG11_ICLR_MIGRATION.md`.
+
+### 11.1 The composable Boltzmann router is SIGN-INVERTED  ← headline
+
+Measured on a trained checkpoint (`iclr_flops/iclr_hop_K32_top2`), reproducing the
+deployed routing exactly (zscore, `e_sign="neg"`, tau=0.35, top-2):
+
+    overlap ||gelu(W_k x)||^2/I_e of the SELECTED experts : 1.1358
+    overlap averaged over ALL experts                     : 1.8457
+    overlap of the LOWEST-overlap 2 experts               : 1.1358   <- identical
+
+**The router selects the worst-matching experts, every token** (0.62x the average).
+`_HopfieldExpert` stores `E = mean(gelu(Wx)^2)`, which GROWS with overlap, and
+`e_sign="neg"` then picks the smallest. The legacy `BoltzmannMoE_Energy_MLP` this was
+meant to reproduce does it correctly (`E = +overlap`, `softmax(+E/tau)`); the
+composable refactor added a minus to the energy AND kept the legacy softmax sign.
+
+**Scope:** every `EnergyFF_BoltzmannMoE` run — all 22 `iclr_*` arms and the live 400M.
+NOT the learned-gate/Switch arms, NOT gptswitch, NOT the legacy `h1_*`/`b*`/`c*`.
+
+Fix is opt-in: `e_sign_override: "pos"`. Verified in isolation —
+overlap(chosen)/overlap(avg) is 0.68 with the default and 1.42 with the override.
+
+### 11.2 Anti-routing was an accidental LOAD BALANCER
+
+Correcting the sign revives the FF branch 20-100x (`ffwd/output_norm` 0.03 -> 12) and
+**collapses routing** (effK 8.5 -> 1.9 of 32). The feedback sign flips:
+
+  * anti-routing is self-LIMITING — use the worst-matching expert, it improves,
+    you stop using it. Negative feedback, so load spreads on its own.
+  * correct routing is self-REINFORCING — the winner gains overlap and wins more.
+    The standard MoE collapse that load-balancing losses exist to prevent.
+
+**So two paper claims are affected, and a third was measured under the bug:**
+ 1. "the energy-FF branch is essentially dead" (HANDOFF 7.5) — **CAUSED by the bug**.
+ 2. "Boltzmann routing does not collapse and needs no load-balancing loss" —
+    **depends on the bug**. Also independently shaky: the deployed arm's own balance
+    DEGRADES over training (see 11.5).
+ 3. "energy routing is at parity with a learned gate" — measured under the inverted
+    sign, so the correctly-signed router is untested.
+
+**Do not restate the routing-health results until settled.**
+
+### 11.3 The principled replacement: load balancing is a CHEMICAL POTENTIAL
+
+`p_k ∝ exp(E_k/tau)` is exactly the solution of `max_p sum_k p_k E_k + tau H(p)` —
+the softmax IS the entropy-regularised argmax. Imposing balance as a CONSTRAINT on
+the batch-marginal occupancy (`sum_tokens p_k ~ N/K`) rather than as a penalty gives
+
+    p_k ∝ exp( (E_k - mu_k) / tau )
+
+with `mu_k` the Lagrange multiplier — a **chemical potential**, the quantity conjugate
+to occupancy. A dual variable, not a loss term.
+
+Why this frame is worth having: it reuses the paper's own vocabulary (Boltzmann
+weights, partition function, free energy), it has **no gradient pathway and no learned
+gate** so the "no auxiliary loss" property survives, and it separates the two roles the
+bug had collapsed together — **`E_k` decides which expert FITS, `mu_k` decides how
+CROWDED it is.** Anti-routing is a fixed, crude stand-in for `mu_k`: "prefer the expert
+you match least" is a static proxy for "prefer the under-occupied expert". Correlated,
+hence the balance, but it pays by inverting the SELECTION.
+
+### 11.4 tau x balance sweep at the corrected sign (400M shape, 300 steps)
+
+    arm  tau  mu_k | effK/32  ffwd_norm      lm_loss
+    S1  0.35   --  |   4.35     0.582        5.9383   deployed (anti-routing)
+    S2  0.35  off  |   2.32    12.44 (121x)  5.9443
+    T2  1.0   off  |   4.47    12.13 (129x)  5.9288
+    T3  3.0   off  |   7.75     2.36 ( 21x)  5.9464
+    T4  0.35   ON  |   3.69    13.94 (160x)  5.9674
+    T5  1.0    ON  |   7.45     9.75 (122x)  5.9177  <- best overall
+
+**tau and mu_k are COMPLEMENTARY, not redundant.** mu_k helps at each tau
+(2.32->3.69 at 0.35; 4.47->7.45 at 1.0) and tau helps at each mu
+(2.32->4.47->7.75 off; 3.69->7.45 on). **tau ALONE is self-defeating**: T3 buys
+balance but leaves the branch at 2.36, 5-6x below every mu_k arm, because masked
+top-k weights shrink as routing softens.
+
+⚠ **A step-30 reading of this sweep said "tau is not needed" and was WRONG** — step-200
+data refuted it. S2 had already shown non-monotone early dynamics (1.03 -> 1.47 ->
+2.32). **Do not draw conclusions from this system before ~200 steps.**
+
+### 11.5 SINKHORN — the exact dual beats the clamped control rule decisively  ← ship this
+
+`balance_rate` reaches balance by proportional control on a per-expert bias, and it sat
+**PINNED at the +-1.0 `_BIAS_MAX` clamp in every arm** — delivering its result while
+saturated. Raising the clamp is the obvious and wrong move (the bound exists because an
+unclamped `sign()`-based version hit |bias| = 1482 and destabilised an arm, loss
+4.05 -> 5.18 with 77 upward jumps).
+
+`sinkhorn_iters` removes the multiplier: solve the dual exactly by log-domain
+iteration `mu <- mu + log(load(mu) * K)`. No clamp, no gain to tune, exact not lagged.
+Solved under `no_grad`, so `mu` is constant w.r.t. differentiation — correct for a
+Lagrange multiplier, and it keeps the no-gradient-pathway property.
+
+**134M results (built from `iclr_hop_K32_top2`, the BEST 134M Boltzmann arm at
+Avg11 44.38; 2000-step budget, matched step 340, uniform max-share would be 0.031):**
+
+    arm                          lm_loss  effK/32  max_share  E_mean  E_max     mu    cos
+    M1 shipped (INVERTED)         5.0858     5.04     0.3533  0.5507  14.19     --  0.1226
+    M2 corrected + clamped bias   5.1053    12.10     0.1774  0.1809   4.63  1.000  0.0598
+    M3 corrected + SINKHORN       5.0392    26.57     0.0718  0.2157  14.00  3.440  0.0582
+
+  * **Sinkhorn is 5.3x better balanced than the shipped arm** (effK 26.6 vs 5.0) and
+    2.2x better than the clamped bias. `max_share` 0.072 against the 0.031 ideal,
+    where the SHIPPED arm has one expert taking **35% of all tokens**.
+  * It gets there because **mu reaches 3.44 — 3.4x past the clamp** M2 is pinned at.
+    The clamp WAS the binding constraint, exactly as predicted.
+  * M3 also has the **best loss** (5.0392 vs M1's 5.0858) and the **best expert
+    diversity** (cos 0.058 vs 0.123). It is not buying balance by homogenising experts.
+  * Loss gap 0.047 sits near a 0.038 noise floor (measured at a different shape), so
+    treat it as suggestive, not established.
+
+**effK TRENDS matter as much as the levels:**
+
+    M1 shipped   13.8 -> 19.9 -> 12.2 -> 5.2 -> 4.7 -> 4.9 -> 5.4 -> 5.7   PEAKED then COLLAPSED
+    M2 clamped    8.3 ->  7.8 ->  8.9 -> 9.4 -> 10.3 -> 11.1 -> 12.1 -> 13.3  steadily improving
+    M3 sinkhorn  31.6 ->  9.4 -> 14.3 -> 16.6 -> 20.9 -> 24.6 -> 25.8 -> 26.6  steadily improving
+
+**The shipped arm's balance DEGRADES over training while both balanced corrected arms
+IMPROVE.** That is independent evidence against "Boltzmann routing does not collapse".
+
+Sinkhorn engineering checks: converges in **3 iterations** (mu 0.165 -> 0.179 -> 0.180,
+then flat); **1 graph, 0 graph breaks** under `torch.compile`, no recompilation;
+survives activation checkpointing across {0,3,10} iters x {no,with} repulsion; and
+**verified a 0.000e+00 no-op by default** against a clean HEAD worktree with identical
+state_dict keys — twice, because the live 400M arm reads this code.
+
+Two documented approximations: **TRAIN-ONLY** (load is a batch property, so applying it
+at inference would make routing depend on batch composition — the standard
+Sinkhorn-router choice, and it does introduce a train/inference mismatch), and the load
+is the **LOCAL per-rank batch** (a global constraint needs a collective, deliberately
+avoided given the multi-node hang in 11.7).
+
+### 11.6 ENERGY STABILITY — the feared runaway does not happen, and the SHIPPED arm is the worst
+
+Concern: the block ASCENDS the energy (`out = +grad E`) and the corrected router now
+selects the HIGHEST-energy experts — positive feedback that could explode late.
+
+**Structural answer:** the energy is evaluated on `ln_x = self.ln(x)` (RMSNorm), NOT the
+raw residual (`models/energy/layer.py:857,1026`). So `E` cannot run away through the
+residual growing; the only path left is `||W||`, in which `E` is quadratic. A SOFT
+bound — RMSNorm has a learnable gain and only `weight_decay: 0.1` opposes `||W||`.
+
+**Empirical answer (`energy_abs_mean`, added this session):**
+
+    M1 shipped INVERTED  0.107 0.157 0.364 0.547 0.590 0.533 0.504 0.476 0.448  grew 5x, peaked, declining
+    M2 corrected+clamped 0.106 0.135 0.250 0.200 0.180 0.162 0.172 0.164 0.186  peaked early, stable
+    M3 corrected+sinkhorn 0.108 0.150 0.149 0.158 0.213 0.222 0.217 0.216       PLATEAUED
+
+**The corrected arms carry 2.5-3x SMALLER energy than what is currently shipped.** The
+inverted sign is the one that grew 5x. Mechanistically sensible: anti-routing selects
+the LOWEST-energy experts and then ascends them, systematically pushing the bottom of
+the distribution up. `energy_abs_max` is comparable (M3 14.0 vs M1 14.2), so Sinkhorn is
+not introducing worse outliers than production already has.
+
+**Conclusion: no activation change is warranted.** If `E` ever does trend up, the ranked
+fix is (1) **weight-normalise the energy**, `E_k = mean(gelu(W_k x / ||W_k||)^2)` — one
+line, keeps GELU and the landscape, makes `E` scale-invariant in `W`, and **retires the
+`routing_norm: zscore` patch**, which exists for the same arbitrary-scale problem seen
+from the too-SMALL side; (2) **normalised descent step / trust region**, leaving the
+energy untouched and bounding only the step (`pref` is already just a fixed step size);
+(3) **bounded phi (sigmoid/tanh) LAST** — changing phi has a hard negative result here
+(`tanh_exact` lost 2.2pp avg / +3.4 PPL) and saturation FLATTENS the energy across
+experts, recreating the uniform-routing failure from the opposite direction. Bounding by
+saturation costs routing signal; bounding by normalisation does not.
+
+### 11.7 Two invalidated performance conclusions
+
+**(a) The "~5x slower than gptswitch" figure is substantially HOST PLACEMENT.** Same
+unfused code, same config, resumed from the same checkpoint on a different host pair:
+**6.72-6.81 -> 2.45-2.53 s/step**, 2.7x from placement alone. Identical GPU
+model/driver/`gpu_factor`, no MIG; sibling contention ruled out (median 6.739 before
+gptswitch finished vs 6.784 after, n=611/89). Likely dataloader starvation from shared
+CPU slots: per-rank GPU-busy is 1.71 s, so 25% utilisation at 6.76 s wall vs 68% at
+2.49 s. Real ratio ~1.9x, and even that is not placement-controlled.
+**Rule: no multi-node s/step claim is admissible unless placement-controlled.**
+
+**(b) The "launch-overhead bound / 79.5k kernels" reading is largely void** — it rested
+on 1.71 s GPU-busy against 6.75 s wall (25% util). At 68% the step is much closer to
+compute-bound.
+
+**(c) `fused_experts` is validated SINGLE-NODE ONLY.** EXACT (float64 1.227e-15) and
+1.61x at 4 GPU / 1 node, but it **WEDGED at 16 GPU / 2 nodes** — 17+ min with ZERO
+inductor cache writes against 98 s to first step unfused. Reverted on the live arm.
+Process lesson: exactness tests, bf16 bit-identity, checkpointing tests and an A'
+replicate ALL passed — none of them can see compilation or collectives. **Exactness
+does not transfer across parallelism shapes.** Bisect recorded in ACCEL_FINDINGS.
+
+### 11.8 Repulsion: cost corrected, and it IS load-bearing
+
+  * **Repulsion is 17-21% of the optimizer step, NOT 2-4%.** The old 2-4% came from a
+    UNITS error: it divided 48 block-calls by 1536 per-expert projections, but the
+    bench's 7.59 ms marginal was measured PER BLOCK CALL and already includes all 32
+    experts. Correct: 7.59 x 48 = ~364 ms of 1713 ms = 21%, matched by a direct A/B
+    (1.463 vs 1.210 s/step = 17%).
+  * **It is load-bearing**: with NO repulsion, expert output alignment sits at 0.43 and
+    RISES to 0.51 — it never decays. Every repulsion arm decays instead. So the decay
+    is CAUSED by the force, not by experts settling into niches.
+  * **But the benefit is steeply front-loaded**: 0 -> 0.5 pair-applications/call buys
+    4.7x better alignment for 2.5% of the step; 0.5 -> 4.0 buys a further 4.4x for 15%.
+  * **Intermittent firing weakens the regulariser** (alignment plateaus 4-6x higher), so
+    prefer **`repulsion_space: "weight"`** — 2.20 vs 7.59 ms/call, N-INDEPENDENT
+    (2.21/2.20/2.33 at N=2048/4096/8192 vs 4.06/7.59/14.91), sparse-kernel compatible,
+    and full strength every step. Coefficient does NOT transfer: weight cosines are
+    ~5-25x smaller than output cosines, so re-sweep (gradient-matched estimate ~0.7,
+    aux-matched ~4.0; bracket {0.5, 2, 8}).
+
+### 11.9 Cheap router: the learnable proxy works, the spectral one does not
+
+  * **Learnable rank-8 proxy, distilled online: 0.942 top-2 agreement** with the exact
+    router (chance 0.0625), matching the offline fitted-head study's 0.94 at r=8.
+  * **The spectral `||Wx||^2` proxy FAILS, and ReLU does not rescue it.** Top-2
+    agreement 0.214 (GELU) vs 0.209 (ReLU) — ReLU marginally WORSE; rank-r spectral is
+    at or BELOW chance. Reason: the positive-part FRACTION varies per expert per token
+    and carries the discriminative signal, which `sum_i z_i^2` discards. So 7.6's
+    diagnosis of "the nonlinearity" named the wrong culprit.
+  * **Note a conflation in older notes:** 7.6's WORKING r=8 result kept the nonlinearity
+    INSIDE the rank-r subspace (`mean(gelu(W^(r)x)^2)`), which is a different and
+    costlier construction than the spectral `||W^(r)x||^2`. Only the first works.
+  * A **two-moment** proxy is the cheap winner in testing: 0.895 top-2 at `d(1+r)`
+    (~57x cheaper than exact), beating the L1 form that costs 512x more. `mu` alone —
+    one dot product, cost `d` — already gets 0.638.
+  * **True sparsity is NOT implemented.** `top_k` is a post-hoc MASK: all 32 experts'
+    forward AND back projections are computed then multiplied by a `p` that is zero for
+    30 of them. Back-projection is the free half (~13-15% of the step, no router
+    needed); the forward half needs the proxy and cuts the 61% elementwise bucket ~16x.
+
+### 11.10 What to do next
+
+ 1. **Let the 134M arms finish (2000 steps)** and confirm M3 > M1 on loss and that
+    `energy_abs_mean` stays plateaued.
+ 2. **Then a 400M Sinkhorn arm** — but validate MULTI-NODE on the throwaway
+    `configs/iclr_scale/scale32B_boltz_hop_PROFILE.yml` FIRST. Sinkhorn's CPU dynamo
+    check is clean (1 graph, 0 breaks) but that is not inductor+FSDP, and this is
+    exactly the step that was skipped before `fused_experts` wedged the live arm.
+ 3. **Paper**: hold all three routing-health claims (11.2). The chemical-potential
+    derivation is a STRONGER replacement for claim 2, not a retraction — balance as the
+    dual of a capacity constraint, aux-loss-free and derivable rather than heuristic.
+    None of the efficiency results are affected, nor anything about Switch/gptswitch.
+ 4. **Unresolved**: no quality evidence at this scale. Every 300-step arm sat inside the
+    lm_loss noise floor, and 7.5 found deleting the FF branch entirely moved perplexity
+    by +0.0003. "Corrected routing is better" needs a long run with a downstream eval.

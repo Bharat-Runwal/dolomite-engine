@@ -565,3 +565,73 @@ and never resubmits, and pruning only removes `global_step*` dirs.
 
 **SKIPPED:** `iclr_balance/pure_hop_isoP_bal_DIVERGED_unclamped_bias_20260914` — diverged
 (unclamped load-balance bias), not a valid result.
+
+
+---
+
+## 2026-09-15 (part 2): routing sign inversion, chemical-potential balancing, Sinkhorn
+
+Full detail in `ROUTING_SIGN_BUG_20260915.md`; orientation in `HANDOFF.md` §11.
+
+**THE BUG.** The composable Boltzmann router selects the **worst**-matching experts.
+Measured on `iclr_flops/iclr_hop_K32_top2`: overlap of the selected experts 1.1358
+against 1.8457 averaged over all experts, and *exactly equal* to the lowest-overlap
+pair. `_HopfieldExpert` stores `E = mean(gelu(Wx)^2)` — which GROWS with overlap — and
+`e_sign="neg"` then picks the smallest. The legacy `BoltzmannMoE_Energy_MLP` does it
+correctly (`E = +overlap`, `softmax(+E/tau)`). Affects every `EnergyFF_BoltzmannMoE`
+run: all 22 `iclr_*` arms and the live 400M. Not the Switch/learned-gate arms, not
+gptswitch, not the legacy `h1_*`/`b*`/`c*` series.
+
+**WHY IT SURVIVED.** Across 300 steps the sign makes **no resolvable difference to
+lm_loss** (+0.006..+0.013 against a 0.038 noise floor) — consistent with the earlier
+finding that deleting the FF branch entirely moved perplexity by +0.0003. Nothing in
+the loss curve ever complained.
+
+**ANTI-ROUTING WAS AN ACCIDENTAL LOAD BALANCER.** Correcting the sign revives the FF
+branch 20-100x and collapses routing (effK 8.5 -> 1.9 of 32). Anti-routing is
+self-limiting (use the worst expert, it improves, you stop using it); correct routing
+is self-reinforcing (the winner gains overlap and wins more). So the headline property
+"Boltzmann routing does not collapse and needs no load-balancing loss" may hold only
+because of the bug.
+
+**THE PRINCIPLED REPLACEMENT.** `p_k ∝ exp(E_k/tau)` is the entropy-regularised argmax;
+adding the batch-marginal constraint `sum_tokens p_k ~ N/K` yields
+`p_k ∝ exp((E_k - mu_k)/tau)` with `mu_k` a **chemical potential** — the dual variable
+conjugate to occupancy. No gradient pathway, no learned gate, so the "no auxiliary
+loss" property survives; and it separates the two roles the bug conflated (`E_k` =
+which expert fits, `mu_k` = how crowded it is).
+
+**SINKHORN BEATS THE CLAMPED CONTROL RULE.** `balance_rate` pinned at the +-1.0
+`_BIAS_MAX` clamp in every arm. Solving the dual exactly
+(`mu <- mu + log(load(mu)*K)`, 3 iterations, no clamp, no gain) at 134M, matched step
+340, from the best 134M Boltzmann config:
+
+| arm | lm_loss | effK/32 | max_share | E_mean | mu | expert cos |
+|---|---:|---:|---:|---:|---:|---:|
+| M1 shipped (INVERTED) | 5.0858 | 5.04 | 0.3533 | 0.5507 | -- | 0.1226 |
+| M2 corrected + clamped bias | 5.1053 | 12.10 | 0.1774 | 0.1809 | 1.000 | 0.0598 |
+| **M3 corrected + SINKHORN** | **5.0392** | **26.57** | **0.0718** | 0.2157 | 3.440 | **0.0582** |
+
+Sinkhorn is **5.3x better balanced than the shipped arm** (uniform max_share would be
+0.031; the shipped arm has one expert taking **35% of tokens**), has the best loss and
+the best expert diversity, and reaches `mu = 3.44` — **3.4x past the clamp**, which
+confirms the clamp was the binding constraint. Trends: the shipped arm's balance
+**degrades** (effK 19.9 -> 5.7) while both balanced corrected arms **improve**
+(M2 8.3 -> 13.3, M3 9.4 -> 26.6).
+
+**ENERGY STABILITY — the feared runaway does not happen.** The energy is evaluated on
+`ln_x = self.ln(x)` (RMSNorm), not the raw residual, so it cannot grow through the
+residual; only `||W||` remains, opposed by `weight_decay 0.1`. Measured
+`energy_abs_mean`: the **shipped inverted arm is the worst offender** (0.107 -> 0.590,
+grew 5x, now declining), while both corrected arms carry **2.5-3x less energy** and
+M3 has plateaued (0.213-0.222 since step 170). `energy_abs_max` comparable (M3 14.0 vs
+M1 14.2). **No activation change warranted**; if it ever trends up, weight-normalising
+the energy is the one-line fix and it also retires the `routing_norm: zscore` patch.
+
+**ALSO CORRECTED THIS SESSION** (see HANDOFF §11.7-11.9): the "~5x slower than
+gptswitch" figure is substantially host placement (6.76 -> 2.49 s/step on the same
+code), which also voids the launch-overhead reading; `fused_experts` is exact and 1.61x
+but validated SINGLE-NODE only (it wedged at 2 nodes); repulsion is 17-21% of the step
+rather than 2-4% (a units error) and is load-bearing; and the learnable rank-8 proxy
+router reaches 0.942 top-2 agreement while the spectral `||Wx||^2` proxy fails with
+ReLU just as it does with GELU.

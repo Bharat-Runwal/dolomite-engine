@@ -53,6 +53,24 @@
 > **Rule: no multi-node s/step claim is admissible unless placement-controlled** —
 > same hosts for both arms, or several placements with the spread reported.
 >
+>
+> **3. The balance property has a PRINCIPLED replacement, and Sinkhorn beats what we ship.**
+> `ROUTING_SIGN_BUG_20260915.md`, `HANDOFF.md` §11.3-11.6. Load balancing is the
+> **chemical potential** `p_k ∝ exp((E_k - mu_k)/tau)` — the dual variable of the
+> batch-marginal constraint, with no gradient pathway and no learned gate, so the "no
+> auxiliary loss" claim survives it. `balance_rate` (proportional control) pinned at the
+> +-1.0 clamp in every arm; **`sinkhorn_iters` solves the dual exactly** and at 134M
+> reaches `effK` **26.6/32** against the shipped arm's **5.0** (max_share 0.072 vs
+> **0.353** — the shipped config has one expert taking 35% of tokens), with the best
+> loss and best expert diversity of the three, at `mu = 3.44` i.e. 3.4x past the clamp.
+> Trends: shipped balance **degrades** (effK 19.9 -> 5.7), both corrected+balanced arms
+> **improve**.
+> **Energy stability:** the feared runaway does NOT happen — the energy is evaluated on
+> RMSNorm'd `ln_x`, and the SHIPPED inverted arm carries 2.5-3x MORE energy (0.59 peak)
+> than either corrected arm. No activation change warranted.
+> **Do not draw conclusions from these probes before ~200 steps** — a step-30 reading of
+> the tau sweep gave the wrong answer and had to be retracted.
+>
 > Acceleration work: `ACCEL_FINDINGS_20260915.md`. `fused_experts` is EXACT (1.227e-15)
 > and 1.61x at **4 GPU / 1 node**, but it **WEDGES at 16 GPU / 2 nodes** and is
 > reverted on the live arm — validated single-node only.
