@@ -92,13 +92,13 @@ also picks (genuine set overlap; HANDOFF 7.9 records that `torch.isin` fakes thi
 Chance at k=2, K=32 is 0.0625.
 
 - Buggy build (KL inflated ~4096x by the `batchmean` bug): 0.800 by step 120.
-- Fixed build (per-token KL, coef 0.01): 0.170 at step 100, but **0.915 by step 260**.
+- Fixed build (per-token KL, coef 0.01): 0.170 at step 100, but **0.942 by step 300** (0.915 at step 260).
 
 **I was wrong to call the fixed build "too slow to be usable" from the step-100
 reading.** It was still climbing: 0.170 -> 0.915 between steps 100 and 260, which
 is close to the 0.94 the offline fitted-head study reached at r=8, and far above
 the 0.0625 chance level. A rank-8 learnable proxy trained online by KL does
-recover the exact router's top-2 choice ~92% of the time. No coefficient change
+recover the exact router's top-2 choice ~94% of the time. No coefficient change
 is needed after all.
 
 This only ever buys INFERENCE time: skipping the forward projection for
@@ -205,7 +205,7 @@ discontinuously at the flip, that is the signal to stop and investigate.
    above). Pursue weight-space repulsion instead: 3.5x cheaper, sparse-compatible,
    and applicable every step so the regulariser keeps its character.
 3. **Leave the proxy off the headline run** (it adds parameters, so it cannot be
-   enabled on a resume). Its result -- 0.915 top-2 agreement at r=8, trained
+   enabled on a resume). Its result -- 0.942 top-2 agreement at r=8, trained
    online -- is an inference-time asset to develop separately, and it needs the
    sparse-dispatch kernel before it converts into speed.
 
