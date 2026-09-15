@@ -500,6 +500,8 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         proxy_rank: int = 0,
         proxy_loss_coef: float = 0.0,
         proxy_route: bool = False,
+        cos_probe_interval: int = 0,
+        cos_probe_pairs: int = 8,
     ) -> None:
         super().__init__()
         assert len(experts) >= 2, "BoltzmannMoEFFEnergy requires at least 2 experts"
@@ -658,6 +660,31 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         else:
             self.proxy_V = None
 
+        # ------------------------------------------------------------------ #
+        # EXPERT-ALIGNMENT PROBE (2026-09-15)                                 #
+        # ------------------------------------------------------------------ #
+        # Measures mean|cos| between expert OUTPUTS *independently of the
+        # repulsion loss*, under no_grad, on a fixed number of sampled pairs.
+        #
+        # Why it is needed: the only alignment signal we had was the repulsion aux
+        # loss itself, which is coef * mean|cos| -- so it is unreadable on an arm
+        # with repulsion_coef=0, which is exactly the control that tells us how
+        # much of the observed mean|cos| ~= 0.10 plateau repulsion is actually
+        # buying. It also makes arms with different coef or n_repulsion_pairs
+        # directly comparable on alignment, which dividing the aux loss does not
+        # (different coef, and the mean is over a different number of pairs).
+        #
+        # no_grad and forward-only, so it saves no tensors and cannot perturb
+        # activation checkpointing. Runs on 1 call in cos_probe_interval; 0 = off,
+        # which is the default, so this costs nothing unless asked for.
+        self.cos_probe_interval = int(cos_probe_interval)
+        self.cos_probe_pairs = int(cos_probe_pairs)
+        if self.cos_probe_interval > 0:
+            self.register_buffer("_cos_sum", torch.zeros((), dtype=torch.float32),
+                                 persistent=False)
+            self.register_buffer("_cos_n", torch.zeros((), dtype=torch.float32),
+                                 persistent=False)
+
     # --- public surface --------------------------------------------------- #
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -712,6 +739,9 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
         if self.training and self.repulsion_coef > 0:
             self._add_repulsion_loss(expert_grads)
+
+        if self.training and self._cos_probe_fires():
+            self._probe_expert_cos(expert_grads)
 
         if not torch.compiler.is_compiling():
             self._log_metrics(p, out)
@@ -817,6 +847,9 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         if self.training and self.repulsion_coef > 0:
             self._add_repulsion_loss_fused(gated, W, pref)
 
+        if self.training and self._cos_probe_fires():
+            self._probe_expert_cos(gated, W=W, pref=pref)
+
         if not torch.compiler.is_compiling():
             self._log_metrics(p, out)
 
@@ -853,6 +886,39 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         ej = pref * torch.einsum("npi,pih->nph", g[:, j_idx, :], Wv[j_idx])
         cos = (F.normalize(ei, dim=-1) * F.normalize(ej, dim=-1)).sum(-1)
         add_aux_loss(self._repulsion_coef_now() * _repulsion_penalty(cos, self.repulsion_form))
+
+    def _cos_probe_fires(self) -> bool:
+        if self.cos_probe_interval <= 0:
+            return False
+        if self.cos_probe_interval == 1:
+            return True
+        return bool(torch.randint(self.cos_probe_interval, (1,), device="cpu").item() == 0)
+
+    @torch.no_grad()
+    def _probe_expert_cos(self, eg_or_gated, W=None, pref=1.0) -> None:
+        """Accumulate mean|cos| between expert outputs. Pure measurement.
+
+        `eg_or_gated` is the per-expert output stack (..., K, hidden) in the looped
+        path, or the gated intermediates (..., K, I_e) in the fused path -- in the
+        latter case W/pref are given and the selected experts are back-projected
+        here, for cos_probe_pairs pairs only.
+        """
+        n_pairs = min(self.cos_probe_pairs, len(self._all_pairs))
+        sampled = random.sample(self._all_pairs, n_pairs)
+        i_idx = [p[0] for p in sampled]
+        j_idx = [p[1] for p in sampled]
+        if W is None:
+            eg = eg_or_gated.reshape(-1, self.n_experts, self.hidden_size)
+            ei, ej = eg[:, i_idx, :], eg[:, j_idx, :]
+        else:
+            K, I_e = self.n_experts, self._expert_I
+            Wv = W.view(K, I_e, self.hidden_size)
+            g = eg_or_gated.reshape(-1, K, I_e)
+            ei = pref * torch.einsum("npi,pih->nph", g[:, i_idx, :], Wv[i_idx])
+            ej = pref * torch.einsum("npi,pih->nph", g[:, j_idx, :], Wv[j_idx])
+        cos = (F.normalize(ei, dim=-1) * F.normalize(ej, dim=-1)).sum(-1)
+        self._cos_sum += cos.abs().mean().float()
+        self._cos_n += 1.0
 
     # --- learnable rank-r proxy router -------------------------------------- #
 
@@ -1034,6 +1100,10 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 ).item()
                 self._proxy_agree_sum.zero_(); self._proxy_agree_n.zero_()
             m["repulsion_interval"] = float(self.repulsion_interval)
+            m["repulsion_n_pairs"] = float(self.n_repulsion_pairs)
+            if self.cos_probe_interval > 0 and self._cos_n > 0:
+                m["expert_cos_abs_mean"] = (self._cos_sum / self._cos_n.clamp_min(1.0)).item()
+                self._cos_sum.zero_(); self._cos_n.zero_()
             self._load_sum.zero_(); self._ent_sum.zero_(); self._tok_sum.zero_()
         return m
 
@@ -1317,6 +1387,8 @@ def build_boltzmann_moe(
     proxy_rank: int = 0,
     proxy_loss_coef: float = 0.0,
     proxy_route: bool = False,
+    cos_probe_interval: int = 0,
+    cos_probe_pairs: int = 8,
     init_method: str = "normal",
     initializer_range: float = 0.02,
     m_width: float | None = None,
@@ -1384,5 +1456,7 @@ def build_boltzmann_moe(
         proxy_rank=proxy_rank,
         proxy_loss_coef=proxy_loss_coef,
         proxy_route=proxy_route,
+        cos_probe_interval=cos_probe_interval,
+        cos_probe_pairs=cos_probe_pairs,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)

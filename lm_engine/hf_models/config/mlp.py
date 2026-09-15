@@ -322,6 +322,13 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     proxy_rank: int = 0
     proxy_loss_coef: float = 0.0
     proxy_route: bool = False
+    # cos_probe_interval: measure mean|cos| between expert outputs under no_grad on
+    #   1 call in N, INDEPENDENTLY of the repulsion loss, and log it as
+    #   `expert_cos_abs_mean`. 0 = off. Needed because the repulsion aux loss is
+    #   coef*mean|cos| and is therefore unreadable at coef=0 -- which is the control
+    #   that says how much of the alignment plateau repulsion actually buys.
+    cos_probe_interval: int = 0
+    cos_probe_pairs: int = 8
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).
     track_load: bool = True
