@@ -120,7 +120,12 @@ Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
       full strength every step.
 
 **Next**
-- [ ] **Headline levers to close the 5× gap (from the trace, biggest first):**
+- [ ] **Headline levers to close the gap (from the trace, biggest first).**
+      ⚠ **The "5×" gap is substantially a HOST-PLACEMENT artifact** — same unfused
+      code on a different host pair runs 2.45–2.53 s/step vs 6.72–6.81, GPU model
+      identical, sibling contention ruled out. Real ratio to gptswitch ≈1.9×, and
+      the "launch-overhead bound" reading (25% GPU util) becomes 68% util, i.e.
+      largely void. See PLACEMENT_ARTIFACT_20260915.md before acting on these:
       (1) fused top-k sparse **back-projection** (skip 15/16 of the [·,1280]@[1280,1536]
       ≈244 ms); (2) **rank-r proxy router** (Hopfield ceiling 96.7% top-1 @ r=16 —
       TODO line 28) to skip the all-32 fwd projection ≈266 ms; (3) **fuse the

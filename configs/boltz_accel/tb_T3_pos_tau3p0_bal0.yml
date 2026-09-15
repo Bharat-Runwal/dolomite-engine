@@ -1,3 +1,49 @@
+# CORRECTED-SIGN x TEMPERATURE x BALANCE sweep (2026-09-15).
+#
+# The sign A/B showed e_sign_override=pos revives the FF branch (~20-100x
+# ffwd/output_norm) but collapses routing (effK 1.0-2.3 of 32 vs 4.3-8.5 for the
+# deployed anti-routing). Anti-routing was acting as an accidental load balancer:
+# it is self-LIMITING (use the worst-matching expert, it improves, you stop using
+# it) where correct routing is self-REINFORCING (winner gains overlap, wins more).
+#
+# tau=0.35 and routing_norm=zscore were BOTH tuned under the inverted sign, so the
+# corrected router may simply be far too sharp. And load_balance_bias is the
+# aux-loss-FREE dual-variable balancing already in the code (no gradient pathway,
+# so the paper's "no load-balancing loss" claim survives it) -- untested at the
+# corrected sign, where the collapse says it is now load-bearing.
+#
+# S2 already covers (pos, tau=0.35, balance_rate=0). These add the rest.
+# ROUTING SIGN A/B (2026-09-15). The decisive test for ROUTING_SIGN_BUG_20260915.md.
+#
+# Measured on a trained checkpoint: the deployed router selects the experts with the
+# LOWEST ||gelu(W_k x)||^2 -- 0.62x the average expert's overlap, exactly the
+# lowest-overlap set. It routes to the WORST-matching experts every token, because
+# _HopfieldExpert stores an energy that GROWS with overlap while e_sign="neg" picks
+# the smallest. The legacy class it was meant to reproduce does the opposite.
+#
+# S1 = current/deployed convention (control). S2 = e_sign_override: pos, which routes
+# on HIGH overlap. Verified in isolation: overlap(chosen)/overlap(avg) is 0.68 for S1
+# and 1.42 for S2. Everything else is identical, same seed, same data.
+#
+# What to read: load_effective_n_experts (does routing SHARPEN?), ffwd/output_norm
+# (does the FF branch REVIVE from the "essentially dead" state of HANDOFF 7.5?),
+# lm_loss at matched steps, and expert_cos_abs_mean.
+# AUTO-GENERATED 4-GPU A/B PROBE (boltz-accel, 2026-09-15). NOT a science run.
+#
+# Question: how much of the 400M Boltzmann arm's 6.75 s/step (vs gptswitch 1.34 s)
+# do the acceleration knobs recover, and does the loss curve stay put?
+#
+# All four arms are byte-identical except the MoE knobs below, same seed, same
+# data order, so step_time is comparable and the loss curves are directly
+# comparable step-for-step.
+#   A base            fused_experts=false, interval=1   <- control == current main
+#   B fused           fused_experts=true,  interval=1   <- EXACT, must match A's loss
+#   C fused+rep10     + repulsion_interval=10 (scale-compensated)
+#   D fused+rep10+px  + rank-8 proxy router (passive; logs proxy_topk_agree)
+#
+# 4 GPU x mbs1 x ga8 x 4096 = 131,072 tok/step (production uses 16 GPU = 524,288),
+# so ABSOLUTE s/step is not comparable to the production run -- only the RATIO
+# between these arms is. Warmup/decay shortened so the loss actually moves.
 # 400M / 32B-TOKEN SCALE RUN (2026-09-14). The headline pair the paper needs.
 #
 # WHY THIS SHAPE. Our 134M grid is only 7.86B tokens -- enough to rank variants, nothing about
@@ -34,11 +80,6 @@
 #     decay 59,035; bf16; FSDP2; gradient_checkpointing=block; torch_compile=true.
 #
 # MEASURED COST (16 GPU / 2 nodes, 2026-09-14): ~6.75 s/step, ~6.7 Btok/day -> 32B ~= 4.8 days.
-#   ⚠ THE ~5x FIGURE BELOW IS SUBSTANTIALLY A HOST-PLACEMENT ARTIFACT (2026-09-15).
-#   The same unfused code, resumed from the same checkpoint on a different host pair,
-#   runs at 2.45-2.53 s/step instead of 6.72-6.81 -- 2.7x from placement alone, with
-#   identical GPU model/driver and sibling contention ruled out. On comparable
-#   placement the ratio to gptswitch is ~1.9x, not 5x. See PLACEMENT_ARTIFACT_20260915.md.
 #   That is ~5x slower per step than gptswitch (~1.34 s/step), and it is NOT a torch.compile
 #   problem (compile is stable). The cost is algorithmic: the Boltzmann MoE computes ALL 32
 #   experts densely and applies top-2 only as a post-hoc MASK (zero FLOP saving), and that
@@ -113,45 +154,40 @@ model_args:
         top_k: 2
         hopfield_grad_scale: sqrt_consistent   # 2026-09-12 fix; REVERT = mean
         routing_norm: zscore
-        temperature: 0.35
+        temperature: 3.0
         repulsion_form: abs
         repulsion_coef: 0.1
         n_repulsion_pairs: 4
         gelu_grad_method: sigmoid
         activation_function: gelu
         add_bias: false
-        # fused_experts REVERTED 2026-09-15. It is exact and 1.61x on a 4-GPU
-        # SINGLE-NODE probe, but at the production shape (16 GPU / 2 NODES) the job
-        # wedged: 17+ min with zero inductor cache writes and no first step, against
-        # 98 s from first log line to first step on the unfused path. No
-        # spmd_check/all_gather/DistStoreError signature, but this is the documented
-        # multi-node compile + data-dependent-MoE-routing hang class, newly
-        # triggered by the fused graph (one [4096,40960]@[40960,1536] GEMM).
-        # DO NOT re-enable here until it is validated MULTI-NODE. See
-        # ACCEL_FINDINGS_20260915.md.
+        # ---- boltz-accel knobs for this arm ----
+        fused_experts: true
+        repulsion_interval: 1
+        repulsion_scale_comp: true
+        cos_probe_interval: 20
+        cos_probe_pairs: 8
+        e_sign_override: "pos"
+        balance_rate: 0.0
 
 tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_scale/scale32B_boltz_hop
-  save_interval: 1000
-  max_to_keep: 40   # was 2. With save_interval 1000 that kept only ~2 checkpoints, so the switch
-                 # arm had already deleted everything before step 32000 -- which would have
-                 # made a MATCHED-TOKEN comparison impossible at any earlier step if the
-                 # slower Boltzmann arm cannot reach 32B. 40 covers the whole run at 1000-step
-                 # granularity for a ~5GB/ckpt model.
+  save_path: /proj/dmfexp/nima/Code/dolomite-accel/experiments/boltzmann-moe/results/accel/accel_B_fused
+  save_interval: 100000   # never during the probe: keeps checkpoint I/O out of the timing
+  max_to_keep: 1
 
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
-    project: energy-inference-large
-    name: scale32B_boltz_hop
+    project: boltz-accel
+    name: tb_T3_pos_tau3p0_bal0
 
 training_parameters:
-  num_training_steps: 61035   # 32B tokens at 524,288 tok/step (16 GPU, ga=8)
-  eval_interval: 5000
+  num_training_steps: 300   # short A/B probe, NOT a science run
+  eval_interval: 100000
   micro_batch_size: 1
   gradient_accumulation_steps: 8   # 16 GPU x mbs1 x ga8 x 4096 = 524,288 tok/step; x 61,035 steps = 32.0B
   eval_during_training: false
@@ -168,9 +204,9 @@ optimizer_args:
 lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
-  num_warmup_steps: 2000
+  num_warmup_steps: 50
   num_constant_steps: 0
-  num_decay_steps: 59035
+  num_decay_steps: 250
 
 mixed_precision_args:
   dtype: bf16
