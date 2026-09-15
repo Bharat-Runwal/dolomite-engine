@@ -242,6 +242,40 @@ Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
       reporting. A true like-for-like rerun would need the baseline back at tau 0.35, which
       contradicts the tau=1.0 decision the whole batch rests on.
       Same trap to check for elsewhere: a bundled ablation whose "reverted" set happens to
+
+- [ ] **PHYSICS SIGN AUDIT: exactly one slot is inconsistent, and fixing it is NOT cheap.**
+      Verified numerically by `scripts/energy_sign_slots_20260915.py` against the convention
+      `p_k = exp(-E_k/tau)/Z`, `E_FF = -tau*log Z_FF`, `E = E_AT + s*E_FF`, forward `h -= proj(grad E)`:
+      * SLOT 1 (definition of E_FF): `_HopfieldExpert` stores `S = mean(gelu(Wx)^2) >= 0`, which
+        GROWS with overlap, so the physics energy is `E_FF = -S`. The code calls `S` itself "E"
+        (see the `out = +grad E` comment at energy_ff.py:559).
+      * SLOT 2 (Boltzmann weight): `e_sign="pos"` gives `p == exp(-E)/Z` EXACTLY. **Correct.**
+        `"neg"` does not. So the sign correction we shipped is the physics-correct one.
+      * SLOT 3 (free energy): the exported `-tau*logsumexp(logits)` EQUALS `-tau*log Z_FF`
+        exactly under `"pos"`. **Correct as originally written** -- I briefly "fixed" this to
+        `+tau*LSE` and reverted it; that change was wrong.
+      * SLOT 4 (forward): the expert emits `+c*grad S = -c*grad E_FF`, so
+        `h <- h - proj(out)` ASCENDS `E_FF` (measured `dE = +1.49e-09` along `-out`).
+        **This is the single inconsistency.**
+      Attention uses the SAME convention (`attn_out = +grad LSE = -grad E_AT`), so both branches
+      of `E = E_AT + s*E_FF` emit `-grad E` and the model is internally self-consistent -- it
+      descends `-E = log Z_AT + s*log Z_FF`. A physics-consistent fix must flip BOTH branches,
+      i.e. `layer.py` / `energy_attention.py`, affecting EVERY energy model and requiring
+      retraining, because `scale_ff` and `proj` are learned and currently absorb the sign.
+      **Impact today: NONE.** Slot 4 only corrupts the action/energy aux-loss, and
+      `_capture_energy` defaults to False (`layer.py:832`) and is enabled by no `iclr_*` config.
+      Do not enable the action loss until slot 4 is fixed -- it would penalise the quantity the
+      forward pass increases.
+      BOUNDS (asked for separately, and they already hold): `E_FF = -tau*log sum_k exp(S_k/tau)`
+      with `S_k in [0, S_max]` gives `-tau*log K - S_max <= E_FF <= -tau*log K`. `S_max` is finite
+      because the energy is evaluated on RMSNorm'd `ln_x` with finite `||W||`, so an action loss
+      on `E_FF` cannot run to `-inf`.
+      CAVEAT: the identity `out = grad E_FF` is exact only for `routing_norm` in
+      {`none`,`sqrt_width`} plus the (h-independent) Sinkhorn `mu` and balance bias. The shipped
+      arms use `zscore`, where the per-token mean/std make the logits nonlinear in all `E_k`, so
+      descent is approximate there. Separately, `cos(expert_out, grad S) = 0.983` not 1.0,
+      because `gelu_grad_method="sigmoid"` is a surrogate for gelu' -- so the emitted vector is
+      an approximate gradient at the ~2% angular level regardless of signs.
       include a knob the rerun normalises.
 
 - [ ] **True sparsity is NOT implemented** (never was). `top_k` is a post-hoc MASK: all
