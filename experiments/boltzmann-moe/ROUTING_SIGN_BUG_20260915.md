@@ -314,3 +314,74 @@ tuning knob.
 - No quality claim. Every sign/balance arm so far sits inside the 0.038 lm_loss noise
   floor at this scale, consistent with 7.5's "deleting the FF branch moved perplexity
   by +0.0003". These are mechanism results, not quality results.
+
+---
+
+# ENERGY-STABILITY ANALYSIS: can the corrected sign make the energy run away?
+
+Raised 2026-09-15: correcting the sign grew `ffwd/output_norm` 20-100x, so does the
+ENERGY also grow, and could it explode later in training?
+
+## The mechanism is real
+
+The block ASCENDS the energy (`out = +grad E`, added to the residual), and the
+corrected router now selects the HIGHEST-energy experts. That is positive feedback:
+step toward the best-matching expert -> its overlap rises -> its energy rises -> the
+next step is larger. **The inverted sign was self-limiting here for the same reason
+it self-balanced** — it stepped toward the expert it matched LEAST.
+
+## But the architecture already bounds it, up to ||W||
+
+Verified in the code (`models/energy/layer.py:857,1026`):
+
+    ln_x = self.ln(x)          # RMSNorm
+    ffwd_out = self.ffwd(ln_x) # the ENERGY is evaluated on ln_x, NOT on x
+
+So `E = mean(gelu(W · ln_x)^2)` cannot run away through the residual growing —
+`||ln_x||` is fixed by the norm. **The only remaining growth path is `||W||`,** and
+`E` is quadratic in it. This is the "renormalising the residual" idea already
+present in the design (and the same reason the Energy-Transformer / modern-Hopfield
+family define energies on normalised tokens).
+
+It is a SOFT bound, not a hard one: RMSNorm carries a learnable gain, and the only
+thing opposing `||W||` growth is `weight_decay: 0.1`. So whether it is sufficient is
+empirical — hence `energy_abs_mean` / `energy_abs_max` were added. **Watch the TREND.**
+
+Indirect 300-step evidence (400M shape, `ffwd/output_norm` at steps 30/100/200/300):
+
+    S1 deployed (anti)              0.03 -> 0.08 -> 0.09 -> 0.58   tiny
+    S2 corrected, NO balancing      2.78 -> 7.34 -> 10.88 -> 12.44  monotone, no plateau
+    T4 corrected + balance          6.94 -> 15.38 -> 14.38 -> 13.94 peaked, turning down
+    T5 corrected + balance          2.00 -> 10.44 -> 11.00 -> 9.75  plateaued, turning down
+
+**Only the UNBALANCED corrected arm grows monotonically.** Mechanistically consistent:
+collapse to one expert IS the runaway (that expert is reinforced every step), and
+balancing prevents any single expert compounding. So balancing looks like it
+stabilises magnitude as well as occupancy — which is a second, independent argument
+for the chemical potential.
+
+## If E does trend up, the fix, ranked
+
+**1. Weight-normalise the energy** — `E_k = mean(gelu(W_k x / ||W_k||)^2)`. One line,
+keeps GELU, keeps the landscape shape, makes E SCALE-INVARIANT in W so `||W||` growth
+cannot inflate it. More faithful to the Hopfield picture, not less: stored patterns
+are memories, i.e. DIRECTIONS, and their magnitude is a temperature-like nuisance.
+**It also retires an existing patch:** the docs record that Hopfield "needs its
+routing logits standardised or routing goes exactly uniform" (`routing_norm: zscore`)
+because `E ~ 1e-2` against tau. That is the same arbitrary-scale problem from the
+other side, so one change fixes both the too-small and the too-large failure.
+
+**2. Normalised descent step / trust region** — leave the energy alone and bound the
+STEP: `out = pref * grad E / ||grad E||`, or clip to a max norm. Fully consistent with
+"the block descends E", since every descent method needs a step size and `pref` is
+currently a fixed constant. Bounded by construction, landscape untouched.
+
+**3. Bounded phi (sigmoid/tanh)** — bounds `E in (0,1)` absolutely, but ranked LAST.
+The project has a hard negative result on changing phi (`tanh_exact` lost 2.2pp avg /
++3.4 PPL at h1 scale), and a saturating phi FLATTENS the energy across experts, which
+risks recreating the "E << tau so routing is uniform" failure from the opposite
+direction. Bounding by saturation costs routing signal; bounding by normalisation
+does not.
+
+**Recommendation: change nothing until `energy_abs_mean` is measured.** The 134M arms
+(M1 shipped-inverted / M2 corrected+balance / M3 corrected+sinkhorn) log it directly.
