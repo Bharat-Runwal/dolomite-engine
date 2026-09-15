@@ -358,6 +358,9 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     # run that already has checkpoints breaks resume. See energy_ff.py for the 5.33pp
     # measurement that motivates it.
     sinkhorn_persist_mu: bool = False
+    # Depth of the per-iteration mu buffer: how many times this block is applied per
+    # forward (its entry in layer_iterations). 1 = single shared dual.
+    sinkhorn_mu_iters: int = 1
     # repulsion_tensor_idx: draw the repulsion pair indices with torch RNG into a TENSOR
     #   instead of Python `random` into lists. dynamo cannot trace Python random and
     #   specialises on the list values, so repulsion currently costs 2-3 graph breaks and

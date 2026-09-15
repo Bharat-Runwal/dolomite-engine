@@ -55,6 +55,25 @@ def load_docs(prefix, n_seq, seqlen, tail_frac=0.005):
             seqs.append(buf[:seqlen]); buf = buf[seqlen:]
     return torch.tensor(seqs, dtype=torch.long), i - start
 
+def _probe_iterations(ckpt, a):
+    """Count mu solves in ONE forward = how many times the shared block is applied."""
+    from transformers import AutoModelForCausalLM
+    m = AutoModelForCausalLM.from_pretrained(ckpt, trust_remote_code=True, torch_dtype=torch.bfloat16)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"; m.to(dev).train()
+    moe = [x for x in m.modules() if getattr(x, "sinkhorn_iters", 0) > 0][0]
+    for attr, v in (("repulsion_coef", 0.0), ("cos_probe_interval", 0), ("proxy_loss_coef", 0.0)):
+        if hasattr(moe, attr): setattr(moe, attr, v)
+    n = {"c": 0}; orig = moe._solve_sinkhorn_mu
+    def spy(l): n["c"] += 1; return orig(l)
+    moe._solve_sinkhorn_mu = spy
+    seqs, _ = load_docs(a.data_prefix, 1, a.seqlen)
+    with torch.no_grad(): m(input_ids=seqs[:1].to(dev))
+    del m
+    if dev == "cuda": torch.cuda.empty_cache()
+    assert n["c"] >= 1, "no mu solves observed"
+    return n["c"]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run_dir", required=True, help="results/... dir containing unsharded/")
@@ -71,17 +90,24 @@ def main():
     if dst.exists(): shutil.rmtree(dst)
     shutil.copytree(src, dst, ignore=shutil.ignore_patterns("harness_results*"))
 
-    # turn the flag on in the COPY so the buffer is registered and saved
     cfgp = dst / "config.json"; cfg = json.loads(cfgp.read_text())
     blocks = cfg.get("mlp_blocks") or cfg.get("mlp_block_args") or []
-    n_on = 0
-    for b in blocks:
-        if isinstance(b, dict) and "Boltzmann" in str(b.get("mlp_type", "")):
-            assert int(b.get("sinkhorn_iters", 0)) > 0, "this checkpoint was not trained with sinkhorn"
-            b["sinkhorn_persist_mu"] = True; n_on += 1
-    assert n_on > 0, "no EnergyFF_BoltzmannMoE block found in config.json"
+    moe_blocks = [b for b in blocks if isinstance(b, dict) and "Boltzmann" in str(b.get("mlp_type", ""))]
+    assert moe_blocks, "no EnergyFF_BoltzmannMoE block found in config.json"
+    for b in moe_blocks:
+        assert int(b.get("sinkhorn_iters", 0)) > 0, "this checkpoint was not trained with sinkhorn"
+
+    # STEP 0: how many times is the block applied per forward? The dual differs per
+    # iteration (measured spread 1.75 mean / 3.10 max, with sign flips), so one shared buffer
+    # cannot represent it -- that is why the first version of this script recovered nothing.
+    # Probe by counting mu solves in a single forward with the buffer still OFF.
+    n_iter = _probe_iterations(dst, a)
+    print(f"probed {n_iter} mu solve(s) per forward -> sizing the buffer (n_iter, K)")
+    for b in moe_blocks:
+        b["sinkhorn_persist_mu"] = True
+        b["sinkhorn_mu_iters"] = n_iter
     cfgp.write_text(json.dumps(cfg, indent=2))
-    print(f"enabled sinkhorn_persist_mu on {n_on} block(s) in {cfgp}")
+    print(f"enabled sinkhorn_persist_mu (mu_iters={n_iter}) on {len(moe_blocks)} block(s)")
 
     from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(dst, trust_remote_code=True,
@@ -111,9 +137,13 @@ def main():
                 mu = moes[0].sinkhorn_mu
                 print(f"  batch {i+1:4d}/{a.batches}  |mu|max={mu.abs().max():.4f}  count={float(moes[0].sinkhorn_mu_count):.0f}")
     for j, m in enumerate(moes):
-        mu = m.sinkhorn_mu
-        print(f"  block {j}: count={float(m.sinkhorn_mu_count):.0f}  |mu|max={mu.abs().max():.4f}  "
-              f"mu[:6]={mu[:6].float().cpu().numpy().round(4)}")
+        mu = m.sinkhorn_mu.float().cpu()
+        print(f"  block {j}: counts={m.sinkhorn_mu_count.cpu().numpy().astype(int).tolist()}")
+        for k in range(mu.shape[0]):
+            print(f"    iter {k}: |mu|max={mu[k].abs().max():.4f}  mu[:6]={mu[k][:6].numpy().round(3)}")
+        spread = (mu.max(0).values - mu.min(0).values)
+        print(f"    per-expert spread ACROSS iterations: mean={spread.mean():.4f} max={spread.max():.4f}")
+        print(f"    (a single averaged buffer would have had |mu|max={mu.mean(0).abs().max():.4f})")
 
     model.eval()
     model.save_pretrained(dst, safe_serialization=True)

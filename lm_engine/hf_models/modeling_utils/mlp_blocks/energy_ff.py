@@ -510,6 +510,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         repulsion_space: str = "output",
         sinkhorn_iters: int = 0,
         sinkhorn_persist_mu: bool = False,
+        sinkhorn_mu_iters: int = 1,
         repulsion_tensor_idx: bool = False,
     ) -> None:
         super().__init__()
@@ -736,11 +737,31 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         assert not (self.sinkhorn_persist_mu and self.sinkhorn_iters == 0), (
             "sinkhorn_persist_mu has nothing to persist with sinkhorn_iters=0"
         )
+        # PER-ITERATION mu. A shared (recurrent) block is called N times per forward and
+        # solves a DIFFERENT dual each time -- measured on the pure isoP arm
+        # (mu_per_iteration_20260915.py): iteration 0 reaches |mu|max 2.24 while later ones sit
+        # near 0.9-1.2, per-expert spread ACROSS iterations averages 1.75 and reaches 3.10, and
+        # individual experts flip sign between iterations (expert 1: -1.27 at iter 0, +1.39 at
+        # iter 1). A single averaged buffer therefore destroys the signal twice: it washes out
+        # the magnitude (|mean(mu)|max 0.66 vs 2.24) and cancels the sign-flipping components.
+        # That is why the first, single-buffer version of this fix recovered almost nothing
+        # (PPL 177.09 -> 175.16) -- the test was doomed by the averaging, not by the hypothesis.
+        # So the buffer is (n_iter, K) and eval CYCLES through it.
+        #
+        # The cycle length is taken from the buffer shape, so the block needs no knowledge of
+        # `layer_iterations` and layer.py is untouched.
+        #
+        # SCOPE: calibration and eval only, both of which run under no_grad with a clean call
+        # order. A training-time per-iteration EMA is NOT supported, because activation
+        # checkpointing replays the forward during backward and would desynchronise the counter.
+        self.sinkhorn_mu_iters = max(1, int(sinkhorn_mu_iters))
         if self.sinkhorn_persist_mu:
-            self.register_buffer("sinkhorn_mu", torch.zeros(len(experts), dtype=torch.float32),
+            self.register_buffer("sinkhorn_mu",
+                                 torch.zeros(self.sinkhorn_mu_iters, len(experts), dtype=torch.float32),
                                  persistent=True)
-            self.register_buffer("sinkhorn_mu_count", torch.zeros((), dtype=torch.float32),
+            self.register_buffer("sinkhorn_mu_count", torch.zeros(self.sinkhorn_mu_iters, dtype=torch.float32),
                                  persistent=True)
+            self.register_buffer("_mu_call", torch.zeros((), dtype=torch.long), persistent=False)
         else:
             self.sinkhorn_mu = None
             self.sinkhorn_mu_count = None
@@ -1223,10 +1244,17 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 if self.sinkhorn_persist_mu:
                     self._update_running_mu(mu)
                 logits = logits - mu.to(logits.dtype)
-            elif self.sinkhorn_persist_mu and float(self.sinkhorn_mu_count) > 0:
-                # EVAL: use the running estimate rather than nothing. Without this the
-                # router is evaluated untilted while it was trained tilted.
-                logits = logits - self.sinkhorn_mu.to(logits.dtype)
+            elif self.sinkhorn_persist_mu and float(self.sinkhorn_mu_count.sum()) > 0:
+                # EVAL: apply the dual for THIS iteration of the shared block, cycling with the
+                # call index. Without this the router is evaluated untilted while it was trained
+                # tilted, and the error compounds with iteration count -- measured WikiPPL among
+                # pure+sinkhorn arms: 4 iterations 103.78, 8 iterations 177.09 and 316.21,
+                # against ~41 for every hybrid (1 MoE block of 7) and 61.65 for the pure arm
+                # whose clamped bias DOES survive to eval.
+                k = int(self._mu_call.item()) % self.sinkhorn_mu_iters
+                if float(self.sinkhorn_mu_count[k]) > 0:
+                    logits = logits - self.sinkhorn_mu[k].to(logits.dtype)
+                self._mu_call += 1
         return logits
 
     @torch.no_grad()
@@ -1239,10 +1267,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         mu falls over training -- measured 3.44 -> 1.97 at 134M). A plain EMA would have made
         a 64-batch calibration essentially a ONE-batch estimate, since after seeding, each
         later batch would move it only 1%."""
-        cnt = float(self.sinkhorn_mu_count) + 1.0
+        k = int(self._mu_call.item()) % self.sinkhorn_mu_iters
+        cnt = float(self.sinkhorn_mu_count[k]) + 1.0
         w = max(_SINKHORN_MU_MOMENTUM, 1.0 / cnt)
-        self.sinkhorn_mu.mul_(1.0 - w).add_(mu.float(), alpha=w)
-        self.sinkhorn_mu_count += 1.0
+        self.sinkhorn_mu[k].mul_(1.0 - w).add_(mu.float(), alpha=w)
+        self.sinkhorn_mu_count[k] += 1.0
+        self._mu_call += 1
 
     @torch.no_grad()
     def _solve_sinkhorn_mu(self, logits: torch.Tensor) -> torch.Tensor:
@@ -1375,7 +1405,8 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 m["sinkhorn_iters"] = float(self.sinkhorn_iters)
                 if self.sinkhorn_persist_mu:
                     m["sinkhorn_mu_running_absmax"] = float(self.sinkhorn_mu.abs().max())
-                    m["sinkhorn_mu_count"] = float(self.sinkhorn_mu_count)
+                    m["sinkhorn_mu_count"] = float(self.sinkhorn_mu_count.sum())
+                    m["sinkhorn_mu_iters"] = float(self.sinkhorn_mu_iters)
             if self.cos_probe_interval > 0 and self._cos_n > 0:
                 m["expert_cos_abs_mean"] = (self._cos_sum / self._cos_n.clamp_min(1.0)).item()
                 self._cos_sum.zero_(); self._cos_n.zero_()
@@ -1668,6 +1699,7 @@ def build_boltzmann_moe(
     e_sign_override: str | None = None,
     sinkhorn_iters: int = 0,
     sinkhorn_persist_mu: bool = False,
+    sinkhorn_mu_iters: int = 1,
     repulsion_tensor_idx: bool = False,
     init_method: str = "normal",
     initializer_range: float = 0.02,
@@ -1758,6 +1790,7 @@ def build_boltzmann_moe(
         repulsion_space=repulsion_space,
         sinkhorn_iters=sinkhorn_iters,
         sinkhorn_persist_mu=sinkhorn_persist_mu,
+        sinkhorn_mu_iters=sinkhorn_mu_iters,
         repulsion_tensor_idx=repulsion_tensor_idx,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)
