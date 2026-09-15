@@ -1,5 +1,31 @@
 # Boltzmann MoE — TODO
 
+## 2026-09-15: Avg11 for the seven previously-unevaluated sharded ICLR arms — DONE
+
+Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
+
+**Done**
+- [x] All 7 arms that had `global_step*` shards but no `unsharded*` dir and no
+      `harness_results_*.json` now have a COMPLETE 11/11 Avg11 + separate MMLU /
+      GSM8K-CoT / WikiText word-PPL. Full table in `PROGRESS.md` (2026-09-15 entry).
+- [x] **First 400M/32B headline number**: `scale32B_gptswitch` at its full
+      61035 steps / 32.00B tokens = **Avg11 50.25, WikiPPL 25.00**.
+- [x] Read the two live `iclr_scale` arms without touching the trainers, via a
+      pure-read shard copy in `results/iclr_scale_eval_staging/` (rationale in
+      the script header and `PROGRESS.md`).
+
+**Next**
+- [ ] **The 32B Boltzmann-vs-Switch comparison is still OPEN.** `scale32B_boltz_hop`
+      is only at step ~7000/61035 (Avg11 44.64 / PPL 42.30 at step 6000). Re-eval at
+      the 61035 target and only then compare against gptswitch's 50.25.
+- [ ] Do NOT quote the five PARTIAL rows as results — task-complete 11/11 Avg11 is
+      not training-complete. `w1w2_K32_top2` (41.63 @ 33% of budget) does **not**
+      resolve Hopfield-vs-W1W2; that arm is still `#PAUSED-20260914`. To settle it,
+      resume it to 30000 steps and compare against Hopfield K=32's 44.38.
+- [ ] Optional cleanup: `results/iclr_scale_eval_staging/` holds ~3 GB of copied
+      shards plus two unsharded models; the gptswitch step-58000 row there is
+      superseded by `unsharded_step61035` in the real run dir.
+
 ## 2026-09-12: inference-FLOPs work (see HANDOFF.md §7 for all evidence)
 
 **Done**
@@ -80,9 +106,18 @@
 - [x] (b) Intermittent-repulsion patch DRAFTED (not applied; needs sign-off) —
       `results/router_analysis/intermittent_repulsion_20260914.patch`. Adds
       `repulsion_interval` (default 1 = current) + `repulsion_scale_comp` to
-      `BoltzmannMoEFFEnergy`, opt-in per config. NOTE: profiler shows repulsion is
-      only ~2–4% of the whole step (not 39%: that was one isolated block-call), so
-      this is a safe near-free win but NOT the headline lever.
+      `BoltzmannMoEFFEnergy`, opt-in per config.
+      **CORRECTION 2026-09-15: the "~2–4% of the whole step" note below was WRONG.**
+      It was a profiler bucketing artefact — only repulsion's `F.normalize` landed
+      in reduce/norm, while its dominant cost (the backward through normalize+cos)
+      fell into the generic elementwise bucket. Repulsion is **17–21% of the
+      optimizer step**: the bench's 7.59 ms/call x 48 calls/step (6 recurrence x 8
+      grad-accum) = ~364 ms of 1713 ms = 21%, matching a direct A/B (1.463 vs 1.210
+      s/step = 17%). So repulsion IS a headline-sized lever. But intermittent
+      firing buys that speed by weakening the regulariser (see
+      ACCEL_FINDINGS_20260915.md on the `boltz-accel` branch) — prefer
+      **weight-space repulsion**, 2.20 vs 7.59 ms/call and sparse-compatible, at
+      full strength every step.
 
 **Next**
 - [ ] **Headline levers to close the 5× gap (from the trace, biggest first):**
