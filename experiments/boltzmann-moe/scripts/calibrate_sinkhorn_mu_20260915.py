@@ -135,7 +135,9 @@ def main():
             model(input_ids=b)
             if (i+1) % 16 == 0:
                 mu = moes[0].sinkhorn_mu
-                print(f"  batch {i+1:4d}/{a.batches}  |mu|max={mu.abs().max():.4f}  count={float(moes[0].sinkhorn_mu_count):.0f}")
+                # sinkhorn_mu_count is now per-iteration, shape (n_iter,), so .sum() not float()
+                print(f"  batch {i+1:4d}/{a.batches}  |mu|max={mu.abs().max():.4f}  "
+                      f"solves={float(moes[0].sinkhorn_mu_count.sum()):.0f}")
     for j, m in enumerate(moes):
         mu = m.sinkhorn_mu.float().cpu()
         print(f"  block {j}: counts={m.sinkhorn_mu_count.cpu().numpy().astype(int).tolist()}")
