@@ -176,3 +176,13 @@ distributed_args:
   fsdp_algorithm: 2
   torch_compile: true
   stage: 0
+
+# 2026-09-15: AUTO-RESUME, added mid-run. Without this an arm restarts from step 0 whenever
+# LSF REQUEUES it. LSF preemption here goes SSUSP -> PEND -> RUN on the SAME job id, which
+# re-executes the original bsub command with this original config; the watchdog's
+# auto-resume never runs because the watchdog never resubmitted. Measured damage before the
+# fix: iclr_hop_K16_dense_sink lost ~19000 steps, slope90k_hyb_sink ~18500, across 4 starts
+# each. save_interval alone does NOT protect against this -- the checkpoints were on disk
+# the whole time and simply never loaded.
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr_sink/iclr_hop_K32_top2_sink
