@@ -2221,9 +2221,43 @@ this property is worth more than the ~0.11 nat annealing bonus itself.
 
 #### Unverified at these sizes -- check before trusting the table
 
-* Sparse has never been run above 400M. The `micro_batch_size: 4` (16384 tok/call) requirement may
-  OOM at d=1536 / I_e=30966 even with sparsity's ~4x cut; the fallback is mbs 1 / ga 8 at some
-  speedup cost, and at mbs 1 the sandwich still measured 1.83-1.91x because its experts are wide.
+* Sparse has never been run above 400M. **But the mbs-4 OOM worry is COMPUTED AWAY** -- see 12.21:
+  the capacity buffer is `(K, C+1, I_e)` with `C = ceil(cf*T*p/K)`, so
+  `sparse@mbsM / dense@mbs1 = cf * p/K * M = 1.25x` INDEPENDENT of I_e. At 1B that is 4.73 GiB
+  against the 3.78 GiB dense mbs 1 would use -- and dense mbs 1 is what already runs everywhere.
+  The fallback to mbs 1 / ga 8 remains available (the sandwich still measured 1.83-1.91x there).
 * The proxy's quality at larger K*I_e is unknown. The ranking task gets harder as experts multiply;
   `proxy_out_dim: 512` and `proxy_rank: 16` were fitted at I_e ~15-18k.
 * The ~1.85x sparse factor is measured on the 400M sandwich and is NOT placement-controlled.
+
+### 12.21 Sparse activation footprint is CLOSED FORM: sparse@mbs4 = 1.25x dense@mbs1, at every size
+
+The capacity dispatch allocates `(K, C+1, I_e)` with `C = ceil(cf * T * p / K)`,
+`cf = sparse_capacity_factor` (default **1.25**, energy_ff.py:521/1273), `T = mbs*seq`, and during
+TRAINING `p = sparse_candidates + sparse_explore = 4`. So the ratio to a dense mbs-1 forward is
+
+```
+sparse@mbsM / dense@mbs1  =  cf * (p/K) * M  =  1.25 * 0.25 * 4  =  1.25x
+```
+
+**independent of I_e, d, and model size.** Validated against 12.13's measured number: that section
+reports the 134M dense mbs-4 intermediate `(4, 4096, 71680)` at 2.19 GiB, and the formula gives
+2.19 GiB.
+
+| shape | I_e | dense mbs1 | dense mbs4 | **sparse mbs4** |
+|---|---:|---:|---:|---:|
+| pure it4 400M | 17920 | 2.19 GiB | 8.75 GiB (OOMs) | **2.73 GiB** |
+| sandwich 400M | 15872 | 1.94 GiB | 7.75 GiB | **2.42 GiB** |
+| 700M d=1280 | 25031 | 3.06 GiB | 12.22 GiB | **3.82 GiB** |
+| 1B d=1536 | 30966 | 3.78 GiB | 15.12 GiB | **4.73 GiB** |
+
+**Consequences.**
+1. `micro_batch_size: 4` under sparsity is roughly as safe as `micro_batch_size: 1` dense, which is
+   the configuration every dense arm here already runs. So mbs 4 is NOT a memory gamble at any of
+   these sizes, and 12.20's "may OOM at 1B" caveat is withdrawn.
+2. It also explains why mbs 4 "fits where dense could not": dense mbs 4 is 4x dense mbs 1, sparse
+   mbs 4 is 1.25x. The saving is `cf * p/K` = 0.3125x, i.e. **3.2x**, not the naive `k/K` = 8x,
+   because the capacity factor and the exploration candidates both cost memory.
+3. Lowering `sparse_explore` to 1 would drop p to 3 and the ratio to 0.94x, and raising cf to 1.5
+   would push it to 1.5x. Both are levers if a larger model ever does run tight -- but note
+   `sparse_explore` is what lets the proxy train at all, so cut cf first.
