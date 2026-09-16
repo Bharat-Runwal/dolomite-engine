@@ -135,7 +135,19 @@ tuning_args:
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/wsd90k/wsd90k_pure_it4_sparse
-  save_interval: 1000                  # ~53 min. At 5000 a preempted arm can make ZERO net
+  save_interval: 50                    # 50. Was 200; measured 6.99 s/step at 4 GPUs, so 200
+                                       # steps = 23 min and job 1717789 was preempted at step 60.
+                                       # Tonight preemptions land every 5-12 min, so 50 (~6 min) is
+                                       # what actually accumulates. Costs ~6-11% in checkpoint writes
+                                       # (~4.8 GB with Adam states); worth it -- phase 1 needs only
+                                       # ~280-500 steps total and MUST bank them.
+                                       # ORIGINAL NOTE: 200, NOT 1000. PHASE 1 only needs ~500-1500 steps, so a
+                                       # 1000-step interval means a preemption before the first
+                                       # checkpoint restarts from ZERO -- and it can do that
+                                       # forever. That is exactly how sw2k_sparse_c10x livelocked
+                                       # (HANDOFF 12.18): save_interval 1000 against a 2000-step
+                                       # run, preempted at 1200-1540 three times, never wrote
+                                       # global_step2000. RULE: save_interval << remaining steps.
   max_to_keep: 2                       # progress. max_to_keep must be an int, never null.
 
 logging_args:
@@ -151,8 +163,13 @@ training_parameters:
   micro_batch_size: 1                  # NOT 4. Phase 1 is DENSE and dense+fused_experts OOMs at
                                        # mbs 4. mbs 4 is a PHASE-2-only affordance created by
                                        # sparsity cutting the intermediate ~4x.
-  gradient_accumulation_steps: 8        # 8 GPU x 1 x 8 x 4096 = 262144 -- IDENTICAL to phase 2,
-                                       # so the model sees no tokens/step discontinuity.
+  gradient_accumulation_steps: 16       # 4 GPU x 1 x 16 x 4096 = 262144 -- IDENTICAL to phase 2's
+                                       # 8 x 4 x 2, so the handoff carries no tokens/step change.
+                                       # PHASE 1 RUNS ON 4 GPUs, PHASE 2 ON 8. Phase 1 is dense so
+                                       # it cannot use mbs 4 regardless; 8 GPUs bought it nothing and
+                                       # 8-GPU exclusive allocations would not place (517 hosts short
+                                       # on 2026-09-16 22:11). 4 GPUs places sooner, which matters
+                                       # more than the 2x on a 500-1500 step warm-up.
   eval_during_training: false
   gradient_clipping: 1
 
