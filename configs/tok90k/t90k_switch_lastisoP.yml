@@ -150,3 +150,11 @@ distributed_args:
   # carried over when these configs were derived.
   torch_compile: false
   stage: 0
+
+# 2026-09-16: added after t90k_pure_T12 lost 2670 steps. LSF preemption REQUEUES the job on the
+# same jid and re-runs the ORIGINAL command; the watchdog resolves load_args at SUBMIT time, so
+# an arm launched before its first checkpoint existed had none baked in and restarted from step 0
+# on every requeue. Pre-flight check 4. Safe here because the checkpoint dir is non-empty; a
+# duplicate load_args from the watchdog's own append is last-wins on the same path.
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok90k/t90k_switch_lastisoP

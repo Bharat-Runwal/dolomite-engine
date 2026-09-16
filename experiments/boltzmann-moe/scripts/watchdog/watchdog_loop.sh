@@ -163,17 +163,19 @@ resubmit_job() {
         :
     fi
 
-    # AUTO-RESUME. dolomite needs an explicit load_args.load_path; without it a
-    # resubmit silently restarts from step 0 and we lose everything since the last
-    # resubmit. Build a runtime config carrying load_path when a checkpoint exists.
-    local save_path resume_cfg="$cfg"
+    # AUTO-RESUME. dolomite needs an explicit load_args.load_path; without it a start
+    # silently begins at step 0 and we lose everything since the last resubmit.
+    #
+    # RESOLVED AT RUN TIME, NOT SUBMIT TIME (fixed 2026-09-16). LSF preemption REQUEUES the job
+    # on the same jid and re-runs THIS EXACT SCRIPT, so anything decided at submission is stale
+    # for every requeue after it. An arm launched before its first checkpoint existed therefore
+    # had no load_args baked in and restarted from step 0 on EVERY preemption:
+    # t90k_pure_T12 lost 2670 steps this way, twice, with nothing in the log to say so beyond a
+    # second "step = 10" and a learning rate back in warmup. Doing the check inside the job
+    # script makes each requeue re-evaluate it. Pre-flight check 4.
+    local save_path
     save_path=$(grep -E "^\\s*save_path:" "$cfg" | head -1 | sed "s/.*save_path:\\s*//")
-    if [ -n "$save_path" ] && [ -f "$save_path/latest_checkpointed_iteration.json" ]; then
-        resume_cfg="$save_path/watchdog_runtime_$(date +%s).yml"
-        cp "$cfg" "$resume_cfg"
-        printf "\\nload_args:\\n  load_path: %s\\n" "$save_path" >> "$resume_cfg"
-        log "  resuming $name from checkpoint in $save_path"
-    fi
+    log "  load_args will be resolved at run time from $save_path"
 
     # Write the job script to a temp file to avoid heredoc-in-heredoc pitfalls.
     local tmp_script
@@ -183,7 +185,23 @@ resubmit_job() {
 unset TMPDIR TEMP TMP
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=/proj/dmfexp/nima/Code/dolomite-engine:\${PYTHONPATH:-}
-$launcher bash /proj/dmfexp/nima/Code/dolomite-engine/scripts/common/pretrain.sh "$resume_cfg"
+CFG="$cfg"
+SP="$save_path"
+if [ -n "\$SP" ] && [ -f "\$SP/latest_checkpointed_iteration.json" ]; then
+    if grep -qE "^load_args:" "\$CFG"; then
+        echo "RESUME: base config already carries load_args; using it unchanged"
+    else
+        RCFG="\$SP/watchdog_runtime_\$\$.yml"
+        cp "\$CFG" "\$RCFG"
+        printf "\\nload_args:\\n  load_path: %s\\n" "\$SP" >> "\$RCFG"
+        CFG="\$RCFG"
+        echo "RESUME: built \$RCFG with load_path \$SP"
+    fi
+    echo "RESUME: latest = \$(cat \$SP/latest_checkpointed_iteration.json)"
+else
+    echo "RESUME: no checkpoint under \$SP -- starting from step 0"
+fi
+$launcher bash /proj/dmfexp/nima/Code/dolomite-engine/scripts/common/pretrain.sh "\$CFG"
 INNER
 
     local out
