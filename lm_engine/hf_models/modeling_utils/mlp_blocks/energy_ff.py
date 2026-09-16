@@ -511,6 +511,8 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         sinkhorn_iters: int = 0,
         sinkhorn_persist_mu: bool = False,
         sinkhorn_mu_iters: int = 1,
+        sparse_backproj: bool = False,
+        sparse_capacity_factor: float = 1.25,
         repulsion_tensor_idx: bool = False,
     ) -> None:
         super().__init__()
@@ -754,6 +756,29 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # SCOPE: calibration and eval only, both of which run under no_grad with a clean call
         # order. A training-time per-iteration EMA is NOT supported, because activation
         # checkpointing replays the forward during backward and would desynchronise the counter.
+        # ---- TRUE SPARSITY, back-projection only (2026-09-16) ----------------------
+        # `top_k` has always been a post-hoc MASK: all K experts' forward AND back
+        # projections are computed, then multiplied by a p that is zero for K-k of them. The
+        # FORWARD projection cannot be skipped by an exact router -- it needs all K energies
+        # to decide, which is the 1/2(1+k/K) floor ("cannot beat 2x"). The BACK projection
+        # can: by the time it runs, p is known.
+        #
+        # Capacity-based dispatch: gather each expert's assigned tokens into a fixed
+        # (K, C, I_e) buffer, one bmm against W viewed as (K, I_e, hidden), scatter-add back.
+        # Fixed shapes, so it is torch.compile-safe -- unlike a per-expert Python loop, which
+        # was measured at 0.59x, i.e. SLOWER than the dense mask it replaces.
+        #
+        # C = ceil(capacity_factor * T * k / K). EXACT while no expert exceeds C; on overflow
+        # the surplus (token, expert) pairs are DROPPED, which changes the function. Sinkhorn
+        # makes that unlikely -- measured max_share 0.041-0.077 against 1/K = 0.031-0.0625 --
+        # and `_sparse_overflow` counts it so silence is not mistaken for exactness.
+        self.sparse_backproj = bool(sparse_backproj)
+        self.sparse_capacity_factor = float(sparse_capacity_factor)
+        if self.sparse_backproj:
+            assert self.top_k is not None and self.top_k < len(experts), (
+                "sparse_backproj needs top_k < n_experts; with dense routing there is nothing to skip"
+            )
+            self.register_buffer("_sparse_overflow", torch.zeros((), dtype=torch.long), persistent=False)
         self.sinkhorn_mu_iters = max(1, int(sinkhorn_mu_iters))
         if self.sinkhorn_persist_mu:
             self.register_buffer("sinkhorn_mu",
@@ -1008,6 +1033,51 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
     # --- fused-GEMM path ---------------------------------------------------- #
 
+    def _sparse_backproj(self, gated: torch.Tensor, p: torch.Tensor,
+                         W: torch.Tensor, pref: float) -> torch.Tensor:
+        """Back-projection over only the top-k experts per token.
+
+        gated (..., K, I_e), p (..., K) with K-k zeros, W (K*I_e, hidden).
+        Returns (..., hidden), equal to the dense `(gated * p) @ W` up to fp associativity
+        whenever no expert exceeds capacity.
+        """
+        K, I_e = self.n_experts, self._expert_I
+        H = self.hidden_size
+        lead = gated.shape[:-2]
+        g = gated.reshape(-1, K, I_e)
+        pf = p.reshape(-1, K)
+        T = g.shape[0]
+        k = int(self.top_k)
+        C = max(1, int(math.ceil(self.sparse_capacity_factor * T * k / K)))
+        dev = g.device
+
+        # (token, expert) pairs to evaluate. Taking topk of p (not of the logits) keeps this
+        # consistent with whatever mask _route applied, including renormalize_topk.
+        idx = pf.topk(k, dim=-1).indices                       # (T, k)
+        flat_e = idx.reshape(-1)                               # (T*k,)
+        flat_t = torch.arange(T, device=dev).unsqueeze(1).expand(T, k).reshape(-1)
+
+        # stable sort groups pairs by expert; rank within group gives the slot
+        order = torch.argsort(flat_e, stable=True)
+        se, st = flat_e[order], flat_t[order]
+        counts = torch.zeros(K, dtype=torch.long, device=dev).scatter_add_(
+            0, se, torch.ones_like(se))
+        starts = torch.cat([torch.zeros(1, dtype=torch.long, device=dev),
+                            counts.cumsum(0)[:-1]])
+        slot = torch.arange(se.shape[0], device=dev) - starts[se]
+        keep = slot < C
+        if self.track_load:
+            with torch.no_grad():
+                self._sparse_overflow += (~keep).sum()
+
+        se_k, st_k, slot_k = se[keep], st[keep], slot[keep]
+        buf = g.new_zeros(K, C, I_e)
+        buf[se_k, slot_k] = g[st_k, se_k]                      # gather
+        y = torch.bmm(buf, W.view(K, I_e, H))                  # ONE batched GEMM, K*C*I_e*H
+        contrib = y[se_k, slot_k] * (pref * pf[st_k, se_k]).unsqueeze(-1)
+        out = g.new_zeros(T, H).index_add_(0, st_k, contrib)    # scatter-add
+        return out.reshape(*lead, H)
+
     def _fused_W(self) -> torch.Tensor:
         return self._fused_spec["weight_fn"]()
 
@@ -1037,8 +1107,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             self._proxy_step(x, E_k, logits)
 
         gated = (gelu_Wx * gelu_prime).view(*lead, K, I_e)
-        gw = (gated * (pref * p).unsqueeze(-1)).reshape(*lead, K * I_e)
-        out = gw @ W                             # ONE backward-projection GEMM
+        if self.sparse_backproj:
+            # skips the (1 - k/K) of the back GEMM that the dense mask multiplies by zero
+            out = self._sparse_backproj(gated, p, W, pref)
+        else:
+            gw = (gated * (pref * p).unsqueeze(-1)).reshape(*lead, K * I_e)
+            out = gw @ W                         # ONE backward-projection GEMM
 
         if self.training and self._capture_energy:
             self._last_energy_per_token = -self.temperature * torch.logsumexp(logits, dim=-1)
@@ -1700,6 +1774,8 @@ def build_boltzmann_moe(
     sinkhorn_iters: int = 0,
     sinkhorn_persist_mu: bool = False,
     sinkhorn_mu_iters: int = 1,
+    sparse_backproj: bool = False,
+    sparse_capacity_factor: float = 1.25,
     repulsion_tensor_idx: bool = False,
     init_method: str = "normal",
     initializer_range: float = 0.02,
@@ -1791,6 +1867,8 @@ def build_boltzmann_moe(
         sinkhorn_iters=sinkhorn_iters,
         sinkhorn_persist_mu=sinkhorn_persist_mu,
         sinkhorn_mu_iters=sinkhorn_mu_iters,
+        sparse_backproj=sparse_backproj,
+        sparse_capacity_factor=sparse_capacity_factor,
         repulsion_tensor_idx=repulsion_tensor_idx,
     )
     return FusedMoEContainer(expert_holder=holder, moe=moe)
