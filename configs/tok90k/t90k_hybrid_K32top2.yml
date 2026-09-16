@@ -1,0 +1,150 @@
+# TOKEN-SCALING SET, 90000 steps = 23.6B tokens, CORRECTLY SCHEDULED (2026-09-16).
+#
+# WHY THIS EXISTS. The published slope90k_* arms set num_training_steps 90000 but
+# num_warmup_steps 2000 + num_decay_steps 28000 = 30000, so their last 60000 steps ran pinned
+# at the 2e-4 floor. Measured on the reruns: loss falls 0.12-0.15 per 10k steps while the LR
+# decays, then -0.002..0.000 per 10k at the floor -- the final 45-51k steps bought 0.015-0.019
+# nats. So there is currently NO sound token-scaling measurement, and the paper's
+# "+0.41pp for 3x the tokens" is a lower bound rather than a result.
+#
+# Here decay covers the whole run: warmup 2000 + decay 88000 = 90000.
+#
+# One representative per family, all at 262144 tokens/step on 4 GPUs so the three are directly
+# comparable to each other AND to the 30000-step (7.86B) arms of the same lineage:
+#   hybrid boltz : iclr_hop_K32_top2_sink   Avg11 44.58, the best corrected hybrid
+#   pure boltz   : pure_hop_T12_sink        Avg11 40.96, the best pure arm (12 iterations)
+#   GPT switch   : gptmoe_last_isoP         Avg11 44.43, the paper's plain-GPT iso-param row
+#                                           (NOT gptmoe_all_isoP, which is 43.05)
+#
+# Boltzmann arms carry sinkhorn_persist_mu + sinkhorn_mu_iters from the start, so mu reaches
+# inference. Without it the router is trained tilted and evaluated untilted: +1.827 nats at 12
+# iterations, +1.587 at 8, ~0.003 for a hybrid.
+# THIS ARM: t90k_hybrid_K32top2  (base configs/iclr_sink/iclr_hop_K32_top2_sink.yml)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 6]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 16384   # total across K; I_e = 512
+        n_experts: 32
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent   # 2026-09-12 fix; REVERT = mean
+        routing_norm: zscore
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 3
+        sinkhorn_persist_mu: true
+        sinkhorn_mu_iters: 6
+        repulsion_tensor_idx: true
+        activation_function: gelu
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok90k/t90k_hybrid_K32top2
+  save_interval: 2000
+  max_to_keep: 50
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: t90k_hybrid_K32top2
+
+training_parameters:
+  num_training_steps: 90000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 88000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
