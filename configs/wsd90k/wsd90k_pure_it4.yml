@@ -1,0 +1,211 @@
+# ============================================================================================
+# 90k WSD -- PURE 400M (single recurrent energy block, no GPT layers), 4 iterations.
+# Parent: configs/depth400/d400_it4.yml. Sibling: wsd90k_sandwich.yml (same schedule, same
+# tokens/step, so the two are directly comparable to each other).
+#
+# WHY WSD (Warmup-Stable-Decay) AND NOT COSINE -- HANDOFF 12.17
+# Measured on the sw2k pair (sw2k_sparse at peak vs sw2k_sparse_c10x decaying, identical
+# otherwise): the ENTIRE annealing bonus of ~0.11 nats is realised by a 1.4x LR reduction
+# (1e-3 -> 7.04e-4), and the further 3x down to 2.37e-4 adds NOTHING -- the gap is flat from
+# step 900 to 1600. So the fast-drop arm does not have a better trajectory, it has the same
+# trajectory plus a one-time saturating offset. Decaying early forfeits progress in exchange
+# for a bonus that is available at any moment.
+# Corroborated from the other side by 12.4 (60k steps pinned at a 2e-4 floor bought 0.015-0.019
+# nats) and 12.5 (LR floor inert across a 50x range).
+#
+# THE PROPERTY THAT MATTERS ON A DEADLINE. Under cosine, a run stopped at 60% is stuck
+# mid-decay and badly annealed. Under WSD the trunk sits at PEAK the whole time, so you can
+# branch a short decay off ANY checkpoint and get a properly annealed, evaluable model without
+# touching the trunk. See the branch recipe at the bottom of this file. This is the reason to
+# prefer WSD here even if 90k steps turns out not to be reachable.
+#
+# PEAK IS 2e-3, DELIBERATELY NOT LOWERED. 12.16 floated "maybe 2e-3 was too high"; 12.17
+# refutes it -- sw2k_sparse_5e4 is behind the 1e-3 arm at EVERY step and the gap is not closing
+# (step 800: 4.6525 vs 4.5515; step 1600: 4.1231 vs 4.0492). And the "struggles early, then
+# drops fast and steady" shape that prompted the doubt is the expected signature of a high peak,
+# not evidence against it: measured loss = valley progress + a temperature penalty that grows
+# with lr. 12.5 also warns 1e-2 diverges ~1 in 3, so do NOT go above 2e-3.
+#
+# WHY 4 ITERATIONS AND NOT T8/T12 -- and this is the weakest link in this config.
+# 12.14 ran the three iso-FLOP arms at 400M (it4 I_e 17920 / 401M, it8 8960 / 254M, it12
+# 5952 / 204M). it4 won at EVERY logged step and is additionally 22% faster per step, because
+# iterations are sequential in a launch-bound block. BUT the gap NARROWS monotonically
+# (it4-minus-it8: 0.258 -> 0.132 over steps 100-500) and would cross somewhere past a few
+# thousand steps; the arms were killed at ~1000. So "width wins" is established at ~1000 steps
+# and NOT at 90000, and 12.2 (which ran 15k+) points the other way at 134M.
+# it4 is chosen because it is the only shape MEASURED at 400M. If you want the depth hedge,
+# change layer_iterations to [8], sinkhorn_mu_iters to 8, and intermediate_size to 143360
+# (I_e 8960) to stay iso-FLOP -- all three together, or the comparison is meaningless.
+#
+# ---- PRE-FLIGHT (CLAUDE.md checklist), verified line by line ----
+# 1. SCHEDULE COVERS THE RUN: 1000 + 80000 + 9000 = 90000 = num_training_steps.  OK
+# 2. TOKENS/STEP: 8 GPU x mbs 1 x ga 8 x 4096 = 262144, identical to wsd90k_sandwich and to
+#    the iclr_big 400M lineage. 90000 x 262144 = 23.59B tokens.
+#    *** GPUS IS NOT IN THIS FILE. THIS CONFIG REQUIRES 8 GPUs. ***
+#    At 4 GPUs it silently becomes 131072 tok/step -- half the tokens -- which is exactly the
+#    error that made iclr_big_hop_pure_sink's -0.99pp unreadable. Verify from the log:
+#    tokens/step = billion_tokens_per_day * 1e9 * step_time / 86400.
+# 3. GPU COUNT: pass 8 to submit_selfresuming.sh. `nexec_host` is HOSTS, not GPUs.
+# 4. load_args: ABSENT, and must stay absent -- this is a fresh run, and
+#    submit_selfresuming.sh appends load_args AT RUN TIME on every requeue.
+# 5. n/a on a first start (no checkpoint dir yet).
+# 6. save_path and wandb name are both new and share no prefix with an existing arm.
+# 7. KNOBS REACH THE MODEL: every field here is copied verbatim from d400_it4.yml, which is a
+#    config that ran, so get_mlp_block already forwards all of them.
+# 8. SIGN: expert_kind hopfield needs e_sign_override "pos".  OK
+# 9. SINKHORN: sinkhorn_persist_mu true AND sinkhorn_mu_iters 4 == layer_iterations [4].  OK
+#    No cos_probe_interval (Tensor.item() -> unconditional graph break).  OK
+# 10. Diff vs parent d400_it4.yml is ONLY: num_training_steps, the 4 scheduler lines,
+#     gradient_accumulation_steps (8, unchanged in value but now at 8 GPUs), save_path,
+#     wandb name. Architecture, data, optimizer, seed all untouched.
+#
+# WALL CLOCK, and read this before launching. d400_it4 measured 3.18 s/step at 4 GPUs and
+# 131072 tok/step. At 8 GPUs and 262144 tok/step that is ~3.2 s/step, so 90000 steps is
+# ~80 h ~= 3.3 DAYS uninterrupted, on preemptable. save_interval 1000 (~53 min) bounds the loss
+# per preemption. If that does not fit the deadline, do NOT shorten the schedule -- run the
+# trunk as long as you have and branch a decay. That is the whole point of WSD.
+#
+# LAUNCH:
+#   bash experiments/boltzmann-moe/scripts/bsub/submit_selfresuming.sh \
+#        wsd90k_pure_it4 configs/wsd90k/wsd90k_pure_it4.yml 8 24:00 128G
+#   Then at 30-60 s confirm STAT=RUN, a first step, learning_rate ramping toward 2e-3, and
+#   tokens/step == 262144.
+# ============================================================================================
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [4]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 286720      # I_e = 286720 / 16 = 17920 (the 12.14 it4 width)
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0               # 0.35 was calibrated under the INVERTED sign
+        repulsion_form: abs
+        repulsion_coef: 0.1            # output-space value; a sparse arm needs weight-space 2.0
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected-sign variant (ROUTING_SIGN_BUG_20260915.md) ----
+        e_sign_override: "pos"         # pre-flight 8: hopfield anti-routes without this
+        sinkhorn_iters: 3              # exact chemical potential, no clamp
+        sinkhorn_persist_mu: true      # pre-flight 9: absent => trained tilted, evaluated
+        sinkhorn_mu_iters: 4           # untilted. Worth +1.6-1.8 nats on a PURE stack (12.1).
+        repulsion_tensor_idx: true     # tensor indices: 1 graph, 0 breaks. NOT optional.
+        activation_function: gelu
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/wsd90k/wsd90k_pure_it4
+  save_interval: 1000                  # ~53 min. At 5000 a preempted arm can make ZERO net
+  max_to_keep: 2                       # progress. max_to_keep must be an int, never null.
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: wsd90k_pure_it4
+
+training_parameters:
+  num_training_steps: 90000            # x 262144 tok = 23.59B tokens
+  eval_interval: 5000
+  micro_batch_size: 1                  # mbs 4 OOMs at d=1024 / I_e=17920 on 80GB (dense)
+  gradient_accumulation_steps: 8        # 8 GPU x 1 x 8 x 4096 = 262144
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+# ---- THE WSD SCHEDULE ----------------------------------------------------------------------
+# CosineScheduler already implements WSD when num_constant_steps > 0: warmup -> factor 1.0
+# (i.e. HELD AT PEAK) -> cosine down to lr * lr_decay_factor. Verified scheduler.py:90-106.
+# No new scheduler class, no code change.
+#   warmup   1000  ( 1.1%)  linear 0 -> 2e-3
+#   stable  80000  (88.9%)  HELD at 2e-3   <-- the exploration phase; loss looks worse here
+#   decay    9000  (10.0%)  cosine 2e-3 -> 2e-4
+# 9000 is already generous: 12.17 shows the bonus lands inside a 1.4x reduction. 74000/15000
+# (17% decay) is the more conservative literature default if you would rather over-provision.
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1                 # -> 2e-4. Floor is inert (12.5), so 0.1 not 0.01.
+  num_warmup_steps: 1000
+  num_constant_steps: 80000
+  num_decay_steps: 9000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0
+
+# ---- HOW TO BRANCH A DECAY OFF THE STABLE TRUNK --------------------------------------------
+# Legal: arguments.py:151-157 only forbids load_lr_scheduler true WITH load_optimizer false.
+# Copy this file, then:
+#   num_training_steps: 4000
+#   num_warmup_steps: 0 / num_constant_steps: 0 / num_decay_steps: 4000   (lr stays 2e-3)
+#   a NEW save_path and wandb name
+#   load_args:
+#     load_path: <this trunk's save_path>
+#     load_optimizer: true          # keep the Adam moments -- do not restart them
+#     load_lr_scheduler: false      # fresh decay-only schedule
+#     load_starting_iteration: false
+# NOT yet run end-to-end: check the load_dataloader_state interaction before trusting it, and
+# on a first attempt confirm the logged lr actually starts at 2e-3 and decays.
