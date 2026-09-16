@@ -1,4 +1,9 @@
 #!/bin/bash
+# 2026-09-16: moved evals from normal/grp_ebm to preemptable. grp_ebm is a 32-GPU
+# allocation and sits at 32/32 (a colleague's 16 + our 400M arm's 16), so every eval
+# submitted here PENDED INDEFINITELY -- two had been stuck 2-4 h. Evals are short and
+# restartable, and grp_preemptable was at 564/6144, so preemptable strictly dominates:
+# a small preemption risk against never starting at all.
 shopt -s extglob 2>/dev/null || true
 # collect_flops_wave_20260912.sh — the follow-up for the ICLR FLOPS wave.
 #
@@ -84,7 +89,7 @@ eval)
         if bjobs -noheader -o "job_name" 2>/dev/null | grep -qx "ev_$a"; then
             echo "skip $a (eval already in flight)"; continue
         fi
-        bsub -q normal -G grp_ebm -J "ev_$a" -gpu "num=1/task:mode=exclusive_process" \
+        bsub -q preemptable -G grp_preemptable -J "ev_$a" -gpu "num=1/task:mode=exclusive_process" \
              -n 1 -M 48G -W 04:00 \
              -o "$HOME/bsub_logs/ev_${a}_%J.stdout" -e "$HOME/bsub_logs/ev_${a}_%J.stderr" <<EOF >/dev/null
 #!/bin/bash
@@ -183,7 +188,7 @@ proxy)
     for a in $(arms); do
         U="$(res_of "$a")/unsharded"
         [ -f "$U/model.safetensors" ] || { echo "skip $a (not unsharded; run 'eval' first)"; continue; }
-        bsub -q normal -G grp_ebm -J "px_$a" -gpu "num=1/task:mode=exclusive_process" \
+        bsub -q preemptable -G grp_preemptable -J "px_$a" -gpu "num=1/task:mode=exclusive_process" \
              -n 1 -M 48G -W 04:00 \
              -o "$HOME/bsub_logs/px_${a}_%J.stdout" -e "$HOME/bsub_logs/px_${a}_%J.stderr" <<EOF >/dev/null
 #!/bin/bash

@@ -100,6 +100,26 @@
 > routing distribution, which the sparse path does not compute. Fit post-hoc on a trained
 > checkpoint with `scripts/calibrate_proxy_router_20260916.py`.
 
+> ## 📥 EVAL JOBS GO TO `preemptable`, NOT `normal`/`grp_ebm` — DEFAULT, DO NOT REVERT
+>
+> `grp_ebm` is a **32-GPU allocation and is routinely at 32/32** (a colleague's 16 plus our own
+> 400M arm's 16). Every eval submitted to `normal`/`grp_ebm` therefore **PENDS INDEFINITELY**:
+> found 2026-09-16 with `ev_slope90k_hyb_sink` and `ev_iclr_big_hop_sandwich_sink` stuck 2 and 4
+> hours respectively. Moved to `preemptable` with `bmod -q preemptable -G grp_preemptable`, they
+> both went `RUN` **immediately**.
+>
+> Evals are short and restartable, and `grp_preemptable` sits around 500-700 of 6144, so the trade
+> is a small preemption risk against never starting at all. Changed in
+> `scripts/collect_flops_wave_20260912.sh` (the driver the babysitter actually calls — it is
+> invoked fresh each cycle, so no restart is needed), plus `auto_eval_babysitter.sh` and
+> `auto_followup_20260912.sh`. **Keep it that way unless `grp_ebm` is genuinely free.**
+>
+> Two related traps. `blimits`, not `bjobs`, is the authoritative quota check. And a job's
+> `from_host` tells you WHO submitted it: both stuck evals showed `p5-r16-n3`, which is where
+> `boltz_auto_eval` runs — that is how the automation was identified as the source.
+> `scripts/submit_surrogate_router_b5.sh` still targets `normal`; it is a legacy TRAINING
+> submitter, not an eval, and was left alone deliberately.
+
 > ## 🖥 ANY GPU WORK GOES THROUGH bsub — INCLUDING ONE-OFF TESTS AND BENCHMARKS
 >
 > **An interactive session is frequently on a CPU-ONLY compute node.** Verified 2026-09-16 on

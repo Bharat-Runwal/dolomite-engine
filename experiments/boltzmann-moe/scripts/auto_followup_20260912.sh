@@ -1,4 +1,9 @@
 #!/bin/bash
+# 2026-09-16: moved evals from normal/grp_ebm to preemptable. grp_ebm is a 32-GPU
+# allocation and sits at 32/32 (a colleague's 16 + our 400M arm's 16), so every eval
+# submitted here PENDED INDEFINITELY -- two had been stuck 2-4 h. Evals are short and
+# restartable, and grp_preemptable was at 564/6144, so preemptable strictly dominates:
+# a small preemption risk against never starting at all.
 # auto_followup_20260912.sh — CPU-only babysitter, bsub'd so it outlives any session.
 #
 # Waits for all 8 iclr_flops arms to reach their target step, then automatically:
@@ -22,7 +27,7 @@ while true; do
     # self-resubmit before walltime so the chain never breaks
     if [ $(( $(date +%s) - START )) -gt $(( WALL - BUF )) ]; then
         log "walltime near; resubmitting self"
-        bsub -q normal -G grp_ebm -J boltz_auto_followup -n 1 -M 4G -W 24:00 \
+        bsub -q preemptable -G grp_preemptable -J boltz_auto_followup -n 1 -M 4G -W 24:00 \
              -o "$HOME/bsub_logs/boltz_auto_followup_%J.stdout" \
              -e "$HOME/bsub_logs/boltz_auto_followup_%J.stderr" \
              bash "$REPO/experiments/boltzmann-moe/scripts/auto_followup_20260912.sh" >> "$LOG" 2>&1

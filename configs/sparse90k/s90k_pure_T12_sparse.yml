@@ -138,8 +138,12 @@ tuning_args:
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/sparse90k/s90k_pure_T12_sparse
-  save_interval: 1000
-  max_to_keep: 95   # 90000/1000 = 90 ckpts; keep ALL so intermediate token counts stay evaluable
+  save_interval: 200           # NOT the usual 1000. On preemptable an 8-GPU job is a large
+                               # target: this arm was suspended twice inside ~9 minutes, and with
+                               # a 1000-step interval (~5 min at 0.31 s/step) it could be preempted
+                               # before EVERY checkpoint and so never advance past step 0. At 200
+                               # steps (~1 min) a preemption costs at most a minute of work.
+  max_to_keep: 8    # 200-step interval would otherwise accumulate 450 checkpoints
 
 # NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
 # copying a parent config; only save_path was updated, so every derived arm logged to

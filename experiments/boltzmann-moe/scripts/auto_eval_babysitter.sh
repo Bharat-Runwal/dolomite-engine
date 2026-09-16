@@ -1,4 +1,9 @@
 #!/bin/bash
+# 2026-09-16: moved evals from normal/grp_ebm to preemptable. grp_ebm is a 32-GPU
+# allocation and sits at 32/32 (a colleague's 16 + our 400M arm's 16), so every eval
+# submitted here PENDED INDEFINITELY -- two had been stuck 2-4 h. Evals are short and
+# restartable, and grp_preemptable was at 564/6144, so preemptable strictly dominates:
+# a small preemption risk against never starting at all.
 # auto_eval_babysitter.sh — CPU-only, bsub'd so it outlives any Claude session.
 #
 # WHY THIS REPLACES auto_followup_20260912.sh's trigger logic.
@@ -26,7 +31,7 @@ while true; do
     el=$(( $(date +%s) - START ))
     if [ $el -ge $((WALL - BUF)) ]; then
         log "walltime near ($el s); self-resubmitting"
-        bsub -q normal -G grp_ebm -J boltz_auto_eval -n 1 -M 4G -W 24:00 \
+        bsub -q preemptable -G grp_preemptable -J boltz_auto_eval -n 1 -M 4G -W 24:00 \
              -o "$HOME/bsub_logs/boltz_auto_eval_%J.stdout" \
              -e "$HOME/bsub_logs/boltz_auto_eval_%J.stderr" "bash $SELF" >> "$LOG" 2>&1
         log "exiting for successor"; exit 0
