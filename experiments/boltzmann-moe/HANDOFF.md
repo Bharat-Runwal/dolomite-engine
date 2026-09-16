@@ -1191,7 +1191,7 @@ does not transfer across parallelism shapes.** Bisect recorded in ACCEL_FINDINGS
     30 of them. Back-projection is the free half (~13-15% of the step, no router
     needed); the forward half needs the proxy and cuts the 61% elementwise bucket ~16x.
 
-### 11.10 What to do next
+### 11.10 What to do next  ⚠ SUPERSEDED by §12.7 — and several §11 numbers predate the mu-at-eval fix of §12.1
 
  1. **Let the 134M arms finish (2000 steps)** and confirm M3 > M1 on loss and that
     `energy_abs_mean` stays plateaued.
@@ -1206,3 +1206,143 @@ does not transfer across parallelism shapes.** Bisect recorded in ACCEL_FINDINGS
  4. **Unresolved**: no quality evidence at this scale. Every 300-step arm sat inside the
     lm_loss noise floor, and 7.5 found deleting the FF branch entirely moved perplexity
     by +0.0003. "Corrected routing is better" needs a long run with a downstream eval.
+
+
+---
+
+## 12. SESSION STANDING — 2026-09-16 (READ THIS FIRST)
+
+Section 11 is still correct on the routing sign and Sinkhorn, but **11.10's "what to do next" is
+superseded** and several §11 numbers were measured before a large inference bug was found. Start
+here.
+
+### 12.1 The one thing that changed everything: mu never reached inference
+
+Sinkhorn's dual `mu` was solved per forward CALL, applied only under `self.training`, and never
+stored. So every Sinkhorn model was **trained with mu-tilted routing and EVALUATED with mu = 0**.
+
+Measured on identical held-out web batches, train vs eval mode:
+
+| arm | train CE | eval CE | discontinuity |
+|---|---:|---:|---:|
+| PURE isoP + sinkhorn | 3.4088 | 4.9959 | **+1.587** |
+| PURE T12 + sinkhorn (12 iters) | 3.3403 | 5.1673 | **+1.827** |
+| PURE isoP + clamped bias | 3.3360 | 3.3365 | +0.0005 |
+| HYBRID K16 + sinkhorn | 2.9454 | 2.9486 | +0.0032 |
+
+The cost scales with how much of the net depends on mu: all iterations of a pure stack, 1 block of
+7 in a hybrid. The clamped `load_balance_bias` shows ~zero because it is a persistent buffer with
+no `self.training` gate, so it always reached eval.
+
+**FIXED** by `sinkhorn_persist_mu` + `sinkhorn_mu_iters` (a PER-ITERATION buffer, cycled by call
+index — one shared buffer cannot work, the duals differ across iterations by 1.56-1.90 mean spread
+and individual experts flip sign, e.g. -1.27 at iter 0 to +1.39 at iter 1). After the fix the
+discontinuity is **-0.058**, i.e. gone. `calibrate_sinkhorn_mu_20260915.py` recovers mu for an
+already-trained checkpoint in minutes without retraining.
+
+**REQUIRED on every new Sinkhorn arm:** `sinkhorn_persist_mu: true` and `sinkhorn_mu_iters` = that
+block's `layer_iterations` entry. Optional for hybrids (0.003 nats) but free.
+
+### 12.2 The bug INVERTED the depth scaling law — the most consequential finding
+
+bits/byte on wikitext (report THIS, not `word_perplexity`, which is `exp(bpb * 3.7)` and turns a
+1.55x regression into a 7.8x one):
+
+| arm | iters | mu DROPPED | mu RESTORED |
+|---|---:|---:|---:|
+| hybrid K16 (1 MoE of 7) | 6 | 1.0000 | — |
+| pure big | 4 | 1.2524 | 1.2103 |
+| pure 1blk | 8 | 1.3966 | 1.1525 |
+| pure isoP | 8 | 1.5530 | 1.1201 |
+| **pure T12** | **12** | **1.6034** | **1.0996** |
+
+Both columns monotone, **opposite directions**. Under the bug deeper is worse; fixed, deeper is
+BETTER, and T12 becomes the best pure model (Avg11 40.96, bpb 1.0996). Anyone reading the pre-fix
+numbers would have concluded depth hurts, most confidently from the arm that proves the opposite.
+**Any recurrence-depth claim measured before 2026-09-16 is suspect.**
+
+### 12.3 Corrected-sign grid: 14 arms, all token-matched but one
+
+Mean Avg11 delta over the six HYBRID arms is **+0.03pp** — the sign correction is quality-neutral,
+so the paper's parity claims survive. Best rows: K32-top2 **44.58**, renorm 44.54, K16-dense 44.40,
+K32-top1 44.19, K16-top2 43.50. Pure arms (mu restored): T12 40.96, bal_corr 41.49, 1blk 40.43,
+isoP 40.42.
+
+**`iclr_big_hop_pure_sink` is NOT comparable** — registered at 4 GPUs while its published
+counterpart ran at 8, so it saw 1.97B tokens against 3.93B. Its -0.59pp is undertraining, not the
+sign. Strike it from any analysis. 13 of 14 match to 0.01%.
+
+### 12.4 Two BROKEN SCHEDULES, one of them in the published configs
+
+`slope90k_*` set `num_training_steps: 90000` but warmup 2000 + decay 28000 = **30000**, so 60000
+steps ran pinned at the 2e-4 floor. Loss falls 0.12-0.15 per 10k while decaying, then
+-0.002..0.000 at the floor: the last 45-51k steps bought 0.015-0.019 nats. **The bug is in the
+published `iclr_slope` configs**, so the paper's "+0.41pp for 3x the tokens" is a lower bound, and
+the conclusion drawn from it has been DELETED from the paper.
+
+Hence §12.6's replacement arms. This is check 1 of the new CLAUDE.md pre-flight.
+
+### 12.5 LR: peak matters, floor does not, and 1e-2 is on a stability boundary
+
+Pure isoP, 5000-6000 step grids at 262144 tok/step:
+
+* **FLOOR is inert.** 2e-4 vs 2e-5 at peak 2e-3: -0.021. 1e-3 vs 2e-5 at peak 1e-2 (a 50x range):
+  +0.008. Both inside the 0.038 noise floor, and the two contrasts disagree in sign.
+* **PEAK is worth ~0.06 nats.** 2e-3 -> 1e-2 gives +0.058 at floor 2e-4 and +0.069 at floor 2e-5.
+* **But 1e-2 diverges ~1 in 3.** Three arms at identical peak 1e-2 and the same default seed 42:
+  two healthy (grad_norm 3.1), one blew up (grad_norm **7045**, loss 6.44 -> 8.34, ending 6.39, no
+  recovery under cosine decay). `gradient_clipping: 1` was ACTIVE and did not prevent it. A reseed
+  at seed 7 trained cleanly to 3.8521, the best of the grid.
+* 2e-2 diverges outright (7.89). Lower LRs are simply worse.
+
+**Recommendation: keep 2e-3 for long runs.** 0.06 nats is not worth a ~1-in-3 divergence, and the
+mu fix was worth 1.6-1.8 nats, ~30x more. The pure model's steeper log-log slope (-0.097 vs -0.082
+hybrid) means it wants more TOKENS, not a bigger step.
+
+### 12.6 RUNNING RIGHT NOW
+
+| arm | queue | GPUs | progress | note |
+|---|---|---|---|---|
+| `scale32B_boltz_sinkhorn` | normal | **16** | 34.5k/61035 (57%) | 400M HYBRID, 32B tokens, schedule OK, all knobs right except `persist_mu` (0.003 nats, recalibratable). **Do not restart.** ~1.5 days left |
+| `t90k_switch_lastisoP` | preemptable | 4 | fresh | 90k = 23.6B, correctly scheduled. ~7.4 h |
+| `t90k_hybrid_K32top2` | preemptable | 4 | fresh | ~12.9 h |
+| `t90k_pure_T12` | preemptable | 4 | fresh | ~37.8 h |
+| `slope90k_{1blk,hyb}_sink` | preemptable | 4 each | ~75-82k/90k | BROKEN schedule; kept only for like-for-like vs the published 44.32 |
+| `iclr_big_hop_sandwich_sink` | preemptable | 4 | 8k/15k | |
+
+`grp_ebm` is **32/32**: bsaha3's `s8e4_f5kl_distill` (16) + our 400M arm (16). Everything else is
+on `grp_preemptable` (1397/6144). `blimits`, not `bjobs`, is the authoritative quota check.
+
+### 12.7 WHAT WE ARE FOCUSED ON NEXT
+
+1. **TRUE SPARSITY — in progress, half landed.** `sparse_backproj` (opt-in, default off) does the
+   back-projection over only the top-k experts via capacity dispatch: fixed `(K, C, I_e)` buffer +
+   one `bmm` + scatter-add. **Verified EXACT** vs the dense mask (relative error 3.79e-16, overflow
+   0); overflow drops pairs and is COUNTED in `_sparse_overflow`. Back-GEMM saving 6.40x at K=16
+   k=2, 12.80x at K=32 k=2. Deliberately not a per-expert loop — that measured 0.59x, SLOWER.
+   * **NOT yet measured: actual step-time delta.** Back-projection is 13-15% of the step, so
+     expect ~12% wall-clock. Benchmark this next.
+   * **The big half is still blocked**: the forward projection cannot be skipped by an exact router
+     (the 1/2(1+k/K) floor) and needs the proxy router (0.942 top-2 agreement at rank 8). That is
+     where the 61% elementwise bucket lives, and where the pure design pays off most — the mixture
+     is 98.9-99.6% of per-token FLOPs in a pure stack against ~22% in a hybrid, so sparsity is
+     end-to-end there rather than capped at 22%.
+2. **The 3-family x 2-scale matrix.** Have: 134M @ 7.86B complete for hybrid / GPT-switch / pure;
+   400M @ 32B for GPT-switch (done) and hybrid (running). **Missing: 400M PURE** (lower priority
+   per the user) and, until §12.6's arms land, any sound 134M run beyond 7.86B.
+3. **Paper.** Pushed through `48da63b`. Open `\CC` items: the un-remeasured expert-cosine bound;
+   the token-scaling paragraph pending §12.6; and the 400M pure router comparison, whose "+0.19pp
+   in favour of energy" measures the SIGN-INVERTED router and must not be quoted as support.
+4. **Untracked and NOT in the repo**: `experiments/eval_scripts/compute_avg11.py` plus six Avg11
+   helpers. `compare_sign_correction_20260915.py` IMPORTS compute_avg11, so a fresh clone cannot
+   run it. Decide whether to track them.
+
+### 12.8 Process rules added this session
+
+`CLAUDE.md` now opens with a **10-point config pre-flight**, mandatory before any long run. Each
+point comes from a bug that cost real compute: schedule coverage, tokens/step matching, hosts vs
+GPUs, `load_args`, the checkpoint pointer vs `max_to_keep`, glob prefix collisions
+(`foo_*` matches `foo_sink_*` and `foo_s7_*` — this produced two wrong numbers in one session),
+knobs reaching the model rather than just the YAML, the per-expert-kind sign direction, the
+Sinkhorn requirements, and diffing against the arm being copied.
+
