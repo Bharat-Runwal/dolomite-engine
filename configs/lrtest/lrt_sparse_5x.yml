@@ -1,0 +1,233 @@
+# LR PROBE on the SPARSE arm -- copies pure_lr_sink_5x's schedule exactly: peak lr 1e-2 (5x the
+# standard 2e-3), warmup 200, cosine decay 5800, total 6000 steps.
+#
+# WHY. At matched STEPS the 90k-schedule arms look worse than the 30k/6k ones simply because they
+# are earlier in cosine decay: at step 9k, lr is 1.97e-3 here against 1.74e-3 for the 30k arms and
+# 1.0e-3 (floor) for sink_5x. So part of the apparent deficit is schedule, not model. This isolates
+# the schedule by giving the sparse arm sink_5x's exact one.
+#
+# RISK, from HANDOFF 12.5: peak 1e-2 DIVERGES about 1 in 3 at this shape -- three arms at identical
+# peak and seed gave two healthy (grad_norm 3.1) and one blow-up (grad_norm 7045, loss 6.44 -> 8.34,
+# no recovery). Watch grad_norm. If it diverges that is a known outcome, not a new bug.
+#
+# Compare against pure_lr_sink_5x (dense, same schedule): 4.8111 / 4.1888 / 3.8014 at steps
+# 1k / 3k / 6k.
+# 4-GPU FALLBACK of s90k_pure_T12_sparse. Identical in every respect except GPUs x ga, which
+# are traded to keep tokens/step at 262144. Same save_path, so it RESUMES whatever the 8-GPU
+# variant checkpointed -- the two are interchangeable mid-run.
+# Reason it exists: 8 GPUs on ONE node is a large ask on preemptable and can pend for a long
+# time; 4 GPUs schedules far more readily and is also directly comparable to the dense arm's
+# GPU count, removing the per-GPU-hour reasoning from the speedup claim.
+# SPARSE-TRAINED PURE T12 -- 2026-09-16. The real thing, not a probe.
+#
+# DESIGNED AS A PAIRED COMPARISON against the live dense t90k_pure_T12: IDENTICAL schedule
+# (90000 steps, warmup 2000 + decay 88000), IDENTICAL 262144 tokens/step, identical model shape.
+# Only the mixture computation differs. So the two loss curves are comparable STEP FOR STEP, which
+# is what "is it going well?" needs -- and what an earlier attempt could not answer, because its
+# compressed 100-step schedule had already decayed the LR while the dense arm was still in warmup.
+#
+# 8 GPUs x mbs 4 x ga 2 x 4096 = 262144, matching the dense arm's 4 x 4 x 4 x 4096. ONE node, so
+# inside the range where fused_experts is validated (it wedges at 2 nodes).
+#
+# MEASURED BASIS: end-to-end 2.55x on 4 GPUs (0.6210 vs 1.5843 s/step at equal tokens/step),
+# stable to +-0.3% over steps 20-100. At 8 GPUs this should finish in ~8 h against the dense
+# arm's ~40 h.
+#
+# WHAT IS UNVERIFIED: quality. A sparse-TRAINED model has no approximation error -- the sparse
+# computation IS the model -- but "no approximation" is not "same quality". Retrofitting sparsity
+# onto the trained dense checkpoint cost -0.68pp Avg11, and the pure model is ~20x more
+# routing-sensitive than a hybrid because its mixture runs at all 12 iterations. This run is the
+# experiment that settles it. WATCH: train-lm_loss against t90k_pure_T12 at the same step, and
+# expert_cos_abs_mean for the regulariser.
+#
+# mbs 4 is load-bearing: below ~16384 tokens/call the sparse path loses its advantage (1.36x at
+# 4096). Dense+fused OOMs at mbs 4; sparse fits because it cuts the intermediate 6.4x.
+# TOKEN-SCALING SET, 90000 steps = 23.6B tokens, CORRECTLY SCHEDULED (2026-09-16).
+#
+# WHY THIS EXISTS. The published slope90k_* arms set num_training_steps 90000 but
+# num_warmup_steps 2000 + num_decay_steps 28000 = 30000, so their last 60000 steps ran pinned
+# at the 2e-4 floor. Measured on the reruns: loss falls 0.12-0.15 per 10k steps while the LR
+# decays, then -0.002..0.000 per 10k at the floor -- the final 45-51k steps bought 0.015-0.019
+# nats. So there is currently NO sound token-scaling measurement, and the paper's
+# "+0.41pp for 3x the tokens" is a lower bound rather than a result.
+#
+# Here decay covers the whole run: warmup 2000 + decay 88000 = 90000.
+#
+# One representative per family, all at 262144 tokens/step on 4 GPUs so the three are directly
+# comparable to each other AND to the 30000-step (7.86B) arms of the same lineage:
+#   hybrid boltz : iclr_hop_K32_top2_sink   Avg11 44.58, the best corrected hybrid
+#   pure boltz   : pure_hop_T12_sink        Avg11 40.96, the best pure arm (12 iterations)
+#   GPT switch   : gptmoe_last_isoP         Avg11 44.43, the paper's plain-GPT iso-param row
+#                                           (NOT gptmoe_all_isoP, which is 43.05)
+#
+# Boltzmann arms carry sinkhorn_persist_mu + sinkhorn_mu_iters from the start, so mu reaches
+# inference. Without it the router is trained tilted and evaluated untilted: +1.827 nats at 12
+# iterations, +1.587 at 8, ~0.003 for a hybrid.
+# THIS ARM: t90k_pure_T12  (base configs/iclr_sink/pure_hop_T12_sink.yml)
+
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [12]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 71680   # K=16 x I_e=4480; iso-param with the hybrids
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 2.0          # weight-space value from the rep_wt2 arm, NOT the
+                                     # output-space 0.1 -- the scales differ 5-25x
+        repulsion_space: output
+        repulsion_space: weight      # SWITCHED from subsampled output-space, on measurement.
+                                     # Ranking of the three options by the OUTPUT alignment they
+                                     # actually achieve, all at matched steps:
+                                     #   full output-space   0.200-0.266  (impossible under sparsity)
+                                     #   WEIGHT-space        0.429-0.441  (~12-15% worse)
+                                     #   subsampled output   0.529 -> 0.74 (~3x worse, and CLIMBING)
+                                     # I rejected weight-space over a 12% gap and then built
+                                     # something 3x worse. Weight-space is also cheaper (2.20 vs
+                                     # 7.59 ms/call), N-independent and natively sparse-compatible.
+                                     # repulsion_coef does NOT transfer between spaces (weight
+                                     # cosines are 5-25x smaller), so 2.0 is taken from the
+                                     # rep_wt2 sweep arm rather than guessed.
+        repulsion_subsample: 1024    # retained only so the cos PROBE keeps working under sparsity
+        cos_probe_interval: 100      # now possible under sparsity, and the only way to SEE
+                                     # alignment in a sparse arm
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 3
+        sinkhorn_persist_mu: true
+        sinkhorn_mu_iters: 12
+        repulsion_tensor_idx: true
+        # ---- sparsity ----
+        renormalize_topk: true       # REQUIRED: deletes the all-K denominator, which is ~55% of
+                                     # the softmax mass and is what no sparse path can estimate.
+                                     # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
+        fused_experts: true
+        sparse_forward: true
+        sparse_candidates: 2         # proxy proposes 2...
+        sparse_explore: 2             # ...plus 2 RANDOM experts during TRAINING ONLY. Without this
+                                     # the proxy is NEVER TRAINED in the sparse path -- proxy_loss_coef
+                                     # is a no-op there -- and the arm trains with a fixed random
+                                     # router. The first attempt did exactly that: expert alignment
+                                     # climbed 0.698 -> 0.785 against 0.24-0.46 for dense arms, and
+                                     # proxy_topk_agree never logged. Exploration supplies exact
+                                     # energies for experts the proxy would not propose; without it
+                                     # the distillation only reinforces its own choices.
+                                     # Costs speed: 2+2 candidates has p=4's ceiling (~4.3x not 6.2x).
+                                     # Inference uses top-2 with no exploration.
+        proxy_rank: 16
+        proxy_kind: subspace
+        proxy_out_dim: 512
+        proxy_iters: 1               # per-iteration heads are eval-only
+        proxy_loss_coef: 0.01        # online distillation; reached 0.82 agreement in a 3k probe
+        activation_function: gelu
+        add_bias: false
+
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/lrtest/lrt_sparse_5x
+  save_interval: 100000   # throwaway probe           # NOT the usual 1000. On preemptable an 8-GPU job is a large
+                               # target: this arm was suspended twice inside ~9 minutes, and with
+                               # a 1000-step interval (~5 min at 0.31 s/step) it could be preempted
+                               # before EVERY checkpoint and so never advance past step 0. At 200
+                               # steps (~1 min) a preemption costs at most a minute of work.
+  max_to_keep: 8    # 200-step interval would otherwise accumulate 450 checkpoints
+
+# NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
+# copying a parent config; only save_path was updated, so every derived arm logged to
+# wandb under the PARENT's name and collided there. Local results under save_path were
+# always correct (that is what the reported numbers come from), but the wandb view was
+# missing or merged. wandb name must equal the config basename.
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: lrt_sparse_5x
+
+training_parameters:
+  num_training_steps: 6000
+  eval_interval: 5000
+  micro_batch_size: 4          # 16384 tok/call -- REQUIRED for the speedup
+  gradient_accumulation_steps: 4   # 4 GPUs x 4 x 4 x 4096 = 262144 -- SAME tokens/step as the
+                               # 8-GPU variant and as the dense arm, so all three are
+                               # step-for-step comparable. Only wall-clock differs.
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 1e-2
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 200
+  num_constant_steps: 0
+  num_decay_steps: 5800
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

@@ -1679,3 +1679,80 @@ checkpoint), and the training-quality failure as a negative result. All three ar
 8 minutes); `torch.randint` in the compiled forward (hung a job, 14 min/0 steps); duplicate
 candidates double-counted after exploration was added. Every one was caught by a run misbehaving,
 not by review.
+
+### 12.14 Depth vs width at FIXED FLOPs, 400M scale — width wins at 1k steps, and it cuts against §12.2
+
+**The design.** Three arms, all at **1.17 G MAC/token** in the mixture, d=1024, K=16, top-2, peak lr
+2e-3, 131072 tok/step, 4 GPUs each. Iterations share the recurrent block's weights, so holding
+FLOPs fixed while adding depth forces width — and PARAMETERS — down:
+
+| arm | iters | I_e | total params | s/step |
+|---|---:|---:|---:|---:|
+| `d400_it4` | 4 | 17920 | **401M** | **3.18** |
+| `d400_it8` | 8 | 8960 | 254M | 3.73 |
+| `d400_it12` | 12 | 5952 | 204M | 4.09 |
+
+**Result — `it4` wins at every step, monotonically:**
+
+| step | it4 | it8 | it12 |
+|---:|---:|---:|---:|
+| 100 | **6.7398** | 6.9977 | 7.2114 |
+| 200 | **6.1626** | 6.3610 | 6.4838 |
+| 300 | **5.7384** | 5.9468 | 6.0699 |
+| 400 | **5.5016** | 5.6543 | 5.7537 |
+| 500 | **5.3381** | 5.4704 | 5.5489 |
+| ~1000 | **4.7409** @1080 | 4.8069 @1120 | 4.9547 @990 |
+
+At fixed FLOPs, **parameters beat depth**. And `it4` is additionally **22% faster per step** on
+identical arithmetic, because iterations are SEQUENTIAL in a launch-bound block (§7.11: 79.5k
+kernels/step, GPU-busy 1.71 s against 6.75 s wall). So iso-FLOP is NOT iso-time, and on wall-clock
+`it4` wins by more than the loss table shows. **Anyone repeating this must report both axes.**
+
+**But the gap NARROWS**: it4-minus-it8 runs 0.258 / 0.198 / 0.208 / 0.153 / 0.132 at steps
+100-500, and it4-minus-it12 goes 0.472 -> 0.211 over the same window. Extrapolated it would cross
+somewhere past a few thousand steps, so "width wins" is supported **at ~1000 steps and not beyond**.
+The arms were killed at ~1000 steps.
+
+**Tension with §12.2, which is the evidence that put us on T12.** There the 134M T12
+(0.66 G MAC/token, 134M params) beat the 400M 4-iteration arm (1.17 G MAC, 401M params) — deeper,
+narrower AND smaller winning. Here the ordering reverses. Both can hold: parameters help early,
+compute-efficiency pays late, and §12.2's arms ran 15k+ steps against these 1000. **Consequence: do
+not read §12.2 as licence to make the 400M cell narrow-and-deep.** It supports T12 at 134M; at 400M
+this ablation favours the existing wide-shallow shape (`it4`, and the sandwich's I_e = 15872). The
+T12 advantage may be specific to 134M or to long training, and nothing here settles which.
+
+### 12.15 Sandwich: mu recalibrated (43.24 -> 43.36), and a FLOP-share / robustness dissociation
+
+**`iclr_big_hop_sandwich_sink` had the §12.1 bug**: `sinkhorn_iters: 3` with
+`sinkhorn_persist_mu: False` and `sinkhorn_mu_iters: 1` while its block runs **4x**
+(`layer_iterations [1, 4, 1]`). Trained mu-tilted, evaluated at mu = 0.
+
+Recalibrated with `calibrate_sinkhorn_mu_20260915.py` (64 batches). Mechanically correct: it probed
+**4 mu solves per forward** and wrote `sinkhorn_mu` with shape **(4, 16)** — per-iteration, which is
+the thing whose absence made the first attempt at this recover nothing.
+
+| | Avg11 | bits/byte | word ppl |
+|---|---:|---:|---:|
+| before (mu dropped) | 43.24 | 1.0274 | 45.07 |
+| **after (mu restored)** | **43.36** | **1.0247** | 44.62 |
+
+**Use 43.36 in any table**, from `unsharded_mucal`. The gain is small: +0.12pp, -0.0027 bpb.
+
+**And that small gain is the interesting part.** The sandwich has **pure-like FLOP concentration**
+— its mixture is **97.6%** of per-token FLOPs (2 GPT wrapper layers are 1.6%, energy attention
+0.8%) — yet **hybrid-like robustness** to routing corruption: 0.003 nats here against ~0.003 for
+hybrids and **1.6-1.8 nats** for pure 8-12 iteration arms (§12.1), and 0.042 bpb for a 4-iteration
+PURE arm (§12.2). Two GPT layers worth 1.6% of FLOPs apparently provide enough of a bypass that
+corrupting the energy router barely matters.
+
+**Why this could matter more than the 0.12pp.** Proxy-routed sparsity cost the pure T12 **-0.68pp**
+Avg11 but the hybrid only **-0.03pp**. If the sandwich sits at the hybrid end of that
+routing-sensitivity spectrum — which this mu result suggests — it would be the **best sparsity
+target of the three**: pure-like speedup with hybrid-like tolerance of an imperfect router. Measured
+sparse speedup on the sandwich is **1.91x at mbs 1** against an analytical 1.88x, and notably it
+does NOT need a large micro-batch, because its experts are I_e = 15872 (3.5x the pure T12's 4480)
+and sparsity needs wide experts OR many tokens. NOT placement-controlled — separate hosts.
+
+**Untested and cheap (~30 min):** fit the proxy on `unsharded_mucal` and run the proxy-selection
+ablation, exactly as done for pure and hybrid. That would say whether the sandwich escapes the
+routing sensitivity that made sparse TRAINING fail on the pure arm (§12.13).
