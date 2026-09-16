@@ -2064,3 +2064,40 @@ below — it now tracks failures and exits nonzero.
 | 1715589 | `batch_size 2` + `expandable_segments`. **Preempted (SSUSP) at 295 s** before reaching the requests; killed deliberately to add a cache. |
 | 1716267 | added `--use_cache` AND `--cache_requests true`. Died in 23 s: **`--cache_requests` applies its type conversion before the argparse `choices` check**, so the literal `true` arrives as a dict repr and is rejected. Use `--use_cache` alone. GATE-FAIL fired correctly. |
 | 1716546 | `--use_cache` only. RUN, GATE-CLEAN confirmed. ~2-4 h for 82639 requests at batch 2. |
+
+### 12.18 c10x endpoint: the bonus holds at ~0.11 out to a 4.2x reduction. WSD design confirmed.
+
+Completion of the 12.17 measurement. `sw2k_sparse_c10x` (1714132) vs `sw2k_sparse` (1713574),
+100-step means, gap = at-peak minus decaying:
+
+| step | at-peak | c10x | gap | c10x lr | reduction from peak |
+|---:|---:|---:|---:|---:|---:|
+| 700 | 4.6278 | 4.5768 | +0.051 | 8.39e-4 | 1.19x |
+| 900 | 4.4517 | 4.3082 | **+0.143** | 7.04e-4 | **1.42x** |
+| 1100 | 4.2670 | 4.1518 | +0.115 | 5.50e-4 | 1.82x |
+| 1200 | 4.1921 | 4.0923 | +0.100 | 4.72e-4 | 2.12x |
+| 1400 | 4.1208 | 4.0104 | +0.110 | 3.25e-4 | 3.08x |
+| 1600 | 4.0492 | 3.9393 | +0.110 | 2.37e-4 | **4.21x** |
+
+**The gap is FLAT (+0.100..+0.111) from step 1200 to 1600 while the LR falls a further 2x.** Peak
+excursion 0.143 at a 1.42x reduction; durable value **~0.11**. Beyond ~1.4x, further decay buys
+NOTHING. This is the strongest single justification for the 90k WSD shape: a 10% decay window
+reaches a 10x reduction, which is ~7x more than needed to collect the whole bonus.
+
+**Caveat on the numbers past step 1000.** c10x was preempted THREE times and each time resumed
+from `global_step1000`, so the log contains overlapping step ranges (resets 1540->1010,
+1020->1010, 1210->1010) and the 100-step buckets above MIX segments from different restarts --
+same checkpoint, but different data order after each resume. Re-reading it after the third restart
+moved the values by <=0.004 and changed no conclusion, but this is NOT one clean trajectory past
+step 1000. If it ever needs to be a figure, plot the FIRST segment only (it reaches step 1540).
+
+**Two operational notes.**
+1. `submit_selfresuming.sh` WORKS -- three `runtime_resume_*.yml` in the save_path and every
+   restart picked up step 1000 rather than 0. This is the mechanism 12.10 was written about, and
+   it is now confirmed under real preemption.
+2. But c10x is **LIVELOCKED**: `save_interval` 1000 against a 2000-step run means it must survive
+   1000->2000 uninterrupted to checkpoint again, and it keeps dying at 1200-1540. It will likely
+   never write `global_step2000`. **Its measurement is complete, so it is pure waste of 4 GPUs.**
+   General lesson: `save_interval` must be << the remaining run length on a preemptable queue, or
+   an arm can burn GPUs indefinitely while making zero net progress. For a 2000-step probe,
+   save_interval should have been ~250.
