@@ -416,6 +416,19 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   inference uses the proxy's top-k. Raises the candidate count, so it trades speedup for a
     #   trainable router: p=2 with explore=2 has the ceiling of p=4.
     sparse_explore: int = 0
+    # sparse_start_step: run the DENSE fused path until this global step, then switch to the
+    # sparse path for the rest of training -- the two-phase schedule in ONE job.
+    #   0 (default) = current behaviour: sparse from step 0 (only correct if the proxy is
+    #                 already trained, i.e. resuming a dense phase).
+    #   N > 0       = steps 1..N-1 dense (so _proxy_step distils against the exact all-K
+    #                 routing distribution and the proxy LEARNS the ranking), step N onward
+    #                 sparse (in-path distillation MAINTAINS it as the target drifts).
+    # WHY THIS EXISTS: a proxy cannot learn the ranking inside the sparse path -- its target is
+    # only the p-candidate set, and agreement sat at 0.47-0.53 against a 0.50 chance floor for
+    # 240 steps. Dense took it 0.1193 -> 0.7906 in 280 steps. Previously this needed two jobs
+    # sharing a save_path; on a busy scheduler each extra submission costs queue priority.
+    # Reference: 280-500 is enough at 400M. Watch proxy_topk_agree and set N past its plateau.
+    sparse_start_step: int = 0
     # repulsion_subsample: evaluate OUTPUT-space repulsion (and the cosine probe) on m tokens
     #   instead of all T, over all K experts. 0 = off (use every token).
     #   REQUIRED for sparse_forward with output-space repulsion, because that path never computes

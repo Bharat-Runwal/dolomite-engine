@@ -1,0 +1,256 @@
+# ============================================================================================
+# 90k WSD -- SANDWICH 400M: 1 GPT layer + 1 recurrent energy block (x4) + 1 GPT layer.
+# Parent: configs/iclr_sink/iclr_big_hop_sandwich_sink.yml (the arm whose recalibrated Avg11
+# is 43.36). Sibling: wsd90k_pure_it4.yml -- SAME schedule, SAME tokens/step, SAME peak, so the
+# pure-vs-sandwich comparison is clean and is the point of running both.
+#
+# See wsd90k_pure_it4.yml for the full WSD rationale (HANDOFF 12.17). In brief: the annealing
+# bonus is ~0.11 nats, is fully realised by a 1.4x LR reduction, and does not grow with further
+# decay -- so hold the peak and collect it once, at the end, or on a branch.
+#
+# WHY THE SANDWICH IS WORTH A 90k SLOT -- HANDOFF 12.15, and it is the most interesting
+# architecture of the three. It has PURE-LIKE FLOP concentration (its mixture is 97.6% of
+# per-token FLOPs; the 2 GPT wrapper layers are 1.6%, energy attention 0.8%) but HYBRID-LIKE
+# robustness to routing corruption: dropping the Sinkhorn dual at eval cost it 0.003 nats,
+# against ~0.003 for hybrids and 1.6-1.8 nats for pure 8-12 iteration stacks. Two GPT layers
+# worth 1.6% of the FLOPs apparently provide enough of a bypass that corrupting the energy
+# router barely matters. If that robustness extends to an imperfect PROXY router it is the best
+# sparsity target we have -- pure-like speedup with hybrid-like tolerance.
+#
+# ---- TWO DELIBERATE DEVIATIONS FROM THE PARENT. Both are fixes, not preferences. ----
+# (a) sinkhorn_persist_mu: true and sinkhorn_mu_iters: 4 are ADDED. The parent had
+#     sinkhorn_iters 3 with persist_mu FALSE and mu_iters 1 while its block runs 4x -- the 12.1
+#     bug, trained mu-tilted and evaluated at mu = 0. It cost the parent 0.12pp Avg11 /
+#     0.0027 bpb and had to be repaired post-hoc by calibrate_sinkhorn_mu_20260915.py. This is
+#     pre-flight check 9 and it is NOT optional.
+# (b) num_decay_steps no longer overruns. The parent set 1000 + 15000 = 16000 against 15000
+#     steps, so it never reached its floor -- a mild version of the slope90k bug (12.4).
+#
+# ---- renormalize_topk IS ON HERE, unlike the dense sibling ----
+# The dense wsd90k_sandwich.yml deliberately leaves it off to stay on the validated lineage.
+# A sparse arm has no such option: it is MANDATORY (12.12). With it false, top-2 of 16 carries
+# only ~55% of the softmax mass, the missing all-K denominator cannot be estimated from a sparse
+# path, and top-k degenerates into a scaling. So the dense and sparse siblings differ in the
+# routing weights by construction, and the honest comparison between them is dense-vs-sparse as
+# WHOLE RECIPES, not a clean single-variable sparsity ablation. Do not report it as the latter.
+#
+# ---- PRE-FLIGHT (CLAUDE.md checklist), verified line by line ----
+# 1. SCHEDULE COVERS THE RUN: 1000 + 80000 + 9000 = 90000 = num_training_steps.  OK
+# 2. TOKENS/STEP: 8 GPU x mbs 1 x ga 8 x 4096 = 262144. The parent reached the same 262144 as
+#    4 x 1 x 16, so this is token-matched to it AND to wsd90k_pure_it4.
+#    *** GPUS IS NOT IN THIS FILE. THIS CONFIG REQUIRES 8 GPUs. *** At 4 GPUs it becomes
+#    131072 -- half the tokens, silently. Verify from the log, not from this comment:
+#    tokens/step = billion_tokens_per_day * 1e9 * step_time / 86400.
+# 3. GPU COUNT: pass 8 to submit_selfresuming.sh.
+# 4. load_args: ABSENT and must stay absent (fresh run; the launcher appends it per requeue).
+# 5. n/a on a first start.
+# 6. save_path and wandb name are new. NOTE the prefix trap: "wsd90k_sandwich" is a prefix of
+#    nothing existing, but when globbing logs anchor on the job id, not the name (a d400_it4_*
+#    glob matched d400_it4_5x_* earlier today and printed two identical rows).
+# 7. KNOBS REACH THE MODEL: architecture copied verbatim from a config that ran, plus the two
+#    sinkhorn fields which sw400_sparse.yml already carries and which resolve.
+# 8. SIGN: hopfield -> e_sign_override "pos".  OK
+# 9. SINKHORN: persist_mu true, mu_iters 4 == the middle entry of layer_iterations [1,4,1].
+#    That middle block is the ONLY energy block; the two wrappers are plain GPT.  OK
+#    No cos_probe_interval.  OK
+# 10. Diff vs parent: the two fixes above, num_training_steps, the scheduler block, mbs/ga,
+#     save_path, wandb name. Nothing else.
+#
+# WALL CLOCK. sw2k_dense measured 5.88 s/step at 4 GPUs / 262144 tok/step (sw2k_sparse 3.21,
+# i.e. 1.83x, though not placement-controlled). At 8 GPUs expect ~2.9-3.0 s/step, so 90000
+# steps is ~74 h ~= 3.1 DAYS uninterrupted on preemptable. save_interval 1000 (~49 min) bounds
+# the loss per preemption. If the deadline does not allow 90k, do NOT recompress the schedule --
+# run the trunk as far as it gets and branch a decay (recipe at the bottom of the pure config).
+#
+# LAUNCH:
+#   bash experiments/boltzmann-moe/scripts/bsub/submit_selfresuming.sh \
+#        wsd90k_sandwich configs/wsd90k/wsd90k_sandwich.yml 8 24:00 128G
+# ============================================================================================
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 4, 1]        # GPT x1, energy block x4, GPT x1
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 3
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gattn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+      - *gattn
+    mlp_blocks:
+      - &gffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 253952      # I_e = 253952 / 16 = 15872 -- 3.5x the pure T12's 4480,
+                                       # which is why sparsity pays here even at mbs 1 (12.15)
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 2.0          # WEIGHT-space value (rep_wt2), NOT the output-space 0.1
+        repulsion_space: weight      # output-space needs all K expert outputs, which the sparse
+                                     # path never computes. 12.13 ranks the substitutes by the
+                                     # output alignment they reach from scratch: weight-block
+                                     # cosines 0.43-0.44, subsampled output estimator 0.53->0.74
+                                     # (WORST -- unbiased in value, but high variance, and Adam
+                                     # damps a high-variance term relative to its mean).
+                                     # THIS IS THE EXPERIMENT 12.13 SAYS WAS NEVER RUN.
+        cos_probe_interval: 100      # affordable under sparsity and the ONLY way to see expert
+                                     # alignment in a sparse arm. Watch it: if it climbs toward
+                                     # 0.7+ the diversity control has failed and 12.13 repeats.            # output-space; a sparse arm needs weight-space 2.0
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected-sign variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 3
+        sinkhorn_persist_mu: true      # ADDED vs parent -- see deviation (a) in the header
+        sinkhorn_mu_iters: 4           # == layer_iterations[1]. Parent had 1 against a 4x block.
+        repulsion_tensor_idx: true
+        # ---- SPARSITY (HANDOFF 12.9-12.13) ----
+        renormalize_topk: true       # MANDATORY, not a tuning knob. With it FALSE, top-2 of 16
+                                     # carries only ~55% of the softmax mass and top-k is a
+                                     # SCALING rather than a sparsification (12.12). No sparse
+                                     # path can estimate the all-K denominator; this deletes it.
+                                     # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
+        fused_experts: true
+        sparse_start_step: 500       # <<< DENSE until step 500, SPARSE from 500 on, IN ONE JOB.
+                                     # Steps 1-499 take _forward_fused, whose _proxy_step distils
+                                     # the proxy against the EXACT all-K routing distribution --
+                                     # the only regime in which it learns the ranking (reference:
+                                     # 0.1193 -> 0.7906 in 280 dense steps). From 500 the sparse
+                                     # path MAINTAINS it as the routing target drifts.
+                                     # Costs ONE torch.compile recompile at step 500; the flag is
+                                     # a Python bool derived from global_step, so every rank flips
+                                     # on the same step with no communication.
+        sparse_forward: true         # skips BOTH projections for unselected experts. EXACT given
+                                     # the selection (4e-16), and sparse_candidates=K reproduces
+                                     # dense bit-for-bit on a real checkpoint.
+        sparse_candidates: 2         # the proxy proposes 2...
+        sparse_explore: 2            # ...plus a deterministic rotation of 2 more, TRAINING ONLY.
+                                     # Without it the proxy is never trained in the sparse path
+                                     # (proxy_loss_coef is a no-op) and the arm trains with a FIXED
+                                     # RANDOM router -- that happened once and went unnoticed
+                                     # because no metric logged. Costs speed: p=4's ceiling is
+                                     # ~4.3x, not 6.2x. Inference uses top-2, no exploration.
+        proxy_rank: 16
+        proxy_kind: subspace         # "quad" FAILS (0.348 vs 0.125 chance)
+        proxy_out_dim: 512
+        proxy_iters: 1               # per-iteration heads are EVAL-ONLY: the call counter and
+                                     # activation checkpointing are incompatible.
+        proxy_loss_coef: 0.01        # online distillation against the exact energies that
+                                     # exploration makes available
+        activation_function: gelu
+        add_bias: false
+      - *gffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/wsd90k/wsd90k_sandwich_1job
+  save_interval: 200
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: wsd90k_sandwich_1job
+
+training_parameters:
+  num_training_steps: 90000            # x 262144 tok = 23.59B tokens
+  eval_interval: 5000
+  micro_batch_size: 1                  # ONE micro_batch_size for BOTH phases, which is what makes
+                                       # a single job possible: mbs is a dataloader parameter, not a
+                                       # model attribute, so it cannot be flipped mid-run the way
+                                       # sparse_forward can. Dense needs mbs 1 (mbs 4 dense is
+                                       # 8.75 GiB and OOMs), so mbs 1 it is.
+                                       # COST: 4096 tok/call instead of 16384, so less than the peak
+                                       # sparse speedup. Acceptable HERE because both 400M shapes have
+                                       # wide experts (I_e 15872-17920) and 12.15 measured the sandwich
+                                       # at 1.83-1.91x even at mbs 1. Do NOT copy this to a hybrid
+                                       # shape with small I_e, where 4096 tok/call LOSES (0.41-0.49x).
+  gradient_accumulation_steps: 16       # 4 GPU x 1 x 16 x 4096 = 262144 (8 GPU: use ga 8)
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3                           # NOT lowered -- 12.17 refutes "2e-3 was too high"
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+# ---- THE WSD SCHEDULE ----------------------------------------------------------------------
+#   warmup   1000  ( 1.1%)  linear 0 -> 2e-3
+#   stable  80000  (88.9%)  HELD at 2e-3   <-- displayed loss looks WORSE here; that is the
+#                                              temperature penalty, not slower learning
+#   decay    9000  (10.0%)  cosine 2e-3 -> 2e-4
+# CosineScheduler implements exactly this once num_constant_steps > 0 (scheduler.py:90-106):
+# warmup -> factor 1.0 -> cosine to lr_decay_factor. No code change.
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 1000
+  num_constant_steps: 80000
+  num_decay_steps: 9000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0

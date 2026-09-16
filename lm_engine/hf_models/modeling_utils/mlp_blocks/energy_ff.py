@@ -519,6 +519,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         sparse_candidates: int = 0,
         sparse_explore: int = 0,
         sparse_capacity_factor: float = 1.25,
+        sparse_start_step: int = 0,
         repulsion_subsample: int = 0,
         repulsion_tensor_idx: bool = False,
     ) -> None:
@@ -856,6 +857,16 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # rejected expert was in fact better. Costs `explore` extra expert evaluations per token in
         # training only; inference uses the proxy's top-k with no exploration.
         self.sparse_explore = int(sparse_explore)
+        # ---- two-phase-in-one-job gate (sparse_start_step) ----
+        # The construction-time asserts below still key off self.sparse_forward, so a config
+        # error surfaces at BUILD time even while the first N steps run dense. What the gate
+        # changes is only which forward is dispatched. _sparse_active is a plain Python bool:
+        # dynamo guards on it, so the flip costs exactly ONE recompile at step N.
+        # It is derived from global_step, which is identical on every rank, so all ranks flip
+        # on the same step with no communication -- rank divergence here previously wedged a
+        # distributed compile, so this property is load-bearing, not incidental.
+        self.sparse_start_step = int(sparse_start_step)
+        self._sparse_active = bool(sparse_forward) and self.sparse_start_step <= 0
         self.sparse_capacity_factor = float(sparse_capacity_factor)
         if self.sparse_backproj or self.sparse_forward:
             assert self.top_k is not None and self.top_k < len(experts), (
@@ -1096,10 +1107,23 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
     # --- public surface --------------------------------------------------- #
 
+    def set_training_step(self, step: int) -> None:
+        """Called once per optimizer step from the model wrapper. Flips the dense->sparse gate.
+
+        Dense until `sparse_start_step`, sparse from it on. No-op when sparse_start_step <= 0
+        (sparse from the start) or when sparse_forward is False (dense throughout).
+        """
+        if self.sparse_forward and self.sparse_start_step > 0:
+            self._sparse_active = int(step) >= self.sparse_start_step
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.sparse_forward:
+        if self.sparse_forward and self._sparse_active:
             return self._forward_sparse(x)
         if self.fused_experts:
+            # NOTE: this is also the DENSE PHASE of a sparse_start_step run. _forward_fused
+            # calls _proxy_step against the exact all-K routing distribution, which is what
+            # actually teaches the proxy; _forward_looped does NOT, so fused_experts must be
+            # true for the dense phase to be useful (already asserted for sparse_forward).
             return self._forward_fused(x)
         return self._forward_looped(x)
 
@@ -2323,6 +2347,7 @@ def build_boltzmann_moe(
     sparse_forward: bool = False,
     sparse_candidates: int = 0,
     sparse_explore: int = 0,
+    sparse_start_step: int = 0,
     sparse_capacity_factor: float = 1.25,
     repulsion_subsample: int = 0,
     repulsion_tensor_idx: bool = False,
@@ -2423,6 +2448,7 @@ def build_boltzmann_moe(
         sparse_forward=sparse_forward,
         sparse_candidates=sparse_candidates,
         sparse_explore=sparse_explore,
+        sparse_start_step=sparse_start_step,
         repulsion_subsample=repulsion_subsample,
         sparse_capacity_factor=sparse_capacity_factor,
         repulsion_tensor_idx=repulsion_tensor_idx,

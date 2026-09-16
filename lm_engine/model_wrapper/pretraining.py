@@ -260,6 +260,17 @@ class ModelWrapperForPretraining(ModelWrapper):
 
     def set_training_step(self, step: int) -> None:
         self._global_training_step = step
+        # Propagate to any submodule that wants the step (BoltzmannMoEFFEnergy uses it for the
+        # dense->sparse switch at sparse_start_step). The module list is cached on first call:
+        # walking named_modules() every step would cost ~1k getattr per step for nothing.
+        if not hasattr(self, "_step_aware_modules"):
+            self._step_aware_modules = [
+                m
+                for m in self.modules()
+                if m is not self and hasattr(m, "set_training_step") and callable(m.set_training_step)
+            ]
+        for m in self._step_aware_modules:
+            m.set_training_step(step)
 
     def forward(
         self,
