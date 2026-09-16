@@ -544,3 +544,29 @@ Axes to sweep (in priority order):
       `Avg11 =` globally and labelled two DENSE evals (from two invocations of the script) as
       dense-vs-proxy. The fix is in how results are monitored: anchor every number to its arm
       label, and never assume one number per arm per job.
+
+## 2026-09-16 (part 3) — after the sparse pivot
+
+- [x] **`sparse_start_step` implemented and tested** (`99d27a3f`, `7c4033db`) — dense→sparse in ONE
+      job. Use `wsd90k_*_1job.yml` for new arms; it removes a submission and a manual handoff per
+      arm, which matters most at 700M/1B. See HANDOFF 12.22 for the mbs caveat.
+- [x] **`s90k_pure_T12_sparse` killed AND deregistered** — worst 134M repulsion settings
+      (subsampled output-space, `expert_cos_abs_mean` 0.5664).
+- [x] **`t90k_pure_T12` / `t90k_hybrid_K32top2` deregistered**, `sw2k_dense` killed.
+      ⚠ The two `t90k` arms are STILL RUNNING (~26 h left on pure at 34%) and hold 4 GPUs each.
+      Deregistering only stops resubmission. Kill them if the GPUs are needed.
+- [ ] **DECIDE: realign the arms to scale32B?** scale32B runs **61035 steps at 524288 tok/step =
+      32.0B tokens**; ours are 90000 at 262144 = 23.59B. Matching STEPS at our tok/step gives only
+      16.0B — half — which is the `iclr_big_hop_pure_sink` error that made a −0.99pp delta
+      unreadable. To match both, set `micro_batch_size 4 / ga 4` at 8 GPUs (524288) and 61035 steps,
+      WSD becoming 1000 / 54000 / 6035. Costs ~2.3 d at 8 GPUs or ~1.13 d at 16 — the 16-GPU option
+      is FASTER than the current 90k/8-GPU plan and trains on 36% more tokens.
+      Note 90k was never a validated budget: it came from the `slope90k_*` lineage whose schedules
+      were broken (60000 steps pinned at the floor, 12.4).
+- [ ] **134M sparse LR: no better value is validated.** 2e-3 stands. 1e-2 wins by 0.04–0.05 nats
+      when it survives (3.7872/3.8018 vs 3.8289) but the one SPARSE arm at 1e-2 diverged to
+      grad_norm 2.4e7 while dense arms at 1e-2 mostly survived — sparse looks less stable at high
+      LR. The grid has NOTHING between 2e-3 and 1e-2; 4e-3 is the untested midpoint.
+- [ ] **Phase-1 handoff threshold**: `proxy_topk_agree > 0.75`, reference 0.1193→0.7906 in 280 dense
+      steps (job 1709497). Judge `expert_cos_abs_mean` (weight-space repulsion, the 12.13 experiment
+      never run) only at step ~300-500 — it is meaningless at step 30-100.

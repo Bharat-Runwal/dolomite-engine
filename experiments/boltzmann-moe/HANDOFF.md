@@ -2261,3 +2261,64 @@ reports the 134M dense mbs-4 intermediate `(4, 4096, 71680)` at 2.19 GiB, and th
 3. Lowering `sparse_explore` to 1 would drop p to 3 and the ratio to 0.94x, and raising cf to 1.5
    would push it to 1.5x. Both are levers if a larger model ever does run tight -- but note
    `sparse_explore` is what lets the proxy train at all, so cut cf first.
+
+### 12.22 `sparse_start_step`: the two-phase schedule now runs in ONE job (code, tested)
+
+**Use this instead of the p1dense/phase-2 config pair.** Commits `99d27a3f` (feature) and
+`7c4033db` (recompile test).
+
+**Why it was two jobs, and why that was wrong.** The dense->sparse handoff was done as two configs
+sharing a `save_path`, because that needed zero code. But every submission costs queue priority on
+a busy LSF, the handoff needed a human to watch `proxy_topk_agree` and launch phase 2, and the cost
+recurs at every model size (three more pairs at 700M and 1B). On 2026-09-16 the scheduler was
+handing out 5-12 minute RUN windows and this became the dominant time sink.
+
+**What made it cheap.** Two pieces of plumbing already existed:
+* `forward()` dispatched on `self.sparse_forward` at RUNTIME (`energy_ff.py:1099`), not at
+  construction.
+* `pretrain.py:400-403` already calls `set_training_step(global_step)` on every model each step
+  (added for the cosreg ramp).
+
+So the change is four small edits: the `sparse_start_step` field
+(`config/mlp.py`), explicit forwarding (`mlp_blocks/__init__.py` -- pre-flight 7), the gate plus a
+`set_training_step` on the MoE (`energy_ff.py`), and propagation to submodules with the module list
+cached on first call (`model_wrapper/pretraining.py`).
+
+**Design properties that matter.**
+1. Construction-time asserts still key off `sparse_forward`, so a bad sparse config fails at BUILD
+   time even though the first N steps run dense.
+2. `_sparse_active` is a plain Python bool, so dynamo guards on it: the flip costs exactly ONE
+   recompile.
+3. It is derived from `global_step`, identical on every rank, so all ranks flip on the same step
+   with NO communication. Rank divergence previously wedged a distributed compile, so this is
+   load-bearing, not incidental.
+4. Defaults are unchanged: `sparse_start_step: 0` is sparse from step 0 (the old behaviour, correct
+   when resuming an already-trained proxy), and `sparse_forward: false` is dense forever with
+   `set_training_step` a no-op.
+
+**Tested (CPU, `scripts/test_sparse_start_step_20260916.py`, 11 checks):** the knob resolves onto
+`.moe` through `get_mlp_block` with a real `EnergyConfig`; the gate is dense at 499 and sparse at
+500; dense steps dispatch to `_forward_fused` and sparse steps to `_forward_sparse`; and in float64
+the gated dense phase is **bit-identical (0.00e+00)** to a plain dense arm while the gated sparse
+phase is bit-identical to a plain sparse arm -- the gate adds no numerical change.
+
+**Tested (CPU, `scripts/test_sparse_start_recompile_20260916.py`):** under `torch.compile` the
+module takes `_forward_fused` before the flip and `_forward_sparse` after, outputs differing. This
+rules out the dangerous failure -- dynamo baking `_sparse_active=False` into the graph so the flag
+flips, nothing errors, and the run silently stays DENSE for 90k steps. That is the shape of all
+three silent bugs in 12.13, so it was the one worth testing.
+
+**Still unverified:** whether the recompile HANGS under FSDP + activation checkpointing at
+multi-GPU. That failure is LOUD (0 steps, as in the `fused_experts` 2-node wedge and the
+data-dependent-shape wedge), so the first real run detects it within a minute. No dedicated GPU
+test needed.
+
+**The one thing a single job gives up: `micro_batch_size`.** It is a dataloader parameter, not a
+model attribute, so it cannot be flipped mid-run. Dense needs mbs 1 (dense mbs 4 is 8.75 GiB and
+OOMs), so a single job runs mbs 1 throughout and takes 4096 tok/call instead of 16384. Acceptable
+at 400M+ because both shapes have wide experts (I_e 15872-17920) and 12.15 measured the sandwich at
+1.83-1.91x even at mbs 1. **Do NOT copy this to a small-I_e hybrid shape, where 4096 tok/call
+loses outright (0.41-0.49x).** If peak throughput matters more than job count, keep the two-config
+pair and use mbs 4 in phase 2.
+
+Configs: `configs/wsd90k/wsd90k_{pure_it4,sandwich}_1job.yml`, `sparse_start_step: 500`.
