@@ -122,8 +122,17 @@ model_args:
                                      # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
         fused_experts: true
         sparse_forward: true
-        sparse_candidates: 2         # = top_k: maximum speed. p=4 would buy recall we do not need
-                                     # when training, since there is no dense reference to match.
+        sparse_candidates: 2         # proxy proposes 2...
+        sparse_explore: 2             # ...plus 2 RANDOM experts during TRAINING ONLY. Without this
+                                     # the proxy is NEVER TRAINED in the sparse path -- proxy_loss_coef
+                                     # is a no-op there -- and the arm trains with a fixed random
+                                     # router. The first attempt did exactly that: expert alignment
+                                     # climbed 0.698 -> 0.785 against 0.24-0.46 for dense arms, and
+                                     # proxy_topk_agree never logged. Exploration supplies exact
+                                     # energies for experts the proxy would not propose; without it
+                                     # the distillation only reinforces its own choices.
+                                     # Costs speed: 2+2 candidates has p=4's ceiling (~4.3x not 6.2x).
+                                     # Inference uses top-2 with no exploration.
         proxy_rank: 16
         proxy_kind: subspace
         proxy_out_dim: 512

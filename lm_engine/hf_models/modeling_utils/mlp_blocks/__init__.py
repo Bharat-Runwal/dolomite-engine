@@ -215,6 +215,7 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             sparse_backproj=getattr(block, "sparse_backproj", False),
             sparse_forward=getattr(block, "sparse_forward", False),
             sparse_candidates=getattr(block, "sparse_candidates", 0),
+            sparse_explore=getattr(block, "sparse_explore", 0),
             repulsion_subsample=getattr(block, "repulsion_subsample", 0),
             sparse_capacity_factor=getattr(block, "sparse_capacity_factor", 1.25),
             init_method=config.init_method,

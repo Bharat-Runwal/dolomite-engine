@@ -517,6 +517,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         sparse_backproj: bool = False,
         sparse_forward: bool = False,
         sparse_candidates: int = 0,
+        sparse_explore: int = 0,
         sparse_capacity_factor: float = 1.25,
         repulsion_subsample: int = 0,
         repulsion_tensor_idx: bool = False,
@@ -835,6 +836,26 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         self.sparse_backproj = bool(sparse_backproj)
         self.sparse_forward = bool(sparse_forward)
         self.sparse_candidates = int(sparse_candidates)
+        # ---- EXPLORATION, so the proxy can be TRAINED inside the sparse path ---------
+        # Without this a sparse arm cannot train its own router, and the failure is silent:
+        # `_proxy_step` distils against the exact all-K routing distribution, which this path never
+        # computes, so `proxy_loss_coef` is a NO-OP under sparse_forward. A run launched that way
+        # trains with a FIXED RANDOM proxy -- arbitrary routing, not energy routing. Observed:
+        # expert output alignment 0.698 against 0.24-0.46 for dense arms (experts never
+        # specialise), and no proxy_topk_agree logged at all.
+        #
+        # A two-phase recipe (dense warm-up, then flip sparse_forward on) is not sufficient
+        # either: the proxy would FREEZE at its phase-1 quality while the model trains on for tens
+        # of thousands of steps. The routing target drifts -- the Sinkhorn dual moves 3.44 -> 1.97
+        # over training -- so a frozen proxy decays against a moving target.
+        #
+        # So distil inside the sparse path, and add `sparse_explore` uniformly-random experts to
+        # the candidate set during TRAINING. Their exact energies are computed like any other
+        # candidate's, which gives the proxy gradient signal on experts it would not have proposed
+        # -- without which the distillation is self-reinforcing and can never discover that a
+        # rejected expert was in fact better. Costs `explore` extra expert evaluations per token in
+        # training only; inference uses the proxy's top-k with no exploration.
+        self.sparse_explore = int(sparse_explore)
         self.sparse_capacity_factor = float(sparse_capacity_factor)
         if self.sparse_backproj or self.sparse_forward:
             assert self.top_k is not None and self.top_k < len(experts), (
@@ -1427,7 +1448,16 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         if mu is not None:
             s_prox = s_prox - mu.to(s_prox.dtype)
         p_cand = self.sparse_candidates or k
-        if sel_idx is None:
+        n_exp = self.sparse_explore if self.training else 0
+        if sel_idx is None and n_exp > 0 and p_cand + n_exp <= K:
+            # top-(p) from the proxy, plus `n_exp` random experts. Shapes are static (p + n_exp),
+            # so this stays compile-safe; the draw is RNG-based but activation checkpointing
+            # restores RNG state before recompute, and the SIZE never varies.
+            top = s_prox.topk(p_cand, dim=-1).indices                       # (T, p)
+            rnd = torch.randint(K, (T, n_exp), device=xf.device)            # (T, n_exp)
+            sel_idx = torch.cat([top, rnd], dim=-1)                         # (T, p + n_exp)
+            p_cand = p_cand + n_exp
+        elif sel_idx is None:
             # p = K needs no proxy at all: every expert is a candidate, so the re-rank below is
             # over the exact energies of all of them and the whole path becomes exact.
             sel_idx = (torch.arange(K, device=xf.device).expand(T, K) if p_cand == K
@@ -1494,6 +1524,27 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         wp = w.reshape(-1)[sp_k]
         contrib = y[se_k, slot_k] * (pref * wp).unsqueeze(-1)
         out = xf.new_zeros(T, H).index_add_(0, st_k, contrib.to(xf.dtype)).reshape(*lead, H)
+
+        # ---- 5b. TRAIN THE PROXY on the candidates whose exact energies we just computed ----
+        # Restricted to the candidate set, which is the only place exact energies exist here. With
+        # `sparse_explore` > 0 that set includes random experts, so the signal is not confined to
+        # what the proxy already likes.
+        if self.training and self.proxy_loss_coef > 0 and self.proxy_rank > 0:
+            tgt = F.softmax(lg.detach().masked_fill(~kept, torch.finfo(lg.dtype).min), dim=-1)
+            pred = s_prox.gather(-1, sel_idx).masked_fill(~kept, torch.finfo(s_prox.dtype).min)
+            add_aux_loss(self.proxy_loss_coef
+                         * F.kl_div(F.log_softmax(pred, dim=-1), tgt, reduction="batchmean"))
+            if self.track_load:
+                with torch.no_grad():
+                    # agreement WITHIN the candidate set: does the proxy rank the exact top-k of
+                    # these p the same way? Not comparable to the dense all-K figure, and labelled
+                    # so in the metric name.
+                    kk = min(k, p_cand)
+                    a = lg.detach().topk(kk, dim=-1).indices
+                    b = s_prox.gather(-1, sel_idx).detach().topk(kk, dim=-1).indices
+                    hit = (a.unsqueeze(-1) == b.unsqueeze(-2)).any(-1).float().sum(-1)
+                    self._proxy_agree_sum += hit.sum() / kk
+                    self._proxy_agree_n += hit.shape[0]
 
         # ---- 6. metrics and side channels --------------------------------------------
         # A (T, K) p is rebuilt for the load metrics: it costs T*K, not T*K*I_e, so the whole
@@ -2250,6 +2301,7 @@ def build_boltzmann_moe(
     sparse_backproj: bool = False,
     sparse_forward: bool = False,
     sparse_candidates: int = 0,
+    sparse_explore: int = 0,
     sparse_capacity_factor: float = 1.25,
     repulsion_subsample: int = 0,
     repulsion_tensor_idx: bool = False,
@@ -2349,6 +2401,7 @@ def build_boltzmann_moe(
         sparse_backproj=sparse_backproj,
         sparse_forward=sparse_forward,
         sparse_candidates=sparse_candidates,
+        sparse_explore=sparse_explore,
         repulsion_subsample=repulsion_subsample,
         sparse_capacity_factor=sparse_capacity_factor,
         repulsion_tensor_idx=repulsion_tensor_idx,

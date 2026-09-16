@@ -407,6 +407,15 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   selection alone costs +0.0165 bits/byte, but a proxy-filled denominator costs -1.52 nats.
     #   p = n_experts makes the whole path exact and is the correctness self-test.
     sparse_candidates: int = 0
+    # sparse_explore: during TRAINING, add this many uniformly-random experts to the candidate set.
+    #   REQUIRED to train a sparse arm's own router: `_proxy_step` distils against the exact all-K
+    #   distribution, which sparse_forward never computes, so proxy_loss_coef is otherwise a NO-OP
+    #   and the arm trains with a FIXED RANDOM proxy (observed: expert alignment 0.698 vs 0.24-0.46
+    #   dense, and no proxy_topk_agree logged). Exploration supplies exact energies for experts the
+    #   proxy would not propose, without which the distillation is self-reinforcing. Training only;
+    #   inference uses the proxy's top-k. Raises the candidate count, so it trades speedup for a
+    #   trainable router: p=2 with explore=2 has the ceiling of p=4.
+    sparse_explore: int = 0
     # repulsion_subsample: evaluate OUTPUT-space repulsion (and the cosine probe) on m tokens
     #   instead of all T, over all K experts. 0 = off (use every token).
     #   REQUIRED for sparse_forward with output-space repulsion, because that path never computes
