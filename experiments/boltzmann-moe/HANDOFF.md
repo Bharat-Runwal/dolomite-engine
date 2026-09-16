@@ -1542,3 +1542,46 @@ behaviour):
 capped at **1.73x** by `1/2(1+cf·k/K)` and delivers 1.18-1.35x. The 4.69x requires
 `sparse_forward`, which requires a working selector. Until agreement is high, **4.69x is a
 capability, not a result.**
+
+### 12.12 Why the retrofit fails: with `renormalize_topk: false`, top-k is a SCALING, not a sparsification
+
+This is the structural fact behind §12.11's numbers, and it decides how a sparse arm must be
+configured.
+
+`_route` computes `p = softmax(all K logits)` and then ZEROES all but the top-k, leaving
+`sum(p) < 1`. So the surviving weights depend on **every** expert's energy through the shared
+denominator. The top-k mask does not remove the other experts from the computation; it removes
+their OUTPUT while keeping their influence on the SCALE of the ones that remain.
+
+How big is that influence? From `t90k_pure_T12`'s own training log:
+
+```
+load_mean_token_entropy   = 0.523-0.536   (normalized, so effective experts/token = K^H)
+=> K^H = 16^0.536 = 4.42 of 16
+=> a top-2 mask captures ~2/4.42 = 45% of the softmax mass
+=> the UNCOMPUTED tail is ~55% of the denominator
+```
+
+which matches the independently-known `sum(p) ~= 0.45` for this family. **A sparse path that never
+evaluates K-k experts is therefore missing ~55% of the quantity that sets its own output
+magnitude**, and it must either estimate it or not need it. That is why:
+
+* over-selection barely helps (p=8 still leaves ~8 miscalibrated terms: bpb 3.03 against a dense
+  1.0996), and why the curve is DISCONTINUOUS at p=K, where the tail vanishes and the zscore
+  moments become exact in the same step: 3.03 -> 1.0996;
+* `renormalize_topk: true` fixes it structurally -- there is no all-K sum to estimate;
+* and a proxy trained on ranking alone cannot supply it. KL is nearly invariant to the energies'
+  absolute scale, so `--mse_coef` adds a calibration term. Whether that is enough to rescue the
+  RETROFIT is what job 1706755 measures; it is not needed at all for an arm TRAINED with
+  renormalisation.
+
+**Consequence for the retrain (TODO gate 2):** set `renormalize_topk: true`. Retrofitting it costs
++0.483 bpb because `scale_ff` was trained against `sum(p) ~= 0.45`, but TRAINING with it is free --
+§12.3 measured `iclr_hop_K16_top2_renorm` at Avg11 **44.54** against **44.58** for the masked form.
+With the all-K denominator gone, the remaining approximations are the zscore moments (+0.318
+retrofitted, removable with `routing_norm: sqrt_width`) and SELECTION, at **+0.0165**.
+
+A note for anyone tempted by the masked form's rationale: leaving `sum(p) < 1` was chosen to avoid
+abrupt weight redistribution at routing boundaries (see the comment in `_route`). That choice is
+what makes the design un-sparsifiable, and the arms trained with renormalisation show it costs
+nothing to give up.

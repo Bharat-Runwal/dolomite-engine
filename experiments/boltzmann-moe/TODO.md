@@ -12,8 +12,21 @@
       deadline. This is the single highest-leverage item open.
       * GATE 1: proxy selection must cost < ~0.05 bits/byte and < ~0.5pp Avg11 on BOTH benchmarked
         models (job 1706727 pure, 1706728 hybrid). Measured so far on pure T12: **+0.0165 bpb**.
-      * GATE 2: the p-ladder must show a p with quality intact AND speedup > 2x (job 1706725).
-        p = K is the exactness self-test and must return 1.0996.
+      * GATE 2 — RESOLVED, and it changes the recipe. p-ladder (1706725) on the RETROFITTED
+        checkpoint: p=K returns exactly 1.0996 (machinery proven correct), but p=2/3/4/6 give
+        3.43/3.28/3.26/3.13 against a dense 1.0996. Over-selection does NOT rescue it: the K-p
+        remaining denominator terms come from the proxy, whose ABSOLUTE energy scale was never
+        calibrated (the KL objective trains ranking, not magnitude).
+        **=> THE RETRAIN MUST SET `renormalize_topk: true`.** That deletes the all-K denominator
+        entirely, so there is nothing to estimate. Retrofitting it costs +0.483 bpb because
+        scale_ff was trained for sum(p) ~= 0.45, but TRAINING with it is FREE: §12.3 measured
+        iclr_hop_K16_top2_renorm at Avg11 44.54 against 44.58 for the masked form, a tie.
+        **Consider also `routing_norm: sqrt_width` instead of `zscore`**, which removes the
+        per-token moments (worth a further +0.318 retrofitted) -- but zscore was adopted for a
+        reason (the mean-normalised Hopfield energy is ~1e-2 against tau=1, giving effK 7.999/8),
+        so sqrt_width on the PURE line is untested and is a second variable. Prefer:
+        phase 1 = renorm only; add sqrt_width only if the moments prove to matter when trained.
+        With those two gone, the ONLY approximation left is SELECTION, at +0.0165 bpb.
       * GATE 3: **measure the end-to-end step time, not the block time.** Every 4.69x here is a
         BLOCK benchmark on ONE GPU. Confirm on the real 4-GPU arm before believing it.
       * CONSTRAINT: training uses a SHARED proxy head (0.842), not the per-iteration heads (0.880)

@@ -182,19 +182,38 @@ def predict(x, V, B, scale, bias, chunk=None):
     return torch.cat(out) if len(out) > 1 else out[0]
 
 
-def refine(x, E, V, B, scale, bias, tau, sign, norm, steps, lr, refine_B, bs=8192):
+def refine(x, E, V, B, scale, bias, tau, sign, norm, steps, lr, refine_B, bs=8192,
+           mse_coef=0.0):
+    """TRAIN the proxy on the routing KL, optionally PLUS a calibration term on the energies.
+
+    WHY BOTH. KL trains the proxy's RANKING, which is all that selection needs -- and selection
+    turned out to cost only +0.0165 bits/byte. But the sparse path also uses the proxy's energies
+    for two things that need their ABSOLUTE scale:
+      * the all-K softmax denominator, when renormalize_topk is False (as trained);
+      * the per-token zscore moments.
+    Pure KL is invariant to a per-token shift and largely insensitive to scale, so it happily
+    leaves the magnitudes wrong. Measured consequence: p-ladder bits/byte 3.43 / 3.28 / 3.26 /
+    3.13 / 3.03 at p = 2/3/4/6/8, collapsing to the exact 1.0996 only at p=K, where the proxy
+    leaves the denominator entirely. Over-selecting does NOT fix that, because the K-p terms it
+    still supplies are miscalibrated at every p.
+
+    `mse_coef` adds (E_hat - E)^2, normalised by var(E) so the coefficient is scale-free.
+    """
     bs = max(256, min(bs, (1 << 22) // max(1, B.shape[0] * B.shape[1])))
-    """TRAIN the proxy on the routing KL -- the objective the metric actually cares about."""
     V, scale, bias = (t.clone().requires_grad_(True) for t in (V, scale, bias))
     B = B.clone().requires_grad_(refine_B)
     params = [V, scale, bias] + ([B] if refine_B else [])
     opt = torch.optim.Adam(params, lr=lr)
     tgt_all = F.softmax(logits_of(E, tau, sign, norm), dim=-1)
+    Evar = E.var().clamp_min(1e-12)
     N = x.shape[0]
     for step in range(steps):
         idx = torch.randint(0, N, (min(bs, N),), device=x.device)
-        lh = logits_of(predict(x[idx], V, B, scale, bias), tau, sign, norm)
+        Eh = predict(x[idx], V, B, scale, bias)
+        lh = logits_of(Eh, tau, sign, norm)
         loss = F.kl_div(F.log_softmax(lh, dim=-1), tgt_all[idx], reduction="batchmean")
+        if mse_coef > 0:
+            loss = loss + mse_coef * ((Eh - E[idx]) ** 2).mean() / Evar
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -217,6 +236,8 @@ def main():
     ap.add_argument("--refine_steps", type=int, default=0)
     ap.add_argument("--refine_lr", type=float, default=3e-3)
     ap.add_argument("--refine_B", action="store_true")
+    ap.add_argument("--mse_coef", type=float, default=0.0,
+                    help="weight on the energy-calibration term alongside the routing KL")
     ap.add_argument("--batches", type=int, default=8)
     ap.add_argument("--seqlen", type=int, default=4096)
     ap.add_argument("--per_call", type=int, default=1024)
@@ -288,7 +309,8 @@ def main():
                     ar = ai
                     if a.refine_steps > 0:
                         Pr = refine(xt.double(), Et.double(), *P, tau, sign, norm,
-                                    a.refine_steps, a.refine_lr, a.refine_B)
+                                    a.refine_steps, a.refine_lr, a.refine_B,
+                                    mse_coef=a.mse_coef)
                         Ehv = predict(xv, *Pr)
                         ar = agreement(Ehv, Ev, k, sign)
                         for pp in (a.recall_at or []):
@@ -337,9 +359,12 @@ def write_ckpt(a, src, m_, moes, x, E, cyc, n_iter, W, K, I_e, gen, tau, sign, n
         P = init_subspace(xt, Et, basis, K, I_e, r, m, gen)
         if a.refine_steps > 0:
             P = refine(xt.double(), Et.double(), *P, tau, sign, norm,
-                       a.refine_steps, a.refine_lr, a.refine_B)
-        ag = agreement(predict(xt.double(), *P), Et.double(), int(moes[0].top_k or 1), sign)
-        print(f"  head {gi:2d}: in-sample agreement {ag:.4f}  ({sel.numel()} tokens)", flush=True)
+                       a.refine_steps, a.refine_lr, a.refine_B, mse_coef=a.mse_coef)
+        Eh = predict(xt.double(), *P)
+        ag = agreement(Eh, Et.double(), int(moes[0].top_k or 1), sign)
+        r2 = (1 - ((Eh - Et.double()) ** 2).mean() / Et.double().var()).item()
+        print(f"  head {gi:2d}: agreement {ag:.4f}  energy R^2 {r2:.4f}  ({sel.numel()} tokens)",
+              flush=True)
         for lst, t in zip((Vs, Bs, Ss, Bi), P):
             lst.append(t)
     stack = (lambda L: L[0] if n_head == 1 else torch.stack(L))
