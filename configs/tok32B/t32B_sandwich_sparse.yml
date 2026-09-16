@@ -127,7 +127,14 @@ model_args:
                                      # path can estimate the all-K denominator; this deletes it.
                                      # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
         fused_experts: true
-        sparse_start_step: 500       # <<< DENSE until step 500, SPARSE from 500 on, IN ONE JOB.
+        sparse_start_step: 300       # <<< DENSE until step 300, SPARSE from 300 on, IN ONE JOB.
+                                     # 300, not 500: MEASURED 2026-09-17 on the dense phase-1 arms
+                                     # at 262144 tok/step, proxy_topk_agree hit 0.7712 (sandwich)
+                                     # and 0.6982 (pure) by step 200 -- the sandwich already past
+                                     # the 0.75 handoff threshold, and faster than the reference
+                                     # run (0.7906 at 280). These arms run 524288 tok/step, DOUBLE
+                                     # that, so the proxy sees 2x the tokens per step and should
+                                     # clear it sooner still. 300 keeps margin at 0.5% of the run.
                                      # Steps 1-499 take _forward_fused, whose _proxy_step distils
                                      # the proxy against the EXACT all-K routing distribution --
                                      # the only regime in which it learns the ranking (reference:
