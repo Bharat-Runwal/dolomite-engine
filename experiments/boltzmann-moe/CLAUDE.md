@@ -75,6 +75,60 @@
 > and 1.61x at **4 GPU / 1 node**, but it **WEDGES at 16 GPU / 2 nodes** and is
 > reverted on the live arm — validated single-node only.
 
+> ## ⚡ TRUE SPARSITY — measured 2026-09-16. Read before quoting any sparsity or FLOPs number.
+>
+> `HANDOFF.md` §12.9 has the full tables. The three things that get misquoted:
+>
+> **1. `sparse_forward` is the one that works: 4.69x** (compiled, forward+backward, H100) on the
+> pure_T12 block shape at its real per-call size. That is **past the `1/2*(1+k/K)` "cannot beat 2x"
+> floor**, which applies only to an exact router — the rank-r proxy is what breaks it.
+> `sparse_backproj` alone is 1.18-1.35x and is redundant with it.
+>
+> **2. THE SPEEDUP DEPENDS ON tokens/call AND THE SIGN FLIPS.** At 4096 tokens/call
+> `sparse_forward` LOSES on hybrid shapes (0.41-0.49x compiled); at 16384 it wins 2.1-2.4x.
+> Dispatch overhead is O(T*k) regardless of `I_e`; the saving is O(T*(K-k)*I_e). **Never quote a
+> sparsity speedup without the per-call token count** — `micro_batch_size x sequence_length`, NOT
+> tokens/step. The 400M hybrid at `micro_batch_size: 1` sits in the losing column.
+>
+> **3. The proxy's prediction error is the ENTIRE approximation.** With an oracle proxy the sparse
+> path reproduces the dense output to 4e-16 with the selection free
+> (`scripts/test_sparse_forward_20260916.py`). So there is nothing to audit in the dispatch — audit
+> the proxy. `renormalize_topk: true` and `routing_norm: none|sqrt_width` remove the two smaller
+> approximations by config rather than by code.
+>
+> Training a sparse arm needs a DENSE phase first: the proxy is distilled against the exact all-K
+> routing distribution, which the sparse path does not compute. Fit post-hoc on a trained
+> checkpoint with `scripts/calibrate_proxy_router_20260916.py`.
+
+> ## 🖥 ANY GPU WORK GOES THROUGH bsub — INCLUDING ONE-OFF TESTS AND BENCHMARKS
+>
+> **An interactive session is frequently on a CPU-ONLY compute node.** Verified 2026-09-16 on
+> `p2-r05-n3`: `hostname` says compute node, and `nvidia-smi` says **"No devices were found"**.
+> So "I am on a compute node, I can run directly" is only true for CPU work. A GPU script run
+> in-shell there either dies or silently falls back to CPU — and a *timing* script that falls
+> back to CPU returns numbers that look plausible and are meaningless.
+>
+> **Submit every GPU test.** Use the saved wrappers rather than hand-rolling a bsub each time:
+>
+> | script | use |
+> |---|---|
+> | `scripts/bsub/submit_gpu_test.sh <job> "<cmd>" [gpus] [wall] [mem]` | generic one-off GPU test/benchmark |
+> | `scripts/bsub/bench_sparse.sh` | the exact sparsity wall-clock sweep behind §12.9 |
+>
+> ```bash
+> bash scripts/bsub/submit_gpu_test.sh mytest \
+>     "python experiments/boltzmann-moe/scripts/test_something.py --train"
+> ```
+>
+> **`preemptable` is the right queue for tests** (`-q preemptable` REQUIRES `-G grp_preemptable`).
+> Tests are short, a preempted one costs only a resubmit, and `grp_ebm` is capacity-limited —
+> check it with `blimits`, NOT `bjobs`. Logs go to `$HOME/bsub_logs/`, never `$HOME`.
+> Then verify 30–60 s later: `bjobs -J <job>` must show `RUN`, not `EXIT`.
+>
+> Only these stay safe to run in-shell: file edits, `git`, `ls`/`find`/`grep`,
+> `bsub`/`bjobs`/`bkill`, LaTeX, and CPU-only Python (a float64 exactness test on tiny tensors is
+> fine — a timing run is not).
+
 > ## 🛑 CONFIG PRE-FLIGHT — RUN THIS BEFORE ANY LONG RUN. NO EXCEPTIONS.
 >
 > Every buggy long run in this project came from a config that *looked* right. A week of

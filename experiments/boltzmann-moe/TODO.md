@@ -1,5 +1,47 @@
 # Boltzmann MoE — TODO
 
+## 2026-09-16: TRUE SPARSITY — ⭐ TOP PRIORITY IF THE PROXY BENCHMARK LANDS WELL
+
+### ⭐ THE DECISION THAT MATTERS: train the long pure T12 with sparsity ON
+- [ ] **If the proxy-selection benchmark holds up on both models, retrain the full long
+      `t90k_pure_T12` (90k steps / 23.6B tokens) with the new setting, and do it IMMEDIATELY.**
+      Rationale: measured **4.69x** on the pure block (compiled, fwd+bwd, at its real 16384
+      tokens/call), and the mixture is 98.9-99.6% of per-token FLOPs in a pure stack. If that
+      converts to anything close to a 4x step-time cut, the pure arm goes from ~40 h to ~10 h and
+      the missing **400M PURE** cell in the 3-family x 2-scale matrix becomes affordable inside the
+      deadline. This is the single highest-leverage item open.
+      * GATE 1: proxy selection must cost < ~0.05 bits/byte and < ~0.5pp Avg11 on BOTH benchmarked
+        models (job 1706727 pure, 1706728 hybrid). Measured so far on pure T12: **+0.0165 bpb**.
+      * GATE 2: the p-ladder must show a p with quality intact AND speedup > 2x (job 1706725).
+        p = K is the exactness self-test and must return 1.0996.
+      * GATE 3: **measure the end-to-end step time, not the block time.** Every 4.69x here is a
+        BLOCK benchmark on ONE GPU. Confirm on the real 4-GPU arm before believing it.
+      * CONSTRAINT: training uses a SHARED proxy head (0.842), not the per-iteration heads (0.880)
+        — a call counter is unsound under activation checkpointing.
+      * CONSTRAINT: needs a DENSE warm-up phase to fit the proxy, since the sparse path never
+        computes the all-K targets the distillation needs. Two-phase recipe, or use
+        `proxy_route: false` for phase 1 and flip it for phase 2.
+      * `micro_batch_size` MUST stay >= 4096 tokens/call or sparsity LOSES; and note fused_experts
+        OOMs at mbs 4 with I_tot=71680, so use mbs 1 x ga 16 unless sparse_forward is on (it cuts
+        that intermediate 6.4x, which may re-enable mbs 4).
+
+### In progress
+- [ ] `pladder2` (1706725): p in {K,3,4,6,8} bits/byte. p=K is the correctness self-test.
+- [ ] `benchpure` (1706727) / `benchhyb` (1706728): FULL Avg11 + wikitext, dense vs
+      proxy-selection, on pure_hop_T12_sink and iclr_hop_K32_top2_sink.
+- [ ] `ptrain_T12_proxy16` (1706723): can the proxy be distilled ONLINE? Beat the post-hoc
+      shared-head 0.842.
+
+### Open
+- [ ] `renormalize_topk: true` costs **+0.483 bits/byte** on its own (scale_ff was trained for
+      sum(p) ~= 0.45). Do NOT use it to fix the denominator — over-selection is the right fix.
+- [ ] Per-iteration proxy heads in TRAINING would need `layer.py` to pass the block its iteration
+      index. Worth +0.038 agreement. Touches every energy model, so not before the deadline.
+- [ ] Decode/generation with sparsity is UNMEASURED and probably a LOSS (T = batch size, and
+      small T loses). Do not claim inference speedup for autoregressive decode.
+- [ ] End-to-end (not block-level) speedup on a real multi-GPU arm, placement-controlled.
+
+
 ## 2026-09-15: Avg11 for the seven previously-unevaluated sharded ICLR arms — DONE
 
 Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`

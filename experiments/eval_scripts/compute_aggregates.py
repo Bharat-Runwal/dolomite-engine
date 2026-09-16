@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""compute_aggregates.py — print headline numbers from a harness_results.json.
+"""compute_aggregates.py — DEPRECATED for headline numbers. Use compute_avg11.py.
+
+    ⚠ DEPRECATED 2026-09-14. This script's `avg10` (MMLU-in, race/lambada-out) is
+    NOT comparable to the colleague / paper headline, which is the 11-task `Avg11`
+    (MMLU-out, race + lambada IN). Quoting avg10 next to a colleague's Avg11
+    flatters us by ~3pp for a pure scoring-convention reason. For any headline or
+    cross-team comparison use `compute_avg11.py` instead; keep this only to
+    reproduce old avg10 tables. See compute_avg11.py's docstring for the recipe.
+
+--- original docstring below ---
+
+compute_aggregates.py — print headline numbers from a harness_results.json.
 
 Outputs:
   - avg10:        mean primary acc over the 10-task suite (uses `acc` for all)

@@ -2,23 +2,32 @@
 
 > ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
 >
-> Every "Avg" / "Avg acc" figure below is **`avg9`**: the mean over **nine** tasks
-> with **MMLU EXCLUDED**, and `acc_norm` used on all six tasks that report it
-> (including `sciq`). MMLU was left out of the average because of a dataset
-> installation problem at the time; `race` and `lambada_openai` were also absent
-> (an Arrow/parquet reader bug, fixed 2026-08-03 by pinning `pyarrow>=20`).
+> **CANONICAL (2026-09-14 onward): `Avg11`** — the colleague-/paper-consistent
+> 11-task mean (`compute_avg11.py`). Every "Avg" / "Avg acc" figure below is instead
+> the legacy **`avg9`**: the mean over **nine** tasks with **MMLU EXCLUDED**, and
+> `acc_norm` on all six tasks that report it (including `sciq`). MMLU was left out
+> because of a dataset installation problem at the time; `race` and `lambada_openai`
+> were also absent (an Arrow/parquet reader bug, fixed 2026-08-03 by pinning
+> `pyarrow>=20`).
 >
-> The **current** convention (`compute_aggregates.py`, and the FET series in
-> `~/Code/GPT-experiments/projects/EGPT-action/RESULTS.md`) is **`avg10`**: ten tasks
-> with **MMLU INCLUDED**, `acc_norm` on five (`sciq` uses plain `acc`).
+> **None of the numbers in this file can be converted to Avg11.** Every checkpoint
+> here (`680M` / `h1_boltz_moe_580m_8x4096`, `scale_h3_8gpt_4egpt_boltz`,
+> `scale_gptmoe_*`, `gptswitchmoe-680M`) was evaluated before the `pyarrow>=20` fix,
+> so its `harness_results.json` is missing `race` + `lambada_openai` and
+> `compute_avg11.py` reports it **INCOMPLETE (9/11)**. The `avg9` values below stay
+> as-is and are labelled `avg9`; **re-run the harness eval on these checkpoints before
+> quoting any Avg11**. (The avg9→avg10 gap is documented in `AVG10_RESTATED.md`;
+> `avg10` is likewise now deprecated for headlines.)
 >
-> **`avg10` is 1.2–2.7pp LOWER than `avg9`** because MMLU sits near chance (~24–28%)
-> at these scales. **Do not put avg9 and avg10 numbers in the same table** — doing so
-> flatters every pre-2026-06 run by roughly 1.5pp.
+> **`Avg11 ≈ 3pp BELOW avg10`, and `avg10` is 1.2–2.7pp below `avg9`.** Never put
+> avg9 / avg10 / Avg11 numbers in the same table. The intra-file comparisons here
+> (e.g. 680M Boltz vs gptswitchmoe-680M, +0.65pp) stay valid because **both arms are
+> avg9** — only the absolute scale is legacy.
 >
-> Restated values for every run with a stored eval:
-> `python experiments/eval_scripts/restate_avg9_to_avg10_20260912.py --md`
-> Corrected headline numbers are in `AVG10_RESTATED.md`.
+> Legacy avg9→avg10 restatement:
+> `python experiments/eval_scripts/restate_avg9_to_avg10_20260912.py --md` /
+> `AVG10_RESTATED.md`. Avg11 restatement of every stored eval:
+> `python experiments/eval_scripts/restate_to_avg11_20260914.py --md`.
 
 **TL;DR.** Two ~600M Boltzmann-MoE hybrids both beat all pure-GPT and no-MoE
 baselines on every metric (avg, WikiPPL) at substantially fewer training
@@ -75,7 +84,7 @@ Layers 9-12  EGPT (4 distinct blocks, no recursion)
 
 ## Eval results
 
-| Run | Tokens | Avg | WikiPPL | MMLU | GSM8k flex-avg | Notes |
+| Run | Tokens | avg9 | WikiPPL | MMLU | GSM8k flex-avg | Notes |
 |---|---:|---:|---:|---:|---:|---|
 | **680M @ step 124k (FINAL)** | **65.0B** | **58.47** | **19.33** | **26.33** | 2.08 | **🏆 final — best on every metric, training complete** |
 | 680M @ step 118k | 61.9B | 57.81 | 19.48 | 25.72 | 2.12 | prior |
@@ -100,7 +109,7 @@ size — see the architecture summary at the top of this file. The Boltz-MoE
 **680M** baseline (which uses energy attention and a recurrent EGPT layer)
 is included as the structurally-different reference.
 
-| Run | Config | Total / Active (M) | Tokens | Avg | WikiPPL | MMLU | gsm8k flex-avg | Notes |
+| Run | Config | Total / Active (M) | Tokens | avg9 | WikiPPL | MMLU | gsm8k flex-avg | Notes |
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | `scale_gptmoe_8gpt_4switchmoe_d1280` @ 24k  | 8 GPT + 4 Switch-MoE FFN K=4 I=4096 | 585 / 459 | 12.6 B | 50.81 | 30.48 | 23.27 | 2.46 | early Switch top-1 |
 | `scale_gptmoe_8gpt_4switchmoe_d1280` @ 60k  | 8 GPT + 4 Switch-MoE FFN K=4 I=4096 | 585 / 459 | 31.5 B | 54.74 | 26.23 | 25.31 | 2.50 | mid |

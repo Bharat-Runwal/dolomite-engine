@@ -1375,9 +1375,11 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
         # ---- 4. EXACT energies -- free, they fall out of the projection we just did ----
         E_pair = (gz * gz).mean(-1)                      # (K, C)
-        E_tk = E_prox.new_zeros(T * k)
+        # p_cand, NOT k: with over-selection there are p candidate slots per token, and sizing
+        # this with k silently broke every p > k configuration (caught by the p = K self-test).
+        E_tk = E_prox.new_zeros(T * p_cand)
         E_tk[sp_k] = E_pair[se_k, slot_k].to(E_tk.dtype)
-        E_tk = E_tk.view(T, k)
+        E_tk = E_tk.view(T, p_cand)
         # zscore moments: exact when every expert is a candidate, else the proxy's
         mom_w = self._zscore_moments(E_tk) if p_cand == K else mom
         lg = self._logits_raw(E_tk, moments=mom_w, expert_idx=sel_idx)

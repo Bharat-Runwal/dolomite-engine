@@ -12,7 +12,10 @@ and want to evaluate your own checkpoints with the same task list and protocol.
 | `submit_eval.sh` | Submits the 13-task LM-harness bsub. Optionally chains BBH (default `--with-bbh`). |
 | `submit_bbh_eval.sh` | Standalone BBH (3-shot, 27 subtasks). Called by `submit_eval.sh` if `--with-bbh`. |
 | `eval_harness.py` | Python wrapper around `lm-evaluation-harness`; registers `lm_engine.hf_models` so HF auto-recognizes EGPT / Boltzmann arches. |
-| `compute_aggregates.py` | Reads `harness_results.json` and prints `avg10`, `avg10_norm`, WikiText-PPL, GSM8K, per-task acc/acc_norm. |
+| `compute_avg11.py` | **CANONICAL headline aggregator (2026-09-14).** Prints the colleague-/paper-consistent 11-task `Avg11` (acc_norm ×6 + acc ×5), with MMLU, GSM8K-CoT and WikiText-PPL reported separately. Refuses to emit `Avg11` for a run missing any of the 11 tasks (prints `INCOMPLETE (k/11)`). Use this for any headline or cross-team number. |
+| `restate_to_avg11_20260914.py` | Walks every stored `harness_results_*.json` and emits the `Avg11` table (`--md` for markdown), marking INCOMPLETE runs. Pure stdlib; imports the recipe from `compute_avg11.py`. |
+| `compute_aggregates.py` | **DEPRECATED for headlines (2026-09-14).** Prints legacy `avg10` / `avg10_norm` (MMLU-in, race/lambada-out), WikiText-PPL, GSM8K, per-task acc/acc_norm. `avg10` is ~3pp ABOVE `Avg11` for a pure scoring-convention reason — do not quote it next to a colleague's Avg11. Kept only to reproduce old avg10 tables. |
+| `restate_avg9_to_avg10_20260912.py` | Legacy: measures the avg9→avg10 gap. Superseded by `restate_to_avg11_20260914.py` for headlines. |
 | `bench_checkpoint.sh` | One-shot wrapper: unshards a `global_step<N>/` checkpoint then chains `submit_eval.sh`. |
 
 ## TL;DR
@@ -31,9 +34,10 @@ bash experiments/eval_scripts/submit_eval.sh \
 bash experiments/eval_scripts/submit_eval.sh \
      /path/to/unsharded  eval_my_run  --no-bbh
 
-# Aggregate after results land:
-python experiments/eval_scripts/compute_aggregates.py \
+# Aggregate after results land (CANONICAL Avg11 headline):
+python experiments/eval_scripts/compute_avg11.py \
      /path/to/unsharded/harness_results.json
+# (legacy avg10, deprecated for headlines: compute_aggregates.py)
 ```
 
 All `run_*.sh` training launchers in this repo automatically chain into
@@ -46,13 +50,22 @@ arc_challenge, arc_easy, boolq, copa, hellaswag, openbookqa,
 piqa, sciq, wikitext, winogrande, mmlu, gsm8k, gsm8k_cot
 ```
 
-The first 10 are aggregated as **avg10** (mean of primary `acc`).
-**avg10_norm** uses `acc_norm` for tasks that report it
-(arc_challenge, arc_easy, hellaswag, openbookqa, piqa) and `acc` otherwise
-(boolq, copa, sciq, winogrande, mmlu).
+**CANONICAL headline aggregate (2026-09-14): `Avg11`** via `compute_avg11.py` — the
+11-task mean used by the EGPT-RL / FET colleagues and the paper `tab:scaling`:
+`acc_norm` on {arc_challenge, arc_easy, hellaswag, openbookqa, piqa, sciq} and `acc`
+on {boolq, copa, winogrande, **race**, **lambada_openai**}, with **MMLU (acc) and
+GSM8K-CoT (flex) reported SEPARATELY, never folded in**. `race` + `lambada_openai`
+are required, so any checkpoint evaluated before the 2026-08-03 `pyarrow>=20` fix
+comes back `INCOMPLETE (9/11)` and must be re-evaluated before an Avg11 can be quoted.
 
-`compute_aggregates.py` prints both, plus WikiText word-PPL, GSM8K (strict),
-GSM8K-CoT (flexible-extract), and a per-task table.
+The legacy **avg10** (`compute_aggregates.py`, now deprecated for headlines) instead
+aggregates the first 10 tasks (mean of primary `acc`); **avg10_norm** uses `acc_norm`
+for tasks that report it (arc_challenge, arc_easy, hellaswag, openbookqa, piqa) and
+`acc` otherwise (boolq, copa, sciq, winogrande, mmlu). It INCLUDES MMLU and EXCLUDES
+race + lambada, so it sits ~3pp ABOVE Avg11 — never mix the two in one table.
+
+`compute_aggregates.py` prints both avg10 forms, plus WikiText word-PPL, GSM8K
+(strict), GSM8K-CoT (flexible-extract), and a per-task table.
 
 **Excluded by default** (cluster-specific, not protocol-defining):
 - `lambada_openai`, `race` — Arrow parquet "Repetition level histogram size mismatch" on this cluster
@@ -246,12 +259,16 @@ was not necessarily over the same tasks between tables:
 
 All three now use `EVAL_TASKS` defined in `eval_tasks.sh` (single source of truth).
 
-**The reported aggregate is `avg10` / `avg10_norm` from `compute_aggregates.py`**, a
-mean over exactly ten tasks: `arc_challenge, arc_easy, boolq, copa, hellaswag,
-openbookqa, piqa, sciq, winogrande, mmlu`. `avg10_norm` substitutes `acc_norm` for
-the five tasks where it is standard (`arc_challenge, arc_easy, hellaswag, openbookqa,
-piqa`) and uses `acc` for the other five. `race` and `lambada_openai` are evaluated
-but are **not** in the average, despite a commit message that says "11-task Avg%".
+**The canonical headline aggregate is now `Avg11` from `compute_avg11.py`** (2026-09-14;
+see the metric section above) — an 11-task mean that INCLUDES `race` + `lambada_openai`
+and EXCLUDES MMLU from the average. The older `avg10` / `avg10_norm` from
+`compute_aggregates.py` — a mean over exactly ten tasks: `arc_challenge, arc_easy,
+boolq, copa, hellaswag, openbookqa, piqa, sciq, winogrande, mmlu`, with `avg10_norm`
+substituting `acc_norm` for the five tasks where it is standard (`arc_challenge,
+arc_easy, hellaswag, openbookqa, piqa`) and `acc` for the other five — is **deprecated
+for headlines**: it EXCLUDES `race` + `lambada_openai` (evaluated but not averaged,
+despite a commit message that says "11-task Avg%") and INCLUDES MMLU, leaving it ~3pp
+above Avg11.
 
 ## BBH remains a deliberate local deviation
 

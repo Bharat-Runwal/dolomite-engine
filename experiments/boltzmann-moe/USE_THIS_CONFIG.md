@@ -5,6 +5,26 @@ Last updated 2026-09-14. Everything here is measured on a fixed backbone (d=768,
 scored as `avg10_norm` (10 tasks, `acc_norm` wherever a task reports one) by a version-pinned
 harness. Total params agree to within 0.3% across every arm quoted.
 
+> ## ⚠ METRIC: numbers in THIS file are legacy `avg10_norm`, not the canonical `Avg11`
+>
+> The canonical headline metric (2026-09-14) is **`Avg11`** (`compute_avg11.py`).
+> Every number below is `avg10_norm`, which sits **~3pp ABOVE Avg11** (avg10 keeps
+> near-chance MMLU and drops near-chance race + lambada) — so do NOT compare these to
+> a colleague's Avg11 or mix them in one table. These `iclr_*` runs ARE complete under
+> Avg11 (they have race + lambada); their recomputed **Avg11** values are in the ICLR
+> grid at the top of `PROGRESS.md`, e.g. for the arms recommended here:
+>
+> | config | avg10_norm (below) | **Avg11** (canonical) | WikiPPL |
+> |---|---:|---:|---:|
+> | `iclr_hop_K32_top2.yml` (recommended) | 46.26 | **44.38** | 40.59 |
+> | `iclr_hop_K32_top1.yml` | 46.15 | **44.12** | 40.77 |
+> | `iclr_hop_K16_top2.yml` | 45.89 | **43.91** | 40.49 |
+> | `iclr_hop_K16_dense.yml` | 46.58 | **44.78** | 40.73 |
+>
+> **The config recommendation is unchanged under Avg11** — the sparse-arm ranking
+> (K32_top2 > K32_top1 > K16_top2) is identical. Recompute any of these with
+> `python experiments/eval_scripts/compute_avg11.py <run_dir>`.
+
 ---
 
 ## 1. Start from this config

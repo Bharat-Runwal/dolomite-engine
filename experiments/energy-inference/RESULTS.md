@@ -2,6 +2,15 @@
 
 <!-- New results go at the top (reverse chronological). -->
 
+> **⚠ METRIC (2026-09-14):** the canonical headline metric is now **`Avg11`**
+> (`experiments/eval_scripts/compute_avg11.py`). Every "Avg acc" figure in this file
+> is a **legacy** aggregate (pre-`pyarrow>=20`, so `race` + `lambada_openai` were not
+> scored and, in the oldest tables, MMLU was excluded). These V-series checkpoints
+> come back **INCOMPLETE (9/11)** under `compute_avg11.py` and therefore **cannot be
+> converted to Avg11 without re-evaluating** — treat the "Avg acc" values as historical
+> and do not place them beside an Avg11 number. Restate anything with a stored eval:
+> `python experiments/eval_scripts/restate_to_avg11_20260914.py --md`.
+
 ## V54/V55: Parallel GPT baselines — 2026-04-25
 
 **Architecture**: New `parallel_gpt` block type added to `EnergyBlock`.

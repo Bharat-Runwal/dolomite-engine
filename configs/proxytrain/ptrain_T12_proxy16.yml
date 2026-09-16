@@ -15,6 +15,13 @@
 # nothing. Now asserted in energy_ff.py. The flag is an EXACT change (1.227e-15) and this arm is
 # 4 GPUs on ONE node, inside the single-node range where fused is validated.
 #
+# micro_batch_size 1 x ga 16 (base: 4 x 4), tokens/step UNCHANGED at 262144. Required because
+# fused_experts materialises the whole (mbs, seq, K*I_e) intermediate at once -- at mbs 4 that is
+# (4, 4096, 71680) = 2.19 GiB per allocation and the first attempt OOMed on 80 GiB H100s. The
+# looped path works in per-expert slices, which is why the base arm can afford mbs 4 without
+# fused_experts. Note this is itself an argument FOR sparse_forward, which cuts that exact tensor
+# by cf*k/K = 6.4x.
+#
 # NO load_args: fresh run. The base config carries one now, and inheriting it would both resume
 # the wrong weights and load an optimizer state with no proxy parameters.
 # TOKEN-SCALING SET, 90000 steps = 23.6B tokens, CORRECTLY SCHEDULED (2026-09-16).
@@ -143,8 +150,8 @@ logging_args:
 training_parameters:
   num_training_steps: 3000
   eval_interval: 5000
-  micro_batch_size: 4
-  gradient_accumulation_steps: 4
+  micro_batch_size: 1
+  gradient_accumulation_steps: 16
   eval_during_training: false
   gradient_clipping: 1
 

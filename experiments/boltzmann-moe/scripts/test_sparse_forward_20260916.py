@@ -24,7 +24,7 @@ import torch
 from lm_engine.hf_models.modeling_utils.mlp_blocks.energy_ff import build_boltzmann_moe
 
 
-def mk(K=8, k=2, cf=4.0, H=64, I=256, seed=0, rn="none", renorm=True, r=8, **kw):
+def mk(K=8, k=2, cf=4.0, H=64, I=256, seed=0, rn="none", renorm=True, r=8, **kw):  # noqa: D103
     torch.manual_seed(seed)
     c = build_boltzmann_moe(
         expert_kind="hopfield", hidden_size=H, intermediate_size=I, n_experts=K,
@@ -121,6 +121,39 @@ for rn, renorm in (("none", True), ("zscore", True), ("zscore", False)):
     r = (sp - dense).abs().max().item() / dense.abs().max().item()
     print(f"  routing_norm={rn:6s} renormalize_topk={str(renorm):5s}  relative error = {r:.3e}"
           f"   {'EXACT' if r < 1e-12 else 'NOT EXACT'}")
+
+print("\nTEST 4c -- OVER-SELECT then RE-RANK. p = K must be EXACT with NO proxy involvement:")
+print("         every energy is then computed exactly, the denominator has no proxy term and")
+print("         the zscore moments are exact. This is the self-test that should have existed")
+print("         first -- it catches p != k shape bugs instantly.")
+for rn, renorm in (("none", False), ("zscore", False), ("zscore", True)):
+    c = mk(rn=rn, renorm=renorm, sparse_candidates=8)   # 8 = mk's default n_experts
+    m = c.moe
+    with torch.no_grad():
+        dense = m._forward_fused(x).clone()
+        sp = m._forward_sparse(x).clone()
+    r = (sp - dense).abs().max().item() / dense.abs().max().item()
+    print(f"  routing_norm={rn:6s} renorm={str(renorm):5s} p=K  rel err = {r:.3e}"
+          f"   {'EXACT' if r < 1e-12 else 'NOT EXACT'}")
+
+print("\nTEST 4d -- intermediate p: shapes must hold and the re-rank must pick by EXACT energy")
+for pc in (2, 3, 4, 6, 8):
+    c = mk(rn="zscore", renorm=False, sparse_candidates=pc)
+    m = c.moe
+    with torch.no_grad():
+        out = m._forward_sparse(x)
+    # with an oracle proxy, over-selecting can only help: p=K is exact, so larger p must not be
+    # worse than smaller p on the SAME weights
+    def oracle(z, _m=m):
+        W = _m._fused_W()
+        g = torch.nn.functional.gelu(z @ W.t()).view(*z.shape[:-1], _m.n_experts, _m._expert_I)
+        return (g * g).mean(-1)
+    m._proxy_energies = oracle
+    with torch.no_grad():
+        dense = m._forward_fused(x).clone()
+        sp = m._forward_sparse(x).clone()
+    r = (sp - dense).abs().max().item() / dense.abs().max().item()
+    print(f"  p={pc:2d}  out {tuple(out.shape)}  oracle-proxy rel err vs dense = {r:.3e}")
 
 print("\nTEST 5 -- overflow is counted, not silent")
 c = mk(cf=0.15, renorm=True)

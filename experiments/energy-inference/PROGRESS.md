@@ -1,5 +1,12 @@
 # Progress — Session 2026-05-08
 
+> **⚠ METRIC (2026-09-14):** "avg", "Avg acc" and `COL_AVG10` figures in this file are
+> **legacy** (avg9 / avg10). The canonical headline metric is now **`Avg11`**
+> (`experiments/eval_scripts/compute_avg11.py`). These checkpoints predate the
+> 2026-08-03 `pyarrow>=20` fix, so they are missing `race` + `lambada_openai` and come
+> back **INCOMPLETE (9/11)** — their numbers cannot be restated to Avg11 without a
+> re-eval. Do not mix them with Avg11.
+
 ## paper_v2 update: V56–V78, R1–R3, U1–U4, B1–B5 analysis
 
 Comprehensive update to `nima/paper_v2.tex` incorporating all experiments since V53.

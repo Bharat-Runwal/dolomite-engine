@@ -627,6 +627,16 @@ Two results:
   0.94 top-1 / 0.90 top-2 for 98.3 K MACs vs the exact router's 12.58 M —
   a **~128× cheaper router**.
 
+> **⚠ CORRECTION 2026-09-16 — READ THIS BEFORE REUSING THE 0.94/0.90 ABOVE.**
+> Those numbers are for the **exact energy restricted to the rank-r subspace**, i.e.
+> `mean(gelu(W_k V_r V_rᵀ x)²)`, which keeps the true nonlinearity. They are **NOT** measurements
+> of the "tiny fitted nonlinear head" recommended just below, and they were subsequently quoted as
+> if they were — in `energy_ff.py`'s proxy comment, in HANDOFF §12.9, and in my own reasoning.
+> Measured on `pure_hop_T12_sink`, the fitted diagonal-quadratic head reaches **0.348 top-2 at
+> r=8** against a chance floor of `k/K` = **0.125**, and only 0.461 at r=32. A diagonal quadratic
+> in `a` cannot represent `mean(gelu(·)²)`. See §12.11. The cost line above is also incomplete:
+> `K·d·r` counts only the projection and omits the `K·I_e·r` term for `B_k a_k`.
+
 **Recommended implementation:** project `a = V_kᵀ x` (r ≈ 2-8 coefficients,
 cost `d·r` per expert) then evaluate a **tiny fitted nonlinear head** on `a`.
 Because `r` is only 2-8, a low-degree polynomial or a 16-unit MLP suffices and
@@ -1320,8 +1330,10 @@ on `grp_preemptable` (1397/6144). `blimits`, not `bjobs`, is the authoritative q
    one `bmm` + scatter-add. **Verified EXACT** vs the dense mask (relative error 3.79e-16, overflow
    0); overflow drops pairs and is COUNTED in `_sparse_overflow`. Back-GEMM saving 6.40x at K=16
    k=2, 12.80x at K=32 k=2. Deliberately not a per-expert loop — that measured 0.59x, SLOWER.
-   * **NOT yet measured: actual step-time delta.** Back-projection is 13-15% of the step, so
-     expect ~12% wall-clock. Benchmark this next.
+   * ~~**NOT yet measured: actual step-time delta.**~~ **MEASURED — see 12.9.** sparse_backproj
+     alone is 1.18-1.35x compiled at the real batch size and a LOSS (0.44-0.94x) at a small one.
+     The full `sparse_forward` is what pays: **4.69x** compiled fwd+bwd on the pure arm, past the
+     "cannot beat 2x" floor. Both depend strongly on tokens/call.
    * **The big half is still blocked**: the forward projection cannot be skipped by an exact router
      (the 1/2(1+k/K) floor) and needs the proxy router (0.942 top-2 agreement at rank 8). That is
      where the 61% elementwise bucket lives, and where the pure design pays off most — the mixture
@@ -1346,3 +1358,187 @@ GPUs, `load_args`, the checkpoint pointer vs `max_to_keep`, glob prefix collisio
 knobs reaching the model rather than just the YAML, the per-expert-kind sign direction, the
 Sinkhorn requirements, and diffing against the arm being copied.
 
+
+### 12.9 TRUE SPARSITY — the other half landed, and the wall clock disagrees with the FLOPs
+
+**What is in the code now** (`energy_ff.py`, opt-in, every default unchanged):
+
+* `sparse_forward` — skips the forward AND back projection of the K-k experts a token was not
+  routed to. Requires `proxy_rank > 0` and `fused_experts` (asserted): an exact router cannot
+  skip the forward projection, because it needs all K energies to decide. That is the
+  `1/2*(1+k/K)` floor, and the proxy is what breaks it.
+* `proxy_route` now DOES SOMETHING. It was plumbed through config, builder and constructor and
+  then **never read** — `self.proxy_route` was assigned and that was the end of it. Pre-flight
+  check 7, in the file that check was written for. It now moves SELECTION to the cheap router
+  while the WEIGHTS stay exact, in the dense path too, which is the controlled A/B for selection
+  quality with the dispatch machinery held out.
+* `sparse_backproj`, `sparse_forward` and `sparse_capacity_factor` reached the pydantic args
+  class and `get_mlp_block` for the first time. Yesterday's `sparse_backproj` was reachable ONLY
+  by calling `build_boltzmann_moe` directly — which is exactly what its test does, so the test
+  passed while a YAML using the flag would have been REJECTED outright (`extra="forbid"`). Loud
+  rather than silent, so no wrong run came of it, but the flag was unusable.
+* `_logits` split into `_logits_raw` + `_mu_for` so the dual is solved, and `_mu_call` ticked,
+  exactly ONCE per forward even though the sparse path needs the logit map twice.
+* `_dispatch_plan` factored out and shared by both sparse paths so they cannot drift.
+
+**Exactness.** `test_sparse_forward_20260916.py`. With an ORACLE proxy (returns the exact
+energies) the sparse path reproduces the dense output to **4.3e-16 - 8.0e-16** with the selection
+left FREE, in all three of `routing_norm=none/renormalize`, `zscore/renormalize` and
+`zscore/masked`. So **the proxy's prediction error is the ENTIRE approximation** — there is no
+second error hiding in the dispatch, the denominator completion or the zscore moments. Forcing
+the dense selection also gives bit-exactness (7.98e-16, 5.05e-16), and overflow is counted, not
+silent. Two smaller approximations can be removed by config rather than by code:
+`renormalize_topk: true` deletes the proxy-completed denominator term entirely (and was measured
+at Avg11 44.54 against 44.58 for the masked form, i.e. free), and `routing_norm: none|sqrt_width`
+needs no per-token moments.
+
+**Wall clock — H100, one GPU, ms per block call, speedup vs the dense mask.** Measured four ways
+because the answer CHANGES SIGN between them. `torch_compile: true` on every arm and
+forward+backward is what training pays, so **the compiled f+b column at the arm's real per-call
+token count is the only admissible training number**; the rest is there to show why.
+
+tokens/call = 4096:
+
+| shape | eager fwd | eager f+b | compiled fwd | compiled f+b |
+|---|---:|---:|---:|---:|
+| pure_T12 K=16 I_e=4480 · backproj | 1.02x | 1.09x | 0.89x | 0.94x |
+| pure_T12 · **sparse_forward** | 2.04x | 2.82x | 2.14x | 1.36x |
+| hyb_K32 K=32 I_e=512 · backproj | 0.77x | 0.89x | 0.44x | 0.53x |
+| hyb_K32 · **sparse_forward** | 0.72x | 0.80x | 0.39x | 0.41x |
+| big_hyb K=16 I_e=1280 · backproj | 0.79x | 0.95x | 0.57x | 0.66x |
+| big_hyb · **sparse_forward** | 0.91x | 0.99x | 0.62x | 0.49x |
+
+tokens/call = 16384 (dense f+b compiled: 24.67 / 5.44 / 8.46 ms):
+
+| shape | eager f+b | compiled fwd | **compiled f+b** |
+|---|---:|---:|---:|
+| pure_T12 · backproj | 1.17x | 1.29x | 1.35x |
+| pure_T12 · **sparse_forward** | 4.96x | 4.33x | **4.69x** |
+| hyb_K32 · backproj | 1.12x | 0.98x | 1.18x |
+| hyb_K32 · **sparse_forward** | 2.87x | 1.50x | **2.09x** |
+| big_hyb · backproj | 1.08x | 1.02x | 1.21x |
+| big_hyb · **sparse_forward** | 2.54x | 1.95x | **2.37x** |
+
+Four things follow, two of which correct claims of mine:
+
+1. **The saving is strongly batch-size dependent and the sign flips.** At 4096 tokens/call
+   `sparse_forward` LOSES on both hybrid shapes (0.41x, 0.49x compiled); at 16384 it wins
+   2.1-2.4x. The dispatch overhead is O(T*k) index work independent of `I_e`, while the saving
+   is O(T*(K-k)*I_e), so it needs a wide expert AND enough tokens for the batched GEMM to be
+   efficient — C = cf*T*k/K is 640 at T=4096 against 2560 at T=16384. **Any sparsity claim must
+   state the per-call token count**; a single number is meaningless.
+2. **`sparse_backproj` is small but not nothing: 1.18-1.35x compiled at 16384.** §12.7 predicted
+   ~12% from FLOP arithmetic; that was right by accident at the wrong batch size and wrong at
+   4096 (0.44-0.94x, i.e. a LOSS). It is dominated by `sparse_forward` everywhere and is now
+   redundant with it, so it is not worth shipping on its own — but "worthless" overstated it.
+3. **4.69x on the pure arm is past the "cannot beat 2x" floor, measured.** That floor applies to
+   an exact router, which must compute all K energies before it can choose. The proxy is what
+   breaks it, and this is the number that says the idea works rather than merely type-checks.
+   4.96x eager against a 6.36x FLOP bound is 78% of theoretical, so the residue is dispatch
+   overhead, not something structural.
+4. **The 400M hybrid is the worst case exactly as configured.** `micro_batch_size: 1` x 4096 =
+   4096 tokens/call — the column where sparsity loses (0.49x compiled). Raising micro_batch_size
+   and cutting `gradient_accumulation_steps` to match keeps tokens/step identical and moves it
+   into the winning regime. Cheap, and UNTESTED. Do not enable sparsity on that arm without it.
+
+Net: this is a **pure-model lever**, which is where §12.7 expected it — the mixture is 98.9-99.6%
+of per-token FLOPs in a pure stack against ~22% in a hybrid, and the pure design also wants the
+wide experts that sparsity needs. It also cuts the intermediate activation footprint by
+cf*k/K, i.e. 6.4x at K=16 k=2 (0.55 GiB -> 0.09 GiB at T=4096, bf16), which is what limits `I_e`.
+
+**Not yet measured: the quality cost.** `calibrate_proxy_router_20260916.py` fits the proxy on a
+trained checkpoint with no retraining — `proxy_V` from the SVD of each trained `W_k` (sound
+because HANDOFF 7.3 measured the trained expert weights near rank-2), then least squares for the
+2r+1 head coefficients, then it reports genuine per-row top-k set agreement and, on a recurrent
+stack, the PER-ITERATION breakdown. That last column is the risk: one proxy serves all 12
+applications of a shared block, which is the structure that made a single shared `sinkhorn_mu`
+buffer fail (§12.1). Written and parses; NOT yet run against a checkpoint.
+
+### 12.10 t90k_pure_T12 restarted from step 0, twice, and the mechanism is general
+
+Found while checking arm health: T12 was at step 2670, then at step 1030 with
+`learning_rate = 1.03e-3` — warmup, i.e. a fresh run. Two `step = 10` lines in its log. ~2670
+steps lost.
+
+**Mechanism.** The watchdog resolves `load_args` at SUBMIT time. LSF preemption REQUEUES a job on
+the same jid and re-runs the ORIGINAL command, so an arm launched *before its first checkpoint
+existed* had no `load_args` baked in and restarted from step 0 on every preemption, indefinitely.
+At 1.59 s/step over 90000 steps this arm needs ~40 h uninterrupted on `preemptable`; it would
+never have finished. `switch` and `hybrid` were unaffected only because they have not been
+preempted yet — they were equally exposed.
+
+**Fixed two ways.** (a) `load_args` appended to all three `configs/tok90k/*.yml`, verified through
+the real loader to point at a checkpoint dir that exists (latest 22000 / 11000 / 1000) — this
+protects the jobs already submitted, whose baked-in command reads the base config. Duplicate
+`load_args` from the watchdog's own append is harmless: PyYAML takes last-wins and both name the
+same path. (b) `watchdog_loop.sh` now resolves `load_args` INSIDE the job script, so every
+requeue re-evaluates it; patched by atomic rename so the running watchdog's bash is not disturbed.
+It logs `RESUME:` lines, which is the thing to grep for after any preemption.
+
+One oddity left alone: `t90k_pure_T12/global_step2000` is a stale checkpoint from the first
+attempt, newer in step number than the pointer (1000) but from a different run. The trainer only
+ever reads the pointer, so it is inert — do not "fix" it by pointing at 2000.
+
+
+### 12.11 The proxy router: the quad head FAILS, and §7.6's 0.90 was never a head measurement
+
+**The negative result.** Post-hoc fit of the shipped diagonal-quadratic proxy on
+`pure_hop_T12_sink` (K=16, top-2, 98,304 tokens from the training corpus tail). Chance floor for
+top-2 of 16 is `k/K` = **0.125**, verified empirically at 0.1256:
+
+| r | top-2 agreement | energy R² | x chance |
+|---:|---:|---:|---:|
+| 2 | 0.2460 | 0.324 | 2.0x |
+| 8 | **0.3481** | 0.572 | 2.8x |
+| 16 | 0.4101 | 0.682 | 3.3x |
+| 32 | 0.4614 | 0.760 | 3.7x |
+
+Above chance, nowhere near usable: routing on this would change which experts fire for ~2/3 of
+tokens. **§12.9's "0.942 top-2 agreement at rank 8" is wrong** and is corrected there.
+
+**Cause 1: a documentation error that propagated.** §7.6 measured the EXACT energy restricted to
+a rank-r subspace and got 0.94/0.90; it then RECOMMENDED a fitted head as the implementation. The
+0.90 was carried forward as though it described the head — the code comment records the slide
+verbatim ("What works is the exact energy restricted to a rank-r subspace: r=8 gave 0.94... This
+is the trainable version: a learned per-expert projection V_k plus a diagonal-quadratic head").
+§7.6 now carries a correction box.
+
+**Cause 2: one proxy cannot serve a recurrent stack.** Grouping the 96 block calls by position in
+the 12-iteration cycle (means over 8 batches):
+
+| cycle pos | 0 | 1 | **2** | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | **11** |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| agreement | .436 | .202 | **.080** | .251 | .229 | .278 | .344 | .317 | .417 | .482 | .551 | **.592** |
+
+A **7.4x spread**, and at position 2 it is **below the 0.125 chance floor** — anti-correlated with
+the true router. Same structure that defeated a single shared `sinkhorn_mu` buffer (§12.1): a
+shared block solves a different problem at each application.
+
+**Cause 3: the wrong objective.** The fit was closed-form least squares on energy **MSE**, while
+the metric is top-k SET agreement. LS spends capacity on the magnitude of experts that will never
+be selected and gets no credit for ordering the two that will.
+
+**What landed in response** (`proxy_kind`, `proxy_out_dim`, `proxy_iters`; all default to the old
+behaviour):
+
+* `proxy_kind: "subspace"` — `E_hat_k = mean(gelu(B_k a_k)²)·s_k + b_k` with `B_k = W_k V_k`.
+  `W_k P_k x = B_k a_k` exactly, so the ONLY error is rank truncation, not function class.
+* **`proxy_out_dim` = m, and it is not optional.** `B_k` is `(I_e, r)`, so the naive subspace form
+  materialises `(T, K, I_e)` — **the same elementwise work and the same activation footprint as the
+  DENSE path**, cancelling two of sparsity's three savings and leaving only the GEMM. `E_k` is a
+  MEAN over `I_e` coordinates, so an m-row subsample is an UNBIASED estimator with variance ~1/m.
+  At K=16, r=8, d=768, I_e=4480: m=all is 672K MAC but 71,680 elementwise (no better than dense);
+  **m=512 is 164K MAC and 8,192 elementwise** — 0.15% of dense MACs and 11% of its elementwise.
+* `proxy_iters` — one head per iteration, cycled by call index. **EVAL/CALIBRATION ONLY, asserted.**
+  A call counter is unsound in training under activation checkpointing, which replays the forward
+  during backward; `gradient_checkpointing_method: block` is set on the 400M arm. Training with
+  per-iteration heads requires the block to be told its iteration index, which it is not.
+* `fit_subspace_proxy_20260916.py` — data-aware basis (SVD of `W_k Σ^{1/2}`, i.e. the best rank-r
+  approximation in the DATA metric rather than of `W_k` alone), closed-form scale/bias, then
+  **gradient refinement on the routing KL**. All agreement numbers on a HELD-OUT split, since the
+  refinement fits thousands of parameters.
+
+**Consequence for §12.9's speedup, stated plainly:** the exact mechanism (`sparse_backproj`) is
+capped at **1.73x** by `1/2(1+cf·k/K)` and delivers 1.18-1.35x. The 4.69x requires
+`sparse_forward`, which requires a working selector. Until agreement is high, **4.69x is a
+capability, not a result.**
