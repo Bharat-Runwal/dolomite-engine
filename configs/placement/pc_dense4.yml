@@ -1,3 +1,13 @@
+# DENSE arm at mbs 4 -- the configuration the LIVE dense arm actually uses (unfused, so no OOM).
+# This removes the micro-batch confound from the first placement probe, where dense was forced
+# to mbs 1 (costing 1.65x on its own) because dense+fused_experts OOMs at mbs 4.
+# PLACEMENT-CONTROLLED probe, arm DENSE. Runs in the SAME bsub allocation as its
+# twin, back to back, so host, GPU indices, neighbours and interconnect topology are
+# IDENTICAL and cancel exactly. This is the only admissible way to compare s/step:
+# cross-job comparison was measured at 2.3x apart for the same config on different hosts
+# (0.75-0.80 vs 1.71-1.84 s/step), which is larger than the effect being claimed.
+# NOTE the dense arm must use mbs 1 x ga 16: dense+fused OOMs at mbs 4. Tokens/step is
+# identical (262144) either way, so s/step remains the right comparison.
 # 4-GPU FALLBACK of s90k_pure_T12_sparse. Identical in every respect except GPUs x ga, which
 # are traded to keep tokens/step at 262144. Same save_path, so it RESUMES whatever the 8-GPU
 # variant checkpointed -- the two are interchangeable mid-run.
@@ -139,8 +149,8 @@ model_args:
         renormalize_topk: true       # REQUIRED: deletes the all-K denominator, which is ~55% of
                                      # the softmax mass and is what no sparse path can estimate.
                                      # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
-        fused_experts: true
-        sparse_forward: true
+        fused_experts: false        # dense+fused OOMs at mbs 4; the LIVE dense arm runs unfused
+        sparse_forward: false
         sparse_candidates: 2         # proxy proposes 2...
         sparse_explore: 2             # ...plus 2 RANDOM experts during TRAINING ONLY. Without this
                                      # the proxy is NEVER TRAINED in the sparse path -- proxy_loss_coef
@@ -152,7 +162,7 @@ model_args:
                                      # the distillation only reinforces its own choices.
                                      # Costs speed: 2+2 candidates has p=4's ceiling (~4.3x not 6.2x).
                                      # Inference uses top-2 with no exploration.
-        proxy_rank: 16
+        proxy_rank: 0                # proxy needs fused; it is 0.3% of cost, irrelevant to speed
         proxy_kind: subspace
         proxy_out_dim: 512
         proxy_iters: 1               # per-iteration heads are eval-only
@@ -165,8 +175,8 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/sparse90k/s90k_pure_T12_sparse
-  save_interval: 200           # NOT the usual 1000. On preemptable an 8-GPU job is a large
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/placement/pc_dense4
+  save_interval: 100000           # NOT the usual 1000. On preemptable an 8-GPU job is a large
                                # target: this arm was suspended twice inside ~9 minutes, and with
                                # a 1000-step interval (~5 min at 0.31 s/step) it could be preempted
                                # before EVERY checkpoint and so never advance past step 0. At 200
@@ -183,10 +193,10 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: s90k_pure_T12_sparse
+    name: pc_dense4
 
 training_parameters:
-  num_training_steps: 90000
+  num_training_steps: 80
   eval_interval: 5000
   micro_batch_size: 4          # 16384 tok/call -- REQUIRED for the speedup
   gradient_accumulation_steps: 4   # 4 GPUs x 4 x 4 x 4096 = 262144 -- SAME tokens/step as the
@@ -206,9 +216,9 @@ optimizer_args:
 lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
-  num_warmup_steps: 2000
+  num_warmup_steps: 8
   num_constant_steps: 0
-  num_decay_steps: 88000
+  num_decay_steps: 72
 
 mixed_precision_args:
   dtype: bf16

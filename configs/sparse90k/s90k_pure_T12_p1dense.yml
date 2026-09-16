@@ -1,3 +1,21 @@
+# PHASE 1 of 2 -- DENSE warm-up whose ONLY purpose is to teach the proxy router.
+#
+# WHY BOTH PHASES ARE NEEDED. Measured today, and the two mechanisms turn out to be
+# complementary rather than alternatives:
+#   * DENSE distillation LEARNS the ranking fast. `_proxy_step` targets the full all-K routing
+#     distribution: agreement 0.134 -> 0.690 by step ~250 -> plateau 0.820 (chance 0.125).
+#   * SPARSE in-path distillation cannot learn it from scratch. Its target is only the p=4
+#     candidate set, and over 240 steps agreement sat at 0.47-0.53 against a chance floor of
+#     k/p = 0.50 -- i.e. it never moved.
+#   * But sparse in-path distillation IS needed to MAINTAIN the proxy afterwards, because the
+#     routing target drifts over training (the Sinkhorn dual moves 3.44 -> 1.97).
+# So: learn here, maintain in phase 2.
+#
+# Everything else is IDENTICAL to phase 2 -- same save_path, same 90k schedule, same 262144
+# tokens/step, same renormalize_topk -- so phase 2 resumes this and the model never sees a
+# discontinuity except the intended one (selection moves from exact energies to the proxy).
+#
+# RUN THIS TO ~1000-1500 STEPS, confirm proxy_topk_agree > 0.75, then launch phase 2.
 # 4-GPU FALLBACK of s90k_pure_T12_sparse. Identical in every respect except GPUs x ga, which
 # are traded to keep tokens/step at 262144. Same save_path, so it RESUMES whatever the 8-GPU
 # variant checkpointed -- the two are interchangeable mid-run.
@@ -109,22 +127,9 @@ model_args:
         routing_norm: zscore
         temperature: 1.0
         repulsion_form: abs
-        repulsion_coef: 2.0          # weight-space value from the rep_wt2 arm, NOT the
-                                     # output-space 0.1 -- the scales differ 5-25x
+        repulsion_coef: 0.1          # UNCHANGED: still output-space, just subsampled
         repulsion_space: output
-        repulsion_space: weight      # SWITCHED from subsampled output-space, on measurement.
-                                     # Ranking of the three options by the OUTPUT alignment they
-                                     # actually achieve, all at matched steps:
-                                     #   full output-space   0.200-0.266  (impossible under sparsity)
-                                     #   WEIGHT-space        0.429-0.441  (~12-15% worse)
-                                     #   subsampled output   0.529 -> 0.74 (~3x worse, and CLIMBING)
-                                     # I rejected weight-space over a 12% gap and then built
-                                     # something 3x worse. Weight-space is also cheaper (2.20 vs
-                                     # 7.59 ms/call), N-independent and natively sparse-compatible.
-                                     # repulsion_coef does NOT transfer between spaces (weight
-                                     # cosines are 5-25x smaller), so 2.0 is taken from the
-                                     # rep_wt2 sweep arm rather than guessed.
-        repulsion_subsample: 1024    # retained only so the cos PROBE keeps working under sparsity
+        repulsion_subsample: 64      # ~1.2% of the step; weight-space measured ~12% worse
         cos_probe_interval: 100      # now possible under sparsity, and the only way to SEE
                                      # alignment in a sparse arm
         n_repulsion_pairs: 4
@@ -140,7 +145,8 @@ model_args:
                                      # the softmax mass and is what no sparse path can estimate.
                                      # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
         fused_experts: true
-        sparse_forward: true
+        sparse_forward: false        # PHASE 1: DENSE, so _proxy_step distils against the
+                                     # full all-K routing distribution
         sparse_candidates: 2         # proxy proposes 2...
         sparse_explore: 2             # ...plus 2 RANDOM experts during TRAINING ONLY. Without this
                                      # the proxy is NEVER TRAINED in the sparse path -- proxy_loss_coef
@@ -188,8 +194,12 @@ logging_args:
 training_parameters:
   num_training_steps: 90000
   eval_interval: 5000
-  micro_batch_size: 4          # 16384 tok/call -- REQUIRED for the speedup
-  gradient_accumulation_steps: 4   # 4 GPUs x 4 x 4 x 4096 = 262144 -- SAME tokens/step as the
+  micro_batch_size: 1          # NOT 4. Phase 1 is DENSE, and dense+fused_experts OOMs at
+                               # mbs 4: the (4, 4096, 71680) intermediate is 2.19 GiB per
+                               # allocation and it died on all 4 ranks. mbs 4 was only ever
+                               # affordable BECAUSE sparse_forward cuts that tensor 6.4x --
+                               # which phase 1 does not have. Phase 2 goes back to mbs 4.
+  gradient_accumulation_steps: 16  # 4 x 1 x 16 x 4096 = 262144 -- SAME tokens/step as the
                                # 8-GPU variant and as the dense arm, so all three are
                                # step-for-step comparable. Only wall-clock differs.
   eval_during_training: false

@@ -1614,3 +1614,55 @@ A note for anyone tempted by the masked form's rationale: leaving `sum(p) < 1` w
 abrupt weight redistribution at routing boundaries (see the comment in `_route`). That choice is
 what makes the design un-sparsifiable, and the arms trained with renormalisation show it costs
 nothing to give up.
+
+### 12.13 Sparsity: FINAL numbers, and the negative result on sparse TRAINING
+
+**Training speedup: 2.02x, placement-controlled.** Both arms back to back in ONE allocation, same
+host, same contiguous GPUs, matched micro-batch, matched 262144 tokens/step: dense **1.538** vs
+sparse **0.762** s/step. Cross-validated -- the dense figure matches the live 90k arm's 1.590, the
+sparse figure matches 0.776 measured on a different host.
+
+**Do NOT compare s/step across jobs.** The same sparse config measured 0.75-0.80 s/step on one
+host and 1.71-1.84 on another, a factor of 2.3, i.e. larger than the effect. Mechanism, and it is
+NOT what §11.7's placement note says: the slow host had all 8 GPUs taken by four other jobs and
+gave us a NON-CONTIGUOUS set (0,1,2,6) while its CPU sat at 12% utilisation. GPU-side contention
+and interconnect topology, not dataloader starvation. I initially asserted the CPU explanation and
+the load data refuted it. Earlier figures of 2.55x / 2.15-2.31x were cross-job and are WITHDRAWN.
+
+**The micro-batch trap.** Dense + `fused_experts` OOMs at mbs 4 (the (4, 4096, 71680) intermediate
+is 2.19 GiB), so a naive same-allocation probe forces dense to mbs 1, which costs 1.65x by itself
+and inflates the ratio to 3.37x. Match the micro-batch or the number is wrong.
+
+**Sparse TRAINING did not reach dense quality.** Matched schedule, tokens/step, device count and
+init; loss gap widened monotonically: +0.004 / +0.030 / +0.042 / +0.068 / +0.081 nats at steps
+500-900. Two mechanisms alongside:
+* **Expert diversity is not controlled.** Output-space repulsion needs all K expert outputs, which
+  the sparse path never computes. Of the substitutes, ranked by the OUTPUT alignment they achieve
+  at matched steps: full output-space **0.20-0.27** (unavailable), weight-block cosines
+  **0.43-0.44** from scratch but **flat at 0.72-0.75** when applied to an already-collapsed arm,
+  and a subsampled output-space estimator **0.53 -> 0.74 and rising** (worst). The subsample is
+  unbiased in VALUE (within 2%) but that is the wrong property -- its variance is far higher, and
+  under Adam a high-variance term is damped relative to its mean. I validated the value and
+  shipped a weak regulariser.
+* **The proxy collapses on hand-off.** 0.703 immediately after the switch (so the two-phase
+  transfer works), 0.46 within 30 steps of routing being handed over, then only +0.033 per 400
+  steps. Routing on the proxy moves the energy landscape faster than a candidate-restricted
+  objective tracks it.
+
+**What is NOT separable:** "the design fails" vs "it needs a regulariser we did not find".
+Reversing an alignment collapse and preventing one are different problems, and the clean experiment
+-- a fresh sparse arm with weight-space repulsion from step 0, ~22 min -- was not run.
+
+**Recommendation for the paper:** report inference sparsity (§app:throughput's 18.99x at production
+width, untouched), the training implementation as a placement-controlled 2.02x capability that is
+EXACT given the selection (4e-16; `sparse_candidates = K` reproduces dense bit-for-bit on a real
+checkpoint), and the training-quality failure as a negative result. All three are in
+`sec/appendix.tex` §app:accel-train / §app:accel-procedure as of Overleaf `c8d8b63`.
+
+**Bugs found in this work, all mine, three of them silent:** `proxy_route` never read;
+`sparse_backproj` never reaching the pydantic config; `_proxy_step` never called in the sparse path
+(so `proxy_loss_coef` was a no-op and an arm trained with a FIXED RANDOM router -- alignment 0.698
+-> 0.785 and no metric logged); data-dependent index shapes (wedged distributed compile, 0 steps in
+8 minutes); `torch.randint` in the compiled forward (hung a job, 14 min/0 steps); duplicate
+candidates double-counted after exploration was added. Every one was caught by a run misbehaving,
+not by review.
