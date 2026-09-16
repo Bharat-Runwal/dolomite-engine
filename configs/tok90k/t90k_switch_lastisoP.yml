@@ -90,10 +90,10 @@ tuning_args:
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok90k/t90k_switch_lastisoP
-  save_interval: 2000
+  save_interval: 1000
                      # before ever reaching 5000, so they NEVER checkpointed and every
                      # resubmit restarted from step 0 -- 28 submissions, zero net progress.
-  max_to_keep: 50
+  max_to_keep: 95   # 90000/1000 = 90 ckpts; keep ALL so intermediate token counts stay evaluable
 
 # NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
 # copying a parent config; only save_path was updated, so every derived arm logged to

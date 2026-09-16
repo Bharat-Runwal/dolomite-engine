@@ -108,8 +108,8 @@ tuning_args:
 
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok90k/t90k_hybrid_K32top2
-  save_interval: 2000
-  max_to_keep: 50
+  save_interval: 1000
+  max_to_keep: 95   # 90000/1000 = 90 ckpts; keep ALL so intermediate token counts stay evaluable
 
 logging_args:
   log_interval: 10
