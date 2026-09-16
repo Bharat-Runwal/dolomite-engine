@@ -895,3 +895,46 @@ costs nothing.
 i.e. 0.042 nats, right at the noise floor, with 10x diverging (7.89) and lower LRs clearly worse.
 So LR tuning is worth ~0.04 nats where the mu fix is worth 1.587 -- roughly 38x more. The pure
 model's log-log slope (-0.097 vs -0.082 hybrid) says it wants more TOKENS, not a different LR.
+
+### 2026-09-16: dose-response CONFIRMED out of sample, and deeper recurrence WINS once mu reaches eval
+
+`pure_hop_T12_sink` (layer_iterations [12]) played no part in forming the mu hypothesis, so it
+is an out-of-sample test. Predicted before measuring: its train->eval discontinuity should
+EXCEED the 8-iteration arms' 1.587 nats.
+
+| arm | iterations | MoE blocks | train CE | eval CE | discontinuity |
+|---|---:|---:|---:|---:|---:|
+| hybrid K16 | 6 | 1 of 7 | 2.9454 | 2.9486 | +0.003 |
+| pure isoP | 8 | 1 of 1 | 3.4088 | 4.9959 | +1.587 |
+| **pure T12** | **12** | 1 of 1 | 3.3403 | 5.1673 | **+1.827** |
+
+Confirmed, and the per-iteration SPREAD scales the same way: mean 1.897 / max 3.623 across 12
+iterations against 1.56-1.68 across 8. More iterations, more divergent duals, bigger penalty
+when they are dropped. (A single averaged buffer would have been |mu|max 0.795 -- which is why
+the averaged fix failed.)
+
+After per-iteration calibration T12 goes 3.3402 -> **3.2706**, a -0.070 discontinuity, the same
+signature as every other fixed arm.
+
+**THE INVERSION WORTH KNOWING.** Ranking pure arms by EVAL CE after the fix:
+    T12     (12 iters, sinkhorn + mu)   3.2706   <- best pure-energy model measured
+    clamped ( 8 iters)                  3.3365
+    isoP    ( 8 iters, sinkhorn + mu)   3.3506
+Deeper recurrence HELPS. Before the fix T12 looked like the worst of the pure arms (its eval CE
+5.1673 was the highest of any). Anyone reading the pre-fix numbers would have concluded that
+deep recurrence does not pay off in this architecture; the opposite is true.
+
+### LR sweep result (6000 steps, 200 warmup, comparable to each other only)
+
+| arm | LR | loss@6000 |
+|---|---|---:|
+| clamped_5x | 1e-2 | **3.7869** |
+| sink_5x | 1e-2 | 3.8014 |
+| clamped_1x | 2e-3 (current) | 3.8285 |
+| clamped_0p2x | 4e-4 | 4.0834 |
+| clamped_10x | 2e-2 | 7.8885 (diverged) |
+
+5x is worth **0.042 nats** over the shipped 2e-3, right at the 0.038 noise floor; 10x diverges;
+lower is clearly worse. So LR is a ~0.04-nat lever where the mu fix is a 1.6-1.8-nat one, i.e.
+~40x smaller. The pure model's steeper log-log slope (-0.097 vs -0.082) means it wants more
+TOKENS, not a different step size.
