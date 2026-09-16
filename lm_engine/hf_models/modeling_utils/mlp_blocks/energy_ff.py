@@ -1237,7 +1237,25 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 self._sparse_overflow += (~keep).sum()
         kept_flat = torch.zeros(T * k, dtype=torch.bool, device=dev)
         kept_flat[order] = keep
-        return se[keep], st[keep], slot[keep], order[keep], C, kept_flat.view(T, k)
+        # MASK, NEVER FILTER. Returning se[keep] would make every index tensor's SIZE depend on
+        # how many pairs overflow, i.e. on the data. That is not torch.compile-safe -- and worse,
+        # under FSDP each rank sees different data and so compiles a DIFFERENT graph. Measured:
+        # the first distributed run (sprobe_T12_p2, 4 GPUs) produced 0 steps in 8 minutes, 6
+        # recompile frames and 527 KB of `spmd_check` rank-divergence warnings
+        # (rank 0: aten.select.int vs rank 3: aten.select_scatter.default on the same node). It is
+        # the same failure class HANDOFF records for fused_experts wedging at 2 nodes, and a
+        # SINGLE-GPU benchmark cannot see it: there is no other rank to diverge from, and
+        # recompilation merely costs time. So the earlier 4.69x was measured on code that cannot
+        # run distributed.
+        #
+        # Instead: keep every tensor at the static size T*k, and send overflow pairs to a dedicated
+        # DUMP ROW at index C, which the caller allocates (C+1 rows) and discards. Their weight is
+        # zeroed via `kept`, so they contribute nothing -- identical arithmetic, static shapes.
+        slot_safe = torch.where(keep, slot, torch.full_like(slot, C))
+        # `keep` is in SORTED order (aligned with se/st/slot_safe); `kept_flat.view(T, k)` is in the
+        # token-major selection layout. Both are returned because the two callers need different
+        # ones, and re-deriving either from the other is where an ordering bug would hide.
+        return se, st, slot_safe, order, C, kept_flat.view(T, k), keep
 
     def _sparse_backproj(self, gated: torch.Tensor, p: torch.Tensor,
                          W: torch.Tensor, pref: float) -> torch.Tensor:
@@ -1257,11 +1275,13 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # (token, expert) pairs to evaluate. Taking topk of p (not of the logits) keeps this
         # consistent with whatever mask _route applied, including renormalize_topk.
         idx = pf.topk(int(self.top_k), dim=-1).indices          # (T, k)
-        se_k, st_k, slot_k, _, C, _ = self._dispatch_plan(idx, T)
-        buf = g.new_zeros(K, C, I_e)
+        se_k, st_k, slot_k, _, C, _, keep = self._dispatch_plan(idx, T)
+        buf = g.new_zeros(K, C + 1, I_e)          # +1 = dump row for overflow, discarded
         buf[se_k, slot_k] = g[st_k, se_k]                      # gather
-        y = torch.bmm(buf, W.view(K, I_e, H))                  # ONE batched GEMM, K*C*I_e*H
-        contrib = y[se_k, slot_k] * (pref * pf[st_k, se_k]).unsqueeze(-1)
+        y = torch.bmm(buf, W.view(K, I_e, H))                  # ONE batched GEMM
+        # `keep` is already in se/st order, so it multiplies elementwise: overflow pairs read the
+        # dump row and are then zeroed, contributing nothing.
+        contrib = y[se_k, slot_k] * (pref * pf[st_k, se_k] * keep).unsqueeze(-1)
         out = g.new_zeros(T, H).index_add_(0, st_k, contrib)    # scatter-add
         return out.reshape(*lead, H)
 
@@ -1365,8 +1385,9 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             p_cand = sel_idx.shape[-1]
 
         # ---- 2. capacity-dispatch the TOKENS (dense path dispatches nothing) -----------
-        se_k, st_k, slot_k, sp_k, C, kept = self._dispatch_plan(sel_idx, T)
-        xbuf = xf.new_zeros(K, C, H)
+        se_k, st_k, slot_k, sp_k, C, kept, _ = self._dispatch_plan(sel_idx, T)
+        xbuf = xf.new_zeros(K, C + 1, H)         # +1 = dump row; overflow tokens collide there
+                                                 # harmlessly because `kept` zeroes their weight
         xbuf[se_k, slot_k] = xf[st_k]
 
         # ---- 3. SPARSE FORWARD PROJECTION: k/K of the dense GEMM ----------------------
