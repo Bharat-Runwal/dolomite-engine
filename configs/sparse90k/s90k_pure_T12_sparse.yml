@@ -1,23 +1,27 @@
-# WEIGHT-SPACE REPULSION COEFFICIENT SWEEP -- 2026-09-16. Short (1500 step) forks of
-# t90k_pure_T12. BLOCKING for the sparse-training retrain.
+# SPARSE-TRAINED PURE T12 -- 2026-09-16. The real thing, not a probe.
 #
-# WHY. Training with sparse_forward REQUIRES repulsion_space: weight -- output-space repulsion
-# needs all K expert outputs, which is exactly what sparse_forward does not compute. But NO arm
-# has ever trained with weight space, and CLAUDE.md/HANDOFF 11.8 are explicit that the coefficient
-# does NOT transfer: weight cosines are ~5-25x smaller than output cosines (gradient-matched
-# estimate ~0.7, aux-matched ~4.0, suggested bracket {0.5, 2, 8}). Repulsion is LOAD-BEARING --
-# with none, expert output alignment RISES 0.43 -> 0.51 instead of decaying -- so guessing this
-# would put a 40 h run at risk.
+# DESIGNED AS A PAIRED COMPARISON against the live dense t90k_pure_T12: IDENTICAL schedule
+# (90000 steps, warmup 2000 + decay 88000), IDENTICAL 262144 tokens/step, identical model shape.
+# Only the mixture computation differs. So the two loss curves are comparable STEP FOR STEP, which
+# is what "is it going well?" needs -- and what an earlier attempt could not answer, because its
+# compressed 100-step schedule had already decayed the LR while the dense arm was still in warmup.
 #
-# WHAT TO COMPARE. `expert_cos_abs_mean` from cos_probe_interval, which measures OUTPUT alignment
-# under no_grad INDEPENDENTLY of the repulsion loss, so weight- and output-space arms are directly
-# comparable on it (their LOSS values are not). Pick the weight coefficient whose output alignment
-# matches the ctrl_out0p1 arm, which reproduces the shipped setting.
+# 8 GPUs x mbs 4 x ga 2 x 4096 = 262144, matching the dense arm's 4 x 4 x 4 x 4096. ONE node, so
+# inside the range where fused_experts is validated (it wedges at 2 nodes).
 #
-# The control is included because no existing arm has the probe enabled, so there is nothing to
-# compare against otherwise.
+# MEASURED BASIS: end-to-end 2.55x on 4 GPUs (0.6210 vs 1.5843 s/step at equal tokens/step),
+# stable to +-0.3% over steps 20-100. At 8 GPUs this should finish in ~8 h against the dense
+# arm's ~40 h.
 #
-# Compressed schedule => the loss is NOT comparable to any 90k arm. This measures ALIGNMENT.
+# WHAT IS UNVERIFIED: quality. A sparse-TRAINED model has no approximation error -- the sparse
+# computation IS the model -- but "no approximation" is not "same quality". Retrofitting sparsity
+# onto the trained dense checkpoint cost -0.68pp Avg11, and the pure model is ~20x more
+# routing-sensitive than a hybrid because its mixture runs at all 12 iterations. This run is the
+# experiment that settles it. WATCH: train-lm_loss against t90k_pure_T12 at the same step, and
+# expert_cos_abs_mean for the regulariser.
+#
+# mbs 4 is load-bearing: below ~16384 tokens/call the sparse path loses its advantage (1.36x at
+# 4096). Dense+fused OOMs at mbs 4; sparse fits because it cuts the intermediate 6.4x.
 # TOKEN-SCALING SET, 90000 steps = 23.6B tokens, CORRECTLY SCHEDULED (2026-09-16).
 #
 # WHY THIS EXISTS. The published slope90k_* arms set num_training_steps 90000 but
@@ -99,9 +103,11 @@ model_args:
         routing_norm: zscore
         temperature: 1.0
         repulsion_form: abs
-        repulsion_coef: 8.0
-        repulsion_space: weight
-        cos_probe_interval: 50   # OUTPUT alignment, no_grad, the comparable metric
+        repulsion_coef: 0.1          # UNCHANGED: still output-space, just subsampled
+        repulsion_space: output
+        repulsion_subsample: 64      # ~1.2% of the step; weight-space measured ~12% worse
+        cos_probe_interval: 100      # now possible under sparsity, and the only way to SEE
+                                     # alignment in a sparse arm
         n_repulsion_pairs: 4
         gelu_grad_method: sigmoid
         # ---- corrected variant ----
@@ -110,6 +116,19 @@ model_args:
         sinkhorn_persist_mu: true
         sinkhorn_mu_iters: 12
         repulsion_tensor_idx: true
+        # ---- sparsity ----
+        renormalize_topk: true       # REQUIRED: deletes the all-K denominator, which is ~55% of
+                                     # the softmax mass and is what no sparse path can estimate.
+                                     # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
+        fused_experts: true
+        sparse_forward: true
+        sparse_candidates: 2         # = top_k: maximum speed. p=4 would buy recall we do not need
+                                     # when training, since there is no dense reference to match.
+        proxy_rank: 16
+        proxy_kind: subspace
+        proxy_out_dim: 512
+        proxy_iters: 1               # per-iteration heads are eval-only
+        proxy_loss_coef: 0.01        # online distillation; reached 0.82 agreement in a 3k probe
         activation_function: gelu
         add_bias: false
 
@@ -118,9 +137,9 @@ tuning_args:
   tuning_method: pretraining
 
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/repsweep/rep_wt8
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/sparse90k/s90k_pure_T12_sparse
   save_interval: 1000
-  max_to_keep: 2
+  max_to_keep: 95   # 90000/1000 = 90 ckpts; keep ALL so intermediate token counts stay evaluable
 
 # NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
 # copying a parent config; only save_path was updated, so every derived arm logged to
@@ -132,13 +151,13 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: rep_wt8
+    name: s90k_pure_T12_sparse
 
 training_parameters:
-  num_training_steps: 1500
+  num_training_steps: 90000
   eval_interval: 5000
-  micro_batch_size: 4
-  gradient_accumulation_steps: 4
+  micro_batch_size: 4          # 16384 tok/call -- REQUIRED for the speedup
+  gradient_accumulation_steps: 2   # 8 GPUs x 4 x 2 x 4096 = 262144, matches dense
   eval_during_training: false
   gradient_clipping: 1
 
@@ -153,9 +172,9 @@ optimizer_args:
 lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
-  num_warmup_steps: 150
+  num_warmup_steps: 2000
   num_constant_steps: 0
-  num_decay_steps: 1350
+  num_decay_steps: 88000
 
 mixed_precision_args:
   dtype: bf16
@@ -164,12 +183,3 @@ distributed_args:
   fsdp_algorithm: 2
   torch_compile: true
   stage: 0
-
-# 2026-09-16: added after t90k_pure_T12 lost 2670 steps twice, and s90k_pure_T12_sparse was
-# preempted before its first checkpoint. LSF preemption/requeue re-runs the ORIGINAL submitted
-# command, so a config without load_args silently restarts at step 0. Safe to add now because the
-# checkpoint directory is NON-EMPTY (pre-flight check 4: adding this to a config with no
-# checkpoint would break a fresh start instead). A duplicate load_args appended by the watchdog is
-# harmless -- PyYAML takes last-wins and both name the same path.
-load_args:
-  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/repsweep/rep_wt8

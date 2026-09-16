@@ -177,3 +177,12 @@ distributed_args:
   fsdp_algorithm: 2
   torch_compile: true
   stage: 0
+
+# 2026-09-16: added after t90k_pure_T12 lost 2670 steps twice, and s90k_pure_T12_sparse was
+# preempted before its first checkpoint. LSF preemption/requeue re-runs the ORIGINAL submitted
+# command, so a config without load_args silently restarts at step 0. Safe to add now because the
+# checkpoint directory is NON-EMPTY (pre-flight check 4: adding this to a config with no
+# checkpoint would break a fresh start instead). A duplicate load_args appended by the watchdog is
+# harmless -- PyYAML takes last-wins and both name the same path.
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/proxytrain/ptrain_T12_proxy16
