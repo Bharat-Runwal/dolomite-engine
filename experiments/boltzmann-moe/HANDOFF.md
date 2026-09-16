@@ -1756,3 +1756,94 @@ and sparsity needs wide experts OR many tokens. NOT placement-controlled — sep
 **Untested and cheap (~30 min):** fit the proxy on `unsharded_mucal` and run the proxy-selection
 ablation, exactly as done for pure and hybrid. That would say whether the sandwich escapes the
 routing sensitivity that made sparse TRAINING fail on the pure arm (§12.13).
+
+### 12.16 PLAN: LR schedule redesign (WSD), and everything in flight as of 2026-09-16 19:20
+
+Written before a context compaction. Self-contained.
+
+#### The proposed shape, and whether it is standard
+
+User's proposal: **fast drop 1e-3 -> 1e-4, plateau a while, then slow decay to 10x smaller (1e-5)
+across 90k steps.**
+
+**This is NOT standard WSD, and the difference matters.** Canonical Warmup-Stable-Decay (MiniCPM,
+DeepSeek) plateaus at the **PEAK**: warmup -> constant at high LR for 80-90% of the budget -> short
+sharp decay over the last 10-20%. The high-LR plateau is the point: it is where the exploration
+happens, and the decay merely cashes it in. The proposal instead drops to a LOW plateau early,
+which gives that up. What it resembles is **step / multi-stage decay** (BERT-era, some Llama
+variants), which is a real practice but a different one.
+
+If the motivation is "the peak looked too high", the simpler equivalent is just **a lower peak**:
+warmup straight to 1e-4 then WSD from there is numerically almost the same as a fast 1e-3 -> 1e-4
+drop, without needing a new phase. That is testable with the arms already running.
+
+#### What the codebase supports (checked: `lm_engine/optimization/scheduler.py:38-52`)
+
+Exactly **three phases**: `num_warmup_steps` -> `num_constant_steps` -> `num_decay_steps`, with
+cosine or linear decay to `lr * lr_decay_factor`. `num_constant_steps` is 0 in every config we have,
+so WSD has never been used here, but it needs **no code change**.
+
+The proposal needs FOUR phases (warmup, fast decay, plateau, slow decay) and would need a new
+scheduler class. Do not assume it works from config alone.
+
+#### Two implementable options
+
+**A. True WSD, no code change (RECOMMENDED first).** Peak from the sweep below.
+```yaml
+lr: <peak>                    # 1e-3 or 5e-4, per the sweep
+num_warmup_steps: 1000
+num_constant_steps: 74000     # ~82% of budget at PEAK -- the stable phase
+num_decay_steps: 15000        # ~17%, cosine
+lr_decay_factor: 0.1          # 10x drop
+# 1000 + 74000 + 15000 = 90000 = num_training_steps  <- PRE-FLIGHT 1
+```
+Property that matters for a deadline: you can branch off the stable phase at ANY point, run a short
+decay, and get a properly annealed evaluable checkpoint. No need to commit to a token budget.
+
+**B. The proposed 4-phase shape**, if A underperforms: add a `MultiStageScheduler` to
+`scheduler.py` taking a list of (steps, target_lr) segments. ~30 lines, and it must be tested
+against the existing 3-phase behaviour to avoid perturbing live arms.
+
+#### The measurement that decides the peak and the decay, in flight now
+
+* `sw2k_sparse` (1e-3, 90k-shaped decay -> stays at peak) vs **`sw2k_sparse_c10x`** (1e-3, decay
+  COMPLETED in 2000 steps). Same everything else. **The step-2000 gap is the ANNEALING BONUS** at
+  0.52B tokens = exactly what WSD's decay phase cashes in. Large bonus => WSD is clearly right.
+  Caveat: the decay FRACTION here is 90% against WSD's 10-20%, so the transferable quantity is
+  WHERE in the decay the gain lands, not its total size.
+* `sw2k_sparse_5e4` (5e-4) vs `sw2k_sparse` (1e-3): the PEAK. At step 400 5e-4 was 0.13 BEHIND
+  (5.0490 vs 4.9162), which is expected for a lower peak early and says nothing yet about the
+  later "stunting". `sw2k_dense_5e4` was KILLED (relaunch-looping, no progress).
+* 12.5 already established: LR **floor is inert** (50x range, inside noise), **peak worth ~0.06
+  nats**, and **peak 1e-2 diverges ~1 in 3** — confirmed twice more today, including
+  `lrt_sparse_5x` which was AHEAD at step 600 (5.8173, grad_norm 0.24) and then went to
+  grad_norm 2.1e7 / loss 13.8 by step 1000. Do not use 1e-2.
+* **Decay SPEED had never been varied before `c10x`** — every `pure_lr` arm shared a 5-6k schedule.
+  It is also the confound behind "the 30k arms drop faster than the 90k ones": at step 9k they sit
+  at lr 1.736e-3 against 1.972e-3.
+
+#### Everything running as of 19:20, and what each settles
+
+| job | id | settles |
+|---|---|---|
+| `swproxy` | 1713960 | **THE GATE.** Sandwich proxy-selection Avg11 vs dense 43.36. Near -0.03pp (hybrid-like) => launch `sw400_sparse`; near -0.68pp (pure-like) => do not, and 12.15's mu-based prediction does not transfer. |
+| `sw2k_sparse_c10x` | 1714132 | the annealing bonus (above) |
+| `sw2k_sparse`, `sw2k_dense` | 1713574, 1713573 | 1e-3 pair, 90k-shaped |
+| `sw2k_sparse_5e4` | 1713742 | peak 5e-4 |
+| `s90k_pure_T12_sparse` | 1710081 | 134M sparse arm; at step ~17.5k, loss 3.83, alignment 0.60, proxy 0.766 — all improving |
+| `scale32B_boltz_sinkhorn` | 1701525 | 400M hybrid, 32B tokens, untouched |
+| `t90k_pure_T12`, `t90k_hybrid_K32top2` | 1704005, 1704004 | dense 90k references |
+
+**`configs/sw400/sw400_sparse.yml` is committed and pre-flighted, NOT launched** — 400M sandwich
+sparse, 15000 steps at 262144 tok/step = 3.93B, matching `iclr_big_hop_sandwich_sink` so the delta
+against its recalibrated **43.36** is like-for-like. ~6.7 h on 8 GPUs. `renormalize_topk: true` is
+MANDATORY there (the fitted proxy's energy R^2 is -48 to -135000; ranking is fine, magnitudes are
+not).
+
+#### Instrumentation warning for whoever picks this up
+
+Four monitor-filter failures today, none of them a real problem with a run: a filter that matched
+nothing for 30 min on a healthy job; one that fired on a section HEADER instead of a result; one
+that read a single failed `bjobs` query as job death and reported a false alarm; and the
+`d400_it4_*` glob that also matched `d400_it4_5x_*` and printed two identical rows.
+**Confirm anything a monitor reports by job ID before acting on it.**
