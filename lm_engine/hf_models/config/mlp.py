@@ -322,6 +322,21 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     proxy_rank: int = 0
     proxy_loss_coef: float = 0.0
     proxy_route: bool = False
+    # proxy_kind: "quad" (diagonal-quadratic head on the r coefficients) or "subspace" (the
+    #   EXACT energy mean(gelu(B_k a_k)^2) on the rank-r projection, with B_k = W_k V_k). Only
+    #   "subspace" was ever measured at high agreement -- HANDOFF 7.6's 0.90 top-2 is for that
+    #   form; the fitted "quad" head reaches 0.348 at r=8 against a 0.125 chance floor.
+    proxy_kind: str = "quad"
+    # proxy_out_dim: m rows of B_k to evaluate, 0 = all I_e. E_k is a MEAN over I_e coordinates,
+    #   so an m-subsample is unbiased with variance ~1/m. Needed because the full-I_e form does
+    #   the SAME elementwise work and holds the SAME (T,K,I_e) activations as the dense path,
+    #   which would cancel two of sparsity's three savings. Ignored when proxy_kind="quad".
+    proxy_out_dim: int = 0
+    # proxy_iters: one proxy head per iteration of a shared recurrent block, cycled by call
+    #   index (1 = a single shared head). Measured need: agreement varies 0.080 to 0.592 across
+    #   the 12 iterations of pure_hop_T12_sink. EVAL/CALIBRATION ONLY -- a call counter is
+    #   unsound in training under activation checkpointing (asserted).
+    proxy_iters: int = 1
     # cos_probe_interval: measure mean|cos| between expert outputs under no_grad on
     #   1 call in N, INDEPENDENTLY of the repulsion loss, and log it as
     #   `expert_cos_abs_mean`. 0 = off. Needed because the repulsion aux loss is
@@ -370,6 +385,29 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   pairs as the forward (torch RNG is restored, Python's is not). Default OFF
     #   because it changes which pairs are drawn.
     repulsion_tensor_idx: bool = False
+    # ---------------- TRUE SPARSITY (2026-09-16) ----------------------------
+    # `top_k` alone is a post-hoc MASK: all K experts' forward AND back projections are
+    # computed and K-k of them are then multiplied by zero. These two skip the arithmetic.
+    #
+    # sparse_backproj: skip only the BACK projection of the unselected experts. EXACT (verified
+    #   3.79e-16) because p is already known by then, and it needs nothing new -- but it is
+    #   capped by the 1/2*(1+k/K) floor, since the forward projection is what the exact router
+    #   needs in order to decide. 6.4x on the back GEMM at K=16 k=2; ~13-15% of the step.
+    # sparse_forward: skip BOTH, for ~K/k on the whole mixture and on activation memory.
+    #   Requires proxy_rank > 0 -- something must choose the experts without the expert
+    #   matmuls -- and fused_experts. Supersedes sparse_backproj (asserted, not silently).
+    # sparse_capacity_factor: C = ceil(cf * T * k / K) slots per expert. Surplus (token, expert)
+    #   pairs are DROPPED, which changes the function, so they are counted in _sparse_overflow.
+    #   Fixed shapes, hence torch.compile-safe; a per-expert Python loop measured 0.59x.
+    sparse_backproj: bool = False
+    sparse_forward: bool = False
+    # sparse_candidates: p >= top_k. The proxy nominates p experts; their EXACT energies (free --
+    #   a by-product of their forward projection) re-rank to the final top_k AND supply p exact
+    #   terms to the softmax denominator. 0 = p = top_k. Measured why this is needed: proxy
+    #   selection alone costs +0.0165 bits/byte, but a proxy-filled denominator costs -1.52 nats.
+    #   p = n_experts makes the whole path exact and is the correctness self-test.
+    sparse_candidates: int = 0
+    sparse_capacity_factor: float = 1.25
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).
     track_load: bool = True

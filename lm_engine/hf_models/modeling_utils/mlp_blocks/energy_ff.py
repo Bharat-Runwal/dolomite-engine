@@ -505,6 +505,9 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         proxy_rank: int = 0,
         proxy_loss_coef: float = 0.0,
         proxy_route: bool = False,
+        proxy_kind: str = "quad",
+        proxy_out_dim: int = 0,
+        proxy_iters: int = 1,
         cos_probe_interval: int = 0,
         cos_probe_pairs: int = 8,
         repulsion_space: str = "output",
@@ -512,6 +515,8 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         sinkhorn_persist_mu: bool = False,
         sinkhorn_mu_iters: int = 1,
         sparse_backproj: bool = False,
+        sparse_forward: bool = False,
+        sparse_candidates: int = 0,
         sparse_capacity_factor: float = 1.25,
         repulsion_tensor_idx: bool = False,
     ) -> None:
@@ -772,13 +777,88 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # the surplus (token, expert) pairs are DROPPED, which changes the function. Sinkhorn
         # makes that unlikely -- measured max_share 0.041-0.077 against 1/K = 0.031-0.0625 --
         # and `_sparse_overflow` counts it so silence is not mistaken for exactness.
+        #
+        # ---- TRUE SPARSITY, the other half: `sparse_forward` (2026-09-16) ----------
+        # The forward projection can only be skipped if something OTHER than the expert
+        # matmuls decides where each token goes -- hence `sparse_forward` REQUIRES the rank-r
+        # proxy router. With it, both GEMMs shrink from K to k experts:
+        #
+        #   dense   2*K*d*I_e            per token
+        #   sparse  2*k*d*I_e + K*d*r    per token          (r ~ 8, so the proxy is ~0.1%)
+        #
+        # i.e. ~K/k, against the 1/2*(1+k/K) floor that an exact router cannot beat. It also
+        # cuts the ACTIVATION footprint by the same factor -- the (K, C, I_e) intermediates are
+        # cf*k/K of the dense (T, K, I_e) -- which is what limits I_e in the pure design.
+        #
+        # WHAT IS EXACT AND WHAT IS NOT. Given the selection, every weight is computed from the
+        # EXACT energy of the experts actually evaluated: the Hopfield energy is a by-product of
+        # the forward projection, so exactness costs nothing. The approximations are, in order
+        # of size:
+        #   1. WHICH k experts get picked (the proxy's job). Measured agreement 0.94 top-1 /
+        #      0.90 top-2 at r=8. This is the real approximation and it is the one to report.
+        #   2. With renormalize_topk=False the softmax denominator runs over all K logits,
+        #      K-k of which we deliberately never computed; those terms are filled from the
+        #      proxy. They are by construction the SMALL terms. With renormalize_topk=True
+        #      there is no such term and the weights are exact given the selection.
+        #   3. routing_norm="zscore" needs per-token moments over all K energies; the proxy's
+        #      are used. The mean cancels in the softmax, so only the std survives, as a mild
+        #      per-token rescaling of tau.
+        # None of these can be waved at: `test_sparse_forward_20260916.py` pins 1 by forcing
+        # the exact selection (whereupon the path must reproduce the dense output bit for bit)
+        # and then measures 2 and 3 separately.
+        #
+        # TRAINING RECIPE. The proxy is distilled against the exact all-K routing distribution,
+        # which the sparse path does not compute -- so a sparse arm cannot train from scratch.
+        # Run a dense phase with proxy_rank>0 and proxy_loss_coef>0 (free: off the main path),
+        # then switch on sparse_forward. For an already-trained dense checkpoint, fit the proxy
+        # post-hoc from cached (x, E_k) pairs, the same way sinkhorn mu is recalibrated.
+        # ---- OVER-SELECT then RE-RANK (2026-09-16) ---------------------------------
+        # MEASURED. Ablation on pure_hop_T12_sink, wikitext bits/byte against a dense 1.0996:
+        #   proxy SELECTS, exact energies weight  ->  1.1161  (+0.0165)  <- selection is FINE
+        #   sparse_forward, renormalize_topk      ->  1.9177
+        #   sparse_forward, as trained            ->  3.4346  (+2.335)
+        # So 0.88 top-2 agreement costs 1.5%, and the damage is in the SOFTMAX DENOMINATOR: with
+        # renormalize_topk=False the sum runs over all K logits, and filling the K-k missing ones
+        # from the proxy is worth -1.52 nats. The proxy ranks well and sums badly.
+        #
+        # `sparse_candidates` = p >= top_k: the proxy NOMINATES p experts, their exact energies
+        # (free -- a by-product of the forward projection we now do for them) RE-RANK to the final
+        # top-k, and the denominator uses p exact terms instead of k. Both errors shrink together,
+        # because a softmax denominator is dominated by its largest terms and those are exactly
+        # the ones we now compute exactly.
+        #
+        # Cost: the forward projection covers p experts, so the ceiling moves from 2K/(2k*cf) to
+        # 2K/((p+k)*cf) -- 6.16x at p=2, ~4.3x at p=4, ~3.2x at p=6, all far above the 1.73x that
+        # an EXACT router can never beat. p = n_experts is the correctness self-test: every energy
+        # is then computed exactly and the path must reproduce the dense output.
         self.sparse_backproj = bool(sparse_backproj)
+        self.sparse_forward = bool(sparse_forward)
+        self.sparse_candidates = int(sparse_candidates)
         self.sparse_capacity_factor = float(sparse_capacity_factor)
-        if self.sparse_backproj:
+        if self.sparse_backproj or self.sparse_forward:
             assert self.top_k is not None and self.top_k < len(experts), (
-                "sparse_backproj needs top_k < n_experts; with dense routing there is nothing to skip"
+                "sparse paths need top_k < n_experts; with dense routing there is nothing to skip"
             )
             self.register_buffer("_sparse_overflow", torch.zeros((), dtype=torch.long), persistent=False)
+        if self.sparse_forward:
+            assert not self.sparse_backproj, (
+                "sparse_forward already sparsifies the back projection; sparse_backproj is redundant"
+            )
+            assert fused_experts, "sparse_forward is built on the fused-weight view; set fused_experts: true"
+            p_cand = self.sparse_candidates or int(top_k)
+            assert int(top_k) <= p_cand <= len(experts), (
+                f"sparse_candidates must satisfy top_k <= p <= n_experts, got {p_cand}"
+            )
+            self.sparse_candidates = p_cand
+            assert int(proxy_rank) > 0 or p_cand == len(experts), (
+                "sparse_forward cannot skip the forward projection without a cheap selector: "
+                "set proxy_rank > 0. (p = n_experts needs no proxy, and is the self-test.)"
+            )
+            # NOTE: repulsion and the cosine probe are checked in _forward_sparse, not here.
+            # Both fire only under self.training, and the main use of sparse_forward is EVALUATING
+            # an already-trained checkpoint whose config says repulsion_space: output. Asserting
+            # at construction would make every such checkpoint unloadable for a reason that
+            # cannot arise at eval.
         self.sinkhorn_mu_iters = max(1, int(sinkhorn_mu_iters))
         if self.sinkhorn_persist_mu:
             self.register_buffer("sinkhorn_mu",
@@ -837,11 +917,67 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # `proxy_route` is set, so it cannot degrade training. Its measured top-k
         # agreement is logged every step, so we learn whether r is sufficient
         # BEFORE trusting it for inference.
+        # ---- proxy FORM (2026-09-16) ------------------------------------------------
+        # MEASURED, and it is why the first fit failed. The 0.94 top-1 / 0.90 top-2 in
+        # HANDOFF 7.6 was for the EXACT energy restricted to a rank-r subspace. The
+        # "diagonal-quadratic head on the r coefficients" below it was a RECOMMENDATION,
+        # never a measurement, and the 0.90 was then quoted as though it applied to the
+        # head. Fitted post-hoc on pure_hop_T12_sink the head reaches only 0.348 top-2 at
+        # r=8 against a chance floor of k/K = 0.125, and 0.461 even at r=32. A diagonal
+        # quadratic in `a` simply cannot represent mean(gelu(.)^2).
+        #
+        #   "quad"      E_hat_k = sum_j q_kj a_kj^2 + l_kj a_kj + b_k        (as before)
+        #   "subspace"  E_hat_k = mean_j gelu((B_k a_k)_j)^2 * s_k + b_k     (7.6's form)
+        #
+        # `subspace` keeps the true nonlinearity: with a_k = V_k^T x and B_k = W_k V_k
+        # precomputed, W_k P_k x = B_k a_k exactly, where P_k projects onto span(V_k). So the
+        # only error is the rank truncation, not the function class.
+        #
+        # COST, and the trap in it. B_k is (I_e, r), so the naive version produces an
+        # (T, K, I_e) tensor -- the same elementwise work and the same activation footprint as
+        # the DENSE path, destroying two of the three savings and leaving only the GEMM.
+        # `proxy_out_dim` = m fixes that: E_k is a MEAN over I_e coordinates, so a fixed
+        # subsample of m rows of B_k is an UNBIASED estimator of it with variance ~1/m. Cost
+        # falls to K*r*(d+m) MACs and K*m elementwise. At K=16, r=8, d=768, I_e=4480:
+        #   m=0 (all)  672K MAC, 71,680 elementwise  -- elementwise NO BETTER than dense
+        #   m=512      164K MAC,  8,192 elementwise  -- 0.15% of dense MACs, 11% of its elementwise
+        # `proxy_scale`/`proxy_bias` absorb the residual bias of the estimator.
         self.proxy_rank = int(proxy_rank)
         self.proxy_loss_coef = float(proxy_loss_coef)
         self.proxy_route = bool(proxy_route)
+        assert proxy_kind in ("quad", "subspace")
+        self.proxy_kind = proxy_kind
+        self.proxy_out_dim = int(proxy_out_dim)
+        # PER-ITERATION HEADS. A shared recurrent block applies the SAME proxy at every
+        # iteration, and the hidden-state distribution differs between them: measured on
+        # pure_hop_T12_sink (12 iterations), agreement runs 0.080 at cycle position 2 -- BELOW
+        # the 0.125 chance floor, i.e. anti-correlated -- to 0.592 at position 11, a 7.4x
+        # spread. Exactly the structure that defeated a single shared sinkhorn mu buffer
+        # (see the mu note above). proxy_iters > 1 gives one head per iteration, cycled by call
+        # index.
+        #
+        # SCOPE: eval / inference / calibration ONLY, and asserted below. Indexing by a call
+        # counter is UNSOUND in training under activation checkpointing, which replays the
+        # forward during backward (`gradient_checkpointing_method: block` is set on the 400M
+        # arm): the replay would advance the counter and apply a different head than the
+        # forward did, so the gradients would not match the function. Training with
+        # per-iteration heads needs the block to be told its iteration index, which it is not.
+        self.proxy_iters = max(1, int(proxy_iters))
+        # The proxy is only exercised by the FUSED path -- `_forward_looped` never calls
+        # `_proxy_step`. Without this assert, `proxy_rank: 16` + `proxy_loss_coef: 0.01` on a
+        # config that leaves fused_experts at its default False is a SILENT NO-OP: the run trains,
+        # logs no proxy_topk_agree, costs nothing extra and teaches nothing. Caught while writing
+        # the online-distillation test, whose base arm has fused_experts off. Pre-flight check 7.
+        assert not (self.proxy_rank > 0 and not self.fused_experts), (
+            "proxy_rank > 0 requires fused_experts: true -- the looped expert path never runs the "
+            "proxy, so the proxy would silently never be trained or measured"
+        )
         if self.proxy_rank > 0:
             r = self.proxy_rank
+            n_it = self.proxy_iters
+            # keep the (K, ...) shape when there is one head, so existing proxy checkpoints
+            # load unchanged; only the per-iteration case gains a leading axis.
+            pre = () if n_it == 1 else (n_it,)
             # DEDICATED GENERATOR, not the global RNG. torch.randn here would consume
             # the global stream and shift the initialisation of every parameter created
             # AFTER this block -- so merely enabling the proxy gave the whole model a
@@ -852,21 +988,34 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             # grad_norm never touched the 1.0 threshold on either arm.)
             _g = torch.Generator().manual_seed(0xB01742 + (layer_idx or 0))
             self.proxy_V = nn.Parameter(
-                torch.randn(self.n_experts, hidden_size, r, generator=_g)
+                torch.randn(*pre, self.n_experts, hidden_size, r, generator=_g)
                 / (hidden_size ** 0.5)
             )
-            # Diagonal quadratic + linear head on the r coefficients: the true
-            # Hopfield energy is quadratic in W_k x, so a quadratic form in the
-            # projection is the right inductive bias (and is 2r+1 params/expert).
-            self.proxy_quad = nn.Parameter(torch.ones(self.n_experts, r) / r)
-            self.proxy_lin = nn.Parameter(torch.zeros(self.n_experts, r))
-            self.proxy_bias = nn.Parameter(torch.zeros(self.n_experts))
+            if self.proxy_kind == "quad":
+                # Diagonal quadratic + linear head on the r coefficients. Kept for the A/B
+                # against "subspace"; measured inadequate on its own (see above).
+                self.proxy_quad = nn.Parameter(torch.ones(*pre, self.n_experts, r) / r)
+                self.proxy_lin = nn.Parameter(torch.zeros(*pre, self.n_experts, r))
+                self.proxy_bias = nn.Parameter(torch.zeros(*pre, self.n_experts))
+                self.proxy_B = self.proxy_scale = None
+            else:
+                m = self.proxy_out_dim or experts[0].intermediate_size
+                self._proxy_m = m
+                self.proxy_B = nn.Parameter(
+                    torch.randn(*pre, self.n_experts, m, r, generator=_g) / (r ** 0.5))
+                self.proxy_scale = nn.Parameter(torch.ones(*pre, self.n_experts))
+                self.proxy_bias = nn.Parameter(torch.zeros(*pre, self.n_experts))
+                self.proxy_quad = self.proxy_lin = None
+            if self.proxy_iters > 1:
+                self.register_buffer("_proxy_call", torch.zeros((), dtype=torch.long),
+                                     persistent=False)
             self.register_buffer("_proxy_agree_sum", torch.zeros((), dtype=torch.float32),
                                  persistent=False)
             self.register_buffer("_proxy_agree_n", torch.zeros((), dtype=torch.float32),
                                  persistent=False)
         else:
-            self.proxy_V = None
+            self.proxy_V = self.proxy_B = None
+            self.proxy_quad = self.proxy_lin = self.proxy_scale = self.proxy_bias = None
 
         # ------------------------------------------------------------------ #
         # EXPERT-ALIGNMENT PROBE (2026-09-15)                                 #
@@ -896,6 +1045,8 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
     # --- public surface --------------------------------------------------- #
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.sparse_forward:
+            return self._forward_sparse(x)
         if self.fused_experts:
             return self._forward_fused(x)
         return self._forward_looped(x)
@@ -963,12 +1114,32 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
     # --- shared routing (used by BOTH the looped and fused paths, so they can
     # --- never drift apart) ------------------------------------------------- #
 
-    def _route(self, E_k: torch.Tensor):
-        """Energies -> (p, logits). Verbatim the pre-2026-09-15 routing block."""
-        logits = self._logits(E_k)
+    def _route(self, E_k: torch.Tensor, proxy_E: torch.Tensor | None = None):
+        """Energies -> (p, logits). Verbatim the pre-2026-09-15 routing block, except that
+        `proxy_E` (when `proxy_route` is on) moves the SELECTION onto the cheap router while
+        the WEIGHTS stay exact.
+
+        That split is the whole point. Selection only has to get the top-k SET right, and a
+        rank-r proxy does that at 0.94 top-1 / 0.90 top-2 for ~1/128 of the router's MACs
+        (HANDOFF 7.6). Weights have to be numerically right, and here they cost nothing extra
+        because the exact energies are a by-product of the forward projection we already did.
+        In the DENSE path this buys no FLOPs -- it is the A/B that isolates the quality cost of
+        proxy selection from the dispatch machinery of `_forward_sparse`, where the same split
+        is what makes skipping the forward projection possible at all.
+        """
+        logits = self._logits_raw(E_k)
+        mu = self._mu_for(logits)               # exactly one dual solve / one _mu_call tick
+        if mu is not None:
+            logits = logits - mu.to(logits.dtype)
         p = F.softmax(logits, dim=-1)
         if self.top_k is not None and self.top_k < self.n_experts:
-            _, topk_idx = logits.topk(self.top_k, dim=-1)
+            if proxy_E is None:
+                sel_logits = logits
+            else:
+                sel_logits = self._logits_raw(proxy_E, moments=self._zscore_moments(proxy_E))
+                if mu is not None:
+                    sel_logits = sel_logits - mu.to(sel_logits.dtype)
+            _, topk_idx = sel_logits.topk(self.top_k, dim=-1)
             mask = torch.zeros_like(p, dtype=torch.bool)
             mask.scatter_(-1, topk_idx, True)
             p = p * mask
@@ -1033,6 +1204,41 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
     # --- fused-GEMM path ---------------------------------------------------- #
 
+    def _dispatch_plan(self, idx: torch.Tensor, T: int):
+        """(token, expert) pairs -> slots in a fixed (K, C, *) buffer.
+
+        Shared by the back-projection-only and fully-sparse paths so the two cannot drift
+        apart. Returns the kept pairs' (expert, token, slot) ids, their positions `sp` in the
+        flat (T*k) selection layout, the capacity C, and a (T, k) bool of what survived.
+
+        C = ceil(capacity_factor * T * k / K), i.e. sized for balanced load. Surplus pairs are
+        DROPPED, which changes the function, so `_sparse_overflow` counts them -- silence must
+        not be mistaken for exactness. Fixed shapes throughout, hence torch.compile-safe.
+        """
+        K = self.n_experts
+        k = idx.shape[-1]
+        dev = idx.device
+        C = max(1, int(math.ceil(self.sparse_capacity_factor * T * k / K)))
+        flat_e = idx.reshape(-1)
+        flat_t = torch.arange(T, device=dev).unsqueeze(1).expand(T, k).reshape(-1)
+        # stable sort groups pairs by expert; rank within the group is the slot. `order` is
+        # also the map from sorted position back to flat (T*k) position, which is what lets the
+        # caller scatter per-pair results into the (T, k) layout.
+        order = torch.argsort(flat_e, stable=True)
+        se, st = flat_e[order], flat_t[order]
+        counts = torch.zeros(K, dtype=torch.long, device=dev).scatter_add_(
+            0, se, torch.ones_like(se))
+        starts = torch.cat([torch.zeros(1, dtype=torch.long, device=dev),
+                            counts.cumsum(0)[:-1]])
+        slot = torch.arange(se.shape[0], device=dev) - starts[se]
+        keep = slot < C
+        if self.track_load and hasattr(self, "_sparse_overflow"):
+            with torch.no_grad():
+                self._sparse_overflow += (~keep).sum()
+        kept_flat = torch.zeros(T * k, dtype=torch.bool, device=dev)
+        kept_flat[order] = keep
+        return se[keep], st[keep], slot[keep], order[keep], C, kept_flat.view(T, k)
+
     def _sparse_backproj(self, gated: torch.Tensor, p: torch.Tensor,
                          W: torch.Tensor, pref: float) -> torch.Tensor:
         """Back-projection over only the top-k experts per token.
@@ -1047,30 +1253,11 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         g = gated.reshape(-1, K, I_e)
         pf = p.reshape(-1, K)
         T = g.shape[0]
-        k = int(self.top_k)
-        C = max(1, int(math.ceil(self.sparse_capacity_factor * T * k / K)))
-        dev = g.device
 
         # (token, expert) pairs to evaluate. Taking topk of p (not of the logits) keeps this
         # consistent with whatever mask _route applied, including renormalize_topk.
-        idx = pf.topk(k, dim=-1).indices                       # (T, k)
-        flat_e = idx.reshape(-1)                               # (T*k,)
-        flat_t = torch.arange(T, device=dev).unsqueeze(1).expand(T, k).reshape(-1)
-
-        # stable sort groups pairs by expert; rank within group gives the slot
-        order = torch.argsort(flat_e, stable=True)
-        se, st = flat_e[order], flat_t[order]
-        counts = torch.zeros(K, dtype=torch.long, device=dev).scatter_add_(
-            0, se, torch.ones_like(se))
-        starts = torch.cat([torch.zeros(1, dtype=torch.long, device=dev),
-                            counts.cumsum(0)[:-1]])
-        slot = torch.arange(se.shape[0], device=dev) - starts[se]
-        keep = slot < C
-        if self.track_load:
-            with torch.no_grad():
-                self._sparse_overflow += (~keep).sum()
-
-        se_k, st_k, slot_k = se[keep], st[keep], slot[keep]
+        idx = pf.topk(int(self.top_k), dim=-1).indices          # (T, k)
+        se_k, st_k, slot_k, _, C, _ = self._dispatch_plan(idx, T)
         buf = g.new_zeros(K, C, I_e)
         buf[se_k, slot_k] = g[st_k, se_k]                      # gather
         y = torch.bmm(buf, W.view(K, I_e, H))                  # ONE batched GEMM, K*C*I_e*H
@@ -1099,12 +1286,16 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         g = gelu_Wx.view(*lead, K, I_e)
         E_k = (g * g).mean(dim=-1)               # (..., K) -- same as per-expert mean
 
-        p, logits = self._route(E_k)
+        # `proxy_route` moves SELECTION to the cheap router while weights stay exact. In the
+        # dense path this saves nothing -- it is the controlled A/B for the quality cost of
+        # proxy selection, with the dispatch machinery of _forward_sparse held out.
+        proxy_E = self._proxy_energies(x) if (self.proxy_route and self.proxy_rank > 0) else None
+        p, logits = self._route(E_k, proxy_E=proxy_E)
         self._track_load(p)
         self._track_energy(E_k)
 
         if self.proxy_rank > 0:
-            self._proxy_step(x, E_k, logits)
+            self._proxy_step(x, E_k, logits, E_hat=proxy_E)
 
         gated = (gelu_Wx * gelu_prime).view(*lead, K, I_e)
         if self.sparse_backproj:
@@ -1130,6 +1321,134 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
         if not torch.compiler.is_compiling():
             self._log_metrics(p, out)
+
+        return out
+
+    def _forward_sparse(self, x: torch.Tensor, sel_idx: torch.Tensor | None = None,
+                        exact_denominator: torch.Tensor | None = None) -> torch.Tensor:
+        """GENUINELY sparse: only the top-k experts' forward AND back projections are computed.
+
+        See the `sparse_forward` note in __init__ for the cost model and for exactly which
+        three things are approximated. `sel_idx` (a (T, k) expert index) and
+        `exact_denominator` (all-K logits) override the proxy and are used ONLY by the test,
+        which needs to hold the selection fixed to check the arithmetic underneath it.
+        """
+        spec = self._fused_spec
+        W = self._fused_W()                              # (K*I_e, hidden)
+        K, I_e = self.n_experts, self._expert_I
+        H = self.hidden_size
+        pref = _hopfield_grad_prefactor(I_e, spec["hopfield_grad_scale"])
+        Wv = W.view(K, I_e, H)
+        lead = x.shape[:-1]
+        xf = x.reshape(-1, H)
+        T = xf.shape[0]
+        k = int(self.top_k)
+
+        # ---- 1. SELECT with the cheap router: K*d*r MACs and not one expert matmul ------
+        E_prox = self._proxy_energies(x).reshape(-1, K)
+        mom = self._zscore_moments(E_prox)
+        s_prox = self._logits_raw(E_prox, moments=mom)
+        # The dual is solved on the PROXY logits because they are the only all-K quantity here
+        # -- which is also the right place for it: mu exists to steer the SELECTION, and
+        # selection is made on these logits.
+        mu = self._mu_for(s_prox)
+        if mu is not None:
+            s_prox = s_prox - mu.to(s_prox.dtype)
+        p_cand = self.sparse_candidates or k
+        if sel_idx is None:
+            # p = K needs no proxy at all: every expert is a candidate, so the re-rank below is
+            # over the exact energies of all of them and the whole path becomes exact.
+            sel_idx = (torch.arange(K, device=xf.device).expand(T, K) if p_cand == K
+                       else s_prox.topk(p_cand, dim=-1).indices)
+        else:
+            sel_idx = sel_idx.reshape(T, -1)
+            p_cand = sel_idx.shape[-1]
+
+        # ---- 2. capacity-dispatch the TOKENS (dense path dispatches nothing) -----------
+        se_k, st_k, slot_k, sp_k, C, kept = self._dispatch_plan(sel_idx, T)
+        xbuf = xf.new_zeros(K, C, H)
+        xbuf[se_k, slot_k] = xf[st_k]
+
+        # ---- 3. SPARSE FORWARD PROJECTION: k/K of the dense GEMM ----------------------
+        z = torch.bmm(xbuf, Wv.transpose(1, 2))          # (K, C, I_e)
+        gz, gzp = _gelu_and_grad(z, spec["gelu_grad_method"])
+
+        # ---- 4. EXACT energies -- free, they fall out of the projection we just did ----
+        E_pair = (gz * gz).mean(-1)                      # (K, C)
+        E_tk = E_prox.new_zeros(T * k)
+        E_tk[sp_k] = E_pair[se_k, slot_k].to(E_tk.dtype)
+        E_tk = E_tk.view(T, k)
+        # zscore moments: exact when every expert is a candidate, else the proxy's
+        mom_w = self._zscore_moments(E_tk) if p_cand == K else mom
+        lg = self._logits_raw(E_tk, moments=mom_w, expert_idx=sel_idx)
+        if mu is not None:
+            lg = lg - mu.to(lg.dtype)[sel_idx]
+        # overflow-dropped pairs were never evaluated, so they must carry zero weight rather
+        # than the weight of a zero energy
+        neg = torch.finfo(lg.dtype).min
+        lg = lg.masked_fill(~kept, neg)
+
+        # ---- 4b. RE-RANK: the exact energies pick the final top-k out of the p candidates ----
+        # This is the point of over-selecting. The proxy only has to get the true top-k INTO its
+        # top-p, which is a far weaker requirement than getting the top-k exactly right.
+        if p_cand > k:
+            win = lg.topk(k, dim=-1).indices                      # (T, k) positions within p
+            wmask = torch.zeros_like(lg, dtype=torch.bool).scatter_(-1, win, True)
+        else:
+            wmask = kept
+
+        # Weights. Shared max-subtraction over BOTH the exact selected logits and the proxy's,
+        # since the non-renormalised denominator mixes the two.
+        ref = s_prox if exact_denominator is None else exact_denominator
+        mx = torch.maximum(lg.max(-1, keepdim=True).values, ref.max(-1, keepdim=True).values)
+        num = torch.exp(lg - mx) * wmask                           # winners only carry weight
+        # DENOMINATOR. All p candidates contribute EXACTLY -- including the p-k that lost the
+        # re-rank, which is why over-selecting fixes the denominator as well as the selection.
+        Zcand = (torch.exp(lg - mx) * kept).sum(-1, keepdim=True)
+        if p_cand == K:
+            Zrest = torch.zeros_like(Zcand)                        # nothing left out: exact
+        else:
+            Zrest = (torch.exp(ref - mx).sum(-1, keepdim=True)
+                     - torch.exp(ref.gather(-1, sel_idx) - mx).sum(-1, keepdim=True)).clamp_min(0)
+        Zall = (Zcand + Zrest).clamp_min(1e-30)
+        Zwin = num.sum(-1, keepdim=True).clamp_min(1e-30)
+        w = num / (Zwin if self.renormalize_topk else Zall)
+
+        # ---- 5. SPARSE BACK PROJECTION ------------------------------------------------
+        y = torch.bmm(gz * gzp, Wv)                      # (K, C, hidden)
+        wp = w.reshape(-1)[sp_k]
+        contrib = y[se_k, slot_k] * (pref * wp).unsqueeze(-1)
+        out = xf.new_zeros(T, H).index_add_(0, st_k, contrib.to(xf.dtype)).reshape(*lead, H)
+
+        # ---- 6. metrics and side channels --------------------------------------------
+        # A (T, K) p is rebuilt for the load metrics: it costs T*K, not T*K*I_e, so the whole
+        # point of the sparse path survives it and every existing routing metric keeps working.
+        p_full = w.new_zeros(T, K).scatter_(-1, sel_idx, w)
+        self._track_load(p_full)
+        # NOTE: this is the mean over SELECTED experts, i.e. the high-energy tail, where the
+        # dense path averages over all K. Comparable across sparse arms, not against dense ones.
+        self._track_energy(E_tk)
+
+        if self.training and self._capture_energy:
+            # -tau*logsumexp over all K, exact on the k evaluated and proxy-completed elsewhere
+            self._last_energy_per_token = (-self.temperature * (mx + torch.log(Zall))).squeeze(-1)
+        else:
+            self._last_energy_per_token = None
+
+        if self.training and self.repulsion_coef > 0:
+            assert self.repulsion_space == "weight", (
+                "training with sparse_forward needs repulsion_space='weight': output-space "
+                "repulsion requires all K expert outputs, which is what sparse_forward skips"
+            )
+            self._add_repulsion_loss_weight()
+        if self.training and self.cos_probe_interval > 0:
+            raise AssertionError(
+                "the expert-cosine probe needs all K expert outputs; it cannot run under "
+                "sparse_forward. Set cos_probe_interval: 0."
+            )
+
+        if not torch.compiler.is_compiling():
+            self._log_metrics(p_full, out)
 
         return out
 
@@ -1218,13 +1537,34 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # it changes what the model computes and so could move quality. Keeping the
         # proxy strictly off the main gradient path is what makes "enabling it cannot
         # degrade training" true. Shaping is a separate experiment, not a default.
-        a = torch.einsum("...h,khr->...kr", x.detach(), self.proxy_V.to(x.dtype))
-        q = self.proxy_quad.to(x.dtype)
-        l = self.proxy_lin.to(x.dtype)
-        return (q * a * a).sum(-1) + (l * a).sum(-1) + self.proxy_bias.to(x.dtype)
+        if self.proxy_iters == 1:
+            V, B, q, l, sc, b = (self.proxy_V, self.proxy_B, self.proxy_quad,
+                                 self.proxy_lin, self.proxy_scale, self.proxy_bias)
+        else:
+            assert not self.training, (
+                "proxy_iters > 1 is eval/calibration only: indexing the head by a call counter "
+                "is unsound in training under activation checkpointing, which replays the "
+                "forward during backward. Train with proxy_iters: 1 and refine per-iteration "
+                "heads post-hoc."
+            )
+            g = int(self._proxy_call.item()) % self.proxy_iters
+            self._proxy_call += 1
+            pick = lambda t: None if t is None else t[g]          # noqa: E731
+            V, B, q, l, sc, b = map(pick, (self.proxy_V, self.proxy_B, self.proxy_quad,
+                                           self.proxy_lin, self.proxy_scale, self.proxy_bias))
+        a = torch.einsum("...h,khr->...kr", x.detach(), V.to(x.dtype))
+        if self.proxy_kind == "quad":
+            return ((q.to(x.dtype) * a * a).sum(-1) + (l.to(x.dtype) * a).sum(-1)
+                    + b.to(x.dtype))
+        # subspace: the EXACT energy form, on the rank-r projection of x. F.gelu matches
+        # _gelu_and_grad's phi for every method, so this is the same nonlinearity the true
+        # energy uses -- the only error is the truncation (and the m-subsample, if any).
+        z = torch.einsum("...kr,kmr->...km", a, B.to(x.dtype))
+        gz = F.gelu(z)
+        return (gz * gz).mean(-1) * sc.to(x.dtype) + b.to(x.dtype)
 
     def _proxy_step(self, x: torch.Tensor, E_k: torch.Tensor,
-                    logits: torch.Tensor) -> None:
+                    logits: torch.Tensor, E_hat: torch.Tensor | None = None) -> None:
         """Distil the proxy against the exact routing distribution, and MEASURE its
         top-k agreement. Off the main forward path: this adds an aux loss and a
         metric, and changes nothing the model computes (unless proxy_route).
@@ -1233,8 +1573,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         `torch.isin` silently fakes top-k agreement, so agreement is computed here
         as a genuine per-row set overlap: |top-k(proxy) INTERSECT top-k(exact)| / k.
         """
-        E_hat = self._proxy_energies(x)
-        logits_hat = self._logits(E_hat)
+        if E_hat is None:
+            E_hat = self._proxy_energies(x)
+        # _logits_raw, NOT _logits: the dual has already been solved once this call and
+        # _logits would tick _mu_call a second time, desynchronising the per-iteration buffer
+        # that eval cycles through.
+        logits_hat = self._logits_raw(E_hat, moments=self._zscore_moments(E_hat))
 
         if self.training and self.proxy_loss_coef > 0:
             # PER-TOKEN normalisation. F.kl_div(reduction="batchmean") divides by dim 0
@@ -1300,36 +1644,84 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                         the energy magnitude drifting as weight decay shrinks W,
                         which is what happened here over training)
         """
+        logits = self._logits_raw(E_k)
+        mu = self._mu_for(logits)
+        return logits if mu is None else logits - mu.to(logits.dtype)
+
+    def _logits_raw(self, E_k: torch.Tensor, *, moments: tuple | None = None,
+                    expert_idx: torch.Tensor | None = None) -> torch.Tensor:
+        """The logit map WITHOUT the Sinkhorn dual: sign, normalisation, bias, temperature.
+
+        Split out of `_logits` for the sparse forward path, which must apply the SAME map
+        twice per call -- once to the proxy energies over all K (to choose experts) and once
+        to the exact energies of the chosen ones (to weight them) -- while solving the dual
+        only ONCE. Calling `_logits` twice would double-count `_mu_call` and, in training,
+        run the dual solve on the proxy and then again on a (T, k) slice where it is
+        meaningless.
+
+        `moments` supplies (mean, std) for `routing_norm="zscore"` instead of computing them
+        over the last axis. The sparse path has only k of the K exact energies, so it cannot
+        form the exact moments; it passes the PROXY's. This is a smaller approximation than
+        it looks: a per-token additive constant cancels exactly between numerator and
+        denominator of the softmax, so the mean drops out entirely and only the std survives,
+        acting as a mild per-token rescaling of tau.
+
+        `expert_idx` gathers the per-expert `load_balance_bias` into a (T, k) selection
+        layout instead of broadcasting over a full (T, K) one.
+        """
         s = -E_k if self.e_sign == "neg" else E_k
         if self.routing_norm == "sqrt_width":
             s = s * (self.experts[0].intermediate_size ** 0.5)
         elif self.routing_norm == "zscore":
-            s = (s - s.mean(-1, keepdim=True)) / s.std(-1, keepdim=True).clamp_min(1e-12)
+            if moments is None:
+                m, sd = s.mean(-1, keepdim=True), s.std(-1, keepdim=True).clamp_min(1e-12)
+            else:
+                m, sd = moments
+            s = (s - m) / sd
         # Bias is added AFTER normalisation: zscore would otherwise rescale it away, and
         # it is defined in the same (post-norm) space the temperature divides.
         if self.balance_rate > 0.0 and self.load_balance_bias is not None:
             # Cast to the logits' dtype: the buffer is fp32 while s is bf16 under mixed
             # precision, and the implicit promotion failed during fake-tensor tracing.
-            s = s + self.load_balance_bias.to(s.dtype)
-        logits = s / self.temperature
-        if self.sinkhorn_iters > 0:
-            if self.training:
-                mu = self._solve_sinkhorn_mu(logits)
-                if self.sinkhorn_persist_mu:
-                    self._update_running_mu(mu)
-                logits = logits - mu.to(logits.dtype)
-            elif self.sinkhorn_persist_mu and float(self.sinkhorn_mu_count.sum()) > 0:
-                # EVAL: apply the dual for THIS iteration of the shared block, cycling with the
-                # call index. Without this the router is evaluated untilted while it was trained
-                # tilted, and the error compounds with iteration count -- measured WikiPPL among
-                # pure+sinkhorn arms: 4 iterations 103.78, 8 iterations 177.09 and 316.21,
-                # against ~41 for every hybrid (1 MoE block of 7) and 61.65 for the pure arm
-                # whose clamped bias DOES survive to eval.
-                k = int(self._mu_call.item()) % self.sinkhorn_mu_iters
-                if float(self.sinkhorn_mu_count[k]) > 0:
-                    logits = logits - self.sinkhorn_mu[k].to(logits.dtype)
-                self._mu_call += 1
-        return logits
+            b = self.load_balance_bias.to(s.dtype)
+            s = s + (b if expert_idx is None else b[expert_idx])
+        return s / self.temperature
+
+    def _zscore_moments(self, E_k: torch.Tensor) -> tuple | None:
+        """The (mean, std) `_logits_raw` would compute for these energies, or None if the
+        active `routing_norm` does not use them. Mirrors `_logits_raw` exactly, including the
+        sign flip that precedes the standardisation."""
+        if self.routing_norm != "zscore":
+            return None
+        s = -E_k if self.e_sign == "neg" else E_k
+        return s.mean(-1, keepdim=True), s.std(-1, keepdim=True).clamp_min(1e-12)
+
+    def _mu_for(self, logits: torch.Tensor) -> torch.Tensor | None:
+        """The Sinkhorn dual to subtract from these logits, or None when there is none.
+
+        Carries ALL the `_mu_call` bookkeeping, so it must be called exactly once per forward
+        call of this block -- that counter is what lets eval cycle through the per-iteration
+        buffer in the same order training filled it.
+        """
+        if self.sinkhorn_iters <= 0:
+            return None
+        if self.training:
+            mu = self._solve_sinkhorn_mu(logits)
+            if self.sinkhorn_persist_mu:
+                self._update_running_mu(mu)
+            return mu
+        if self.sinkhorn_persist_mu and float(self.sinkhorn_mu_count.sum()) > 0:
+            # EVAL: apply the dual for THIS iteration of the shared block, cycling with the
+            # call index. Without this the router is evaluated untilted while it was trained
+            # tilted, and the error compounds with iteration count -- measured WikiPPL among
+            # pure+sinkhorn arms: 4 iterations 103.78, 8 iterations 177.09 and 316.21,
+            # against ~41 for every hybrid (1 MoE block of 7) and 61.65 for the pure arm
+            # whose clamped bias DOES survive to eval.
+            k = int(self._mu_call.item()) % self.sinkhorn_mu_iters
+            self._mu_call += 1
+            if float(self.sinkhorn_mu_count[k]) > 0:
+                return self.sinkhorn_mu[k]
+        return None
 
     @torch.no_grad()
     def _update_running_mu(self, mu: torch.Tensor) -> None:
@@ -1767,6 +2159,9 @@ def build_boltzmann_moe(
     proxy_rank: int = 0,
     proxy_loss_coef: float = 0.0,
     proxy_route: bool = False,
+    proxy_kind: str = "quad",
+    proxy_out_dim: int = 0,
+    proxy_iters: int = 1,
     cos_probe_interval: int = 0,
     cos_probe_pairs: int = 8,
     repulsion_space: str = "output",
@@ -1775,6 +2170,8 @@ def build_boltzmann_moe(
     sinkhorn_persist_mu: bool = False,
     sinkhorn_mu_iters: int = 1,
     sparse_backproj: bool = False,
+    sparse_forward: bool = False,
+    sparse_candidates: int = 0,
     sparse_capacity_factor: float = 1.25,
     repulsion_tensor_idx: bool = False,
     init_method: str = "normal",
@@ -1861,6 +2258,9 @@ def build_boltzmann_moe(
         proxy_rank=proxy_rank,
         proxy_loss_coef=proxy_loss_coef,
         proxy_route=proxy_route,
+        proxy_kind=proxy_kind,
+        proxy_out_dim=proxy_out_dim,
+        proxy_iters=proxy_iters,
         cos_probe_interval=cos_probe_interval,
         cos_probe_pairs=cos_probe_pairs,
         repulsion_space=repulsion_space,
@@ -1868,6 +2268,8 @@ def build_boltzmann_moe(
         sinkhorn_persist_mu=sinkhorn_persist_mu,
         sinkhorn_mu_iters=sinkhorn_mu_iters,
         sparse_backproj=sparse_backproj,
+        sparse_forward=sparse_forward,
+        sparse_candidates=sparse_candidates,
         sparse_capacity_factor=sparse_capacity_factor,
         repulsion_tensor_idx=repulsion_tensor_idx,
     )
