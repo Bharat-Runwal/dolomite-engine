@@ -1998,3 +1998,69 @@ bonus (12.17: it is one-time and terminal). It also needs a new scheduler class.
 On multi-stage/cyclical cosine: restarts (SGDR) and staged decay are real practices, but for a
 single fixed budget they are not what people use — staging is for continued pretraining or a
 data-mixture change.
+
+#### 12.16c CORRECTION to 12.16b (and 12.16a). The tooling was fine. The MONITOR fabricated the number.
+
+Third pass on the same incident, and this one is checked against the log line by line rather than
+inferred. **Both previous diagnoses were wrong about the mechanism.**
+
+* 12.16a blamed `--output_path` plus the `model.safetensors` symlink. **Wrong.**
+* 12.16b blamed `compute_avg11.py` globbing the newest `harness_results*.json` in the tree.
+  **Also wrong** — `resolve_results_path` (compute_avg11.py:80-92) globs ONLY under the directory
+  it is handed and `sys.exit(1)`s if it finds nothing. It never looks outside. It cannot fall back.
+
+What the log actually contains (`swproxy_1713960.stdout`) — exactly TWO Avg11 lines:
+
+```
+101: -------- sandwich / DENSE
+128: == Avg11 aggregate from .../unsharded_mucal/harness_results_...19-05-38.json ==
+129:   Avg11 = 43.36
+146: -------- sandwich / PROXYSEL          <- OOMed, no number
+247: -------- sandwich / DENSE             <- the script ran a SECOND time
+274: == Avg11 aggregate from .../unsharded_mucal/harness_results_...19-39-22.json ==
+275:   Avg11 = 43.36
+292: -------- sandwich / PROXYSEL
+293: sandwich/PROXYSEL HARNESS FAILED
+294: sandwich/PROXYSEL AVG11 FAILED
+```
+
+`bench_proxysel_one.sh` was invoked TWICE, and both DENSE evals succeeded with the same 43.36
+(which is just the 4-decimal determinism of the harness). PROXYSEL failed both times and said so.
+**Every component reported correctly.** `compute_avg11.py` printed
+`no harness_results_*.json under .../C_proxysel` and exited 1, exactly as designed.
+
+**The fabrication was in the monitor.** Its filter grepped for `Avg11 *=` across the whole stdout,
+collected the two DENSE lines, and presented them as "dense 43.36, proxy-selected 43.36, +0.00pp,
+launch `sw400_sparse`". The two numbers were identical because they were THE SAME ARM MEASURED
+TWICE — which is also why bits/byte matched to 4 decimals, the thing that (correctly) triggered
+the distrust.
+
+**The actual lessons, replacing the two wrong ones:**
+1. **A monitor filter must anchor each number to its arm label**, never grep a metric name
+   globally. `grep "Avg11 ="` cannot tell you WHICH model produced the line.
+2. **A script invoked N times produces N of everything.** Any filter that assumes one number per
+   arm per job is wrong the moment a submitter loops.
+3. This is the **sixth** monitor-filter failure of the session and by far the most costly — it
+   came within one step of launching a 3.9B-token 400M run on a delta that did not exist. The
+   standing rule in 12.16 ("confirm anything a monitor reports by job ID before acting on it")
+   is what caught it. **Keep it.**
+4. What 12.16b got RIGHT and still stands: the PROXYSEL harness genuinely **OOMed** (15.50 GiB
+   requested, 10.39 free) because `proxy_route: true` with `sparse_forward: false` runs the dense
+   all-K path plus the proxy heads, which does not fit at `batch_size 4` for 400M `I_e=15872`.
+   That is the real reason there is no proxy number, and it is fixed by `--batch_size 2`.
+
+**Do NOT "fix" `compute_avg11.py`'s globbing or `eval_harness.py`'s `--output_path`.** Neither is
+broken. A TODO item to that effect has been removed.
+
+One real defect does remain in `bench_proxysel_one.sh`: `|| echo "... FAILED"` keeps the pipeline's
+exit status at 0, so LSF reports "Successfully completed" for a job that produced nothing. Fixed
+below — it now tracks failures and exits nonzero.
+
+#### Retry log for the gate, so nobody repeats these
+
+| job | outcome |
+|---|---|
+| 1713960 | the original. DENSE fine; PROXYSEL **OOMed** at `batch_size 4`. Monitor misread it as +0.00pp. |
+| 1715589 | `batch_size 2` + `expandable_segments`. **Preempted (SSUSP) at 295 s** before reaching the requests; killed deliberately to add a cache. |
+| 1716267 | added `--use_cache` AND `--cache_requests true`. Died in 23 s: **`--cache_requests` applies its type conversion before the argparse `choices` check**, so the literal `true` arrives as a dict repr and is rejected. Use `--use_cache` alone. GATE-FAIL fired correctly. |
+| 1716546 | `--use_cache` only. RUN, GATE-CLEAN confirmed. ~2-4 h for 82639 requests at batch 2. |

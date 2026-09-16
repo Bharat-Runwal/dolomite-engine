@@ -532,6 +532,15 @@ Axes to sweep (in priority order):
       is the only shape measured at 400M, but §12.14's ordering is established at ~1000 steps and
       the gap was narrowing. The iso-FLOP hedge is a three-line change (`layer_iterations: [8]`,
       `sinkhorn_mu_iters: 8`, `intermediate_size: 143360`) — all three together or not at all.
-- [ ] **Fix `bench_proxysel_one.sh` to fail loudly** rather than `|| echo "... FAILED"`, and make
-      `compute_avg11.py` refuse to glob outside the directory it was handed. This pattern has now
-      produced two wrong numbers in two days.
+- [x] **`bench_proxysel_one.sh` now fails loudly** — tracks failures, verifies each results file
+      landed, exits nonzero so LSF stops reporting "Successfully completed" for a job that
+      produced nothing. `--batch_size` is now a parameter defaulting to 2 (4 OOMs at 400M), and
+      each arm gets its own `--use_cache` so a preemption resumes.
+      ⚠ **The rest of that item was WRONG and is withdrawn — see HANDOFF 12.16c.**
+      `compute_avg11.py` does NOT glob outside the directory it is handed; `resolve_results_path`
+      (compute_avg11.py:80-92) searches only under that path and `sys.exit(1)`s otherwise. It
+      behaved correctly throughout. `eval_harness.py`'s `--output_path` is not at fault either.
+      **Do not "fix" either of them.** The phantom +0.00pp came from a MONITOR filter that grepped
+      `Avg11 =` globally and labelled two DENSE evals (from two invocations of the script) as
+      dense-vs-proxy. The fix is in how results are monitored: anchor every number to its arm
+      label, and never assume one number per arm per job.
