@@ -407,6 +407,15 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   selection alone costs +0.0165 bits/byte, but a proxy-filled denominator costs -1.52 nats.
     #   p = n_experts makes the whole path exact and is the correctness self-test.
     sparse_candidates: int = 0
+    # repulsion_subsample: evaluate OUTPUT-space repulsion (and the cosine probe) on m tokens
+    #   instead of all T, over all K experts. 0 = off (use every token).
+    #   REQUIRED for sparse_forward with output-space repulsion, because that path never computes
+    #   all K expert outputs. The alternative, repulsion_space: weight, was MEASURED not to work:
+    #   a 1500-step sweep at coef 0.7 and 2.0 showed output alignment RISING 0.29 -> 0.46, the
+    #   signature HANDOFF 11.8 records for NO repulsion. Cost at m=64 is ~1.2% of a sparse step.
+    #   Also worth setting on DENSE arms: 11.8 measured full output-space repulsion at 17-21% of
+    #   the optimizer step with a steeply front-loaded benefit.
+    repulsion_subsample: int = 0
     sparse_capacity_factor: float = 1.25
     # Accumulate routing load in-graph so it is logged even under torch_compile, where the
     # older _log_metrics path is traced away (which is why routing collapse went unseen).

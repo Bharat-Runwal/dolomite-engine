@@ -518,6 +518,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         sparse_forward: bool = False,
         sparse_candidates: int = 0,
         sparse_capacity_factor: float = 1.25,
+        repulsion_subsample: int = 0,
         repulsion_tensor_idx: bool = False,
     ) -> None:
         super().__init__()
@@ -854,6 +855,13 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 "sparse_forward cannot skip the forward projection without a cheap selector: "
                 "set proxy_rank > 0. (p = n_experts needs no proxy, and is the self-test.)"
             )
+            if float(repulsion_coef) > 0.0 and repulsion_space != "weight":
+                assert int(repulsion_subsample) > 0, (
+                    "sparse_forward cannot do full output-space repulsion (it never computes all K "
+                    "expert outputs). Set repulsion_subsample > 0 to evaluate it on m tokens "
+                    "instead -- ~1.2% of the step at m=64 -- or repulsion_space: weight, which a "
+                    "sweep showed does NOT control output alignment."
+                )
             # NOTE: repulsion and the cosine probe are checked in _forward_sparse, not here.
             # Both fire only under self.training, and the main use of sparse_forward is EVALUATING
             # an already-trained checkpoint whose config says repulsion_space: output. Asserting
@@ -1034,6 +1042,29 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # no_grad and forward-only, so it saves no tensors and cannot perturb
         # activation checkpointing. Runs on 1 call in cos_probe_interval; 0 = off,
         # which is the default, so this costs nothing unless asked for.
+        # ---- SUBSAMPLED OUTPUT-SPACE REPULSION (2026-09-16) -------------------------
+        # MEASURED NEED. Output-space repulsion needs all K expert outputs, which sparse_forward
+        # does not compute, so the obvious substitute was repulsion_space="weight". A 1500-step
+        # sweep says that does not work: at coef 0.7 and 2.0 the OUTPUT alignment RISES
+        # 0.29 -> 0.44 -> 0.46 across steps 500/1000/1400 -- which is the signature HANDOFF 11.8
+        # records for NO REPULSION AT ALL ("sits at 0.43 and RISES to 0.51; it never decays").
+        # Weight cosines are 5-25x smaller than output cosines and evidently do not control them.
+        #
+        # So keep genuine OUTPUT-space repulsion and make it affordable by evaluating it on m
+        # tokens instead of all T. m << T is what makes this cheap: at m=64, K=16, I_e=4480,
+        # d=768 the extra forward projection is 3.5 GMAC against the sparse mixture's ~293 GMAC
+        # at T=16384, i.e. ~1.2%.
+        #
+        # Also a WIN FOR DENSE ARMS: HANDOFF 11.8 measured output-space repulsion at 17-21% of the
+        # optimizer step, with a benefit that is "steeply front-loaded". Subsampling should buy
+        # most of that benefit for a fraction of the cost.
+        #
+        # DETERMINISTIC STRIDE, not a random draw. Activation checkpointing replays the forward
+        # during backward; a fresh sample would make the replayed loss differ from the original.
+        # `_add_repulsion_loss_fused` already carries a CheckpointError scar from exactly this
+        # class of bug (random.sample changed a tensor SHAPE between forward and recompute), so
+        # nothing here may depend on RNG. Different batches cover different tokens anyway.
+        self.repulsion_subsample = int(repulsion_subsample)
         self.cos_probe_interval = int(cos_probe_interval)
         self.cos_probe_pairs = int(cos_probe_pairs)
         if self.cos_probe_interval > 0:
@@ -1285,6 +1316,21 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         out = g.new_zeros(T, H).index_add_(0, st_k, contrib)    # scatter-add
         return out.reshape(*lead, H)
 
+    def _subsampled_gated(self, xf: torch.Tensor, W: torch.Tensor, spec: dict, m: int):
+        """`gated` over ALL K experts for a deterministic stride of m tokens.
+
+        This is what lets the sparse path keep output-space repulsion and the alignment probe:
+        both need every expert's output, but only for enough tokens to estimate a cosine.
+        Cost m*d*K*I_e, and m is ~64 against T of 16384.
+        """
+        T = xf.shape[0]
+        m = max(1, min(int(m), T))
+        step = max(1, T // m)
+        idx = torch.arange(0, m * step, step, device=xf.device)[:m]     # no RNG: replay-safe
+        z = xf[idx] @ W.t()
+        g, gp = _gelu_and_grad(z, spec["gelu_grad_method"])
+        return (g * gp).view(m, self.n_experts, self._expert_I)
+
     def _fused_W(self) -> torch.Tensor:
         return self._fused_spec["weight_fn"]()
 
@@ -1333,6 +1379,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         if self.training and self.repulsion_coef > 0:
             if self.repulsion_space == "weight":
                 self._add_repulsion_loss_weight()
+            elif self.repulsion_subsample > 0:
+                # same estimator the sparse path uses, so a dense and a sparse arm with the same
+                # repulsion_subsample are directly comparable on this term
+                x2 = x.reshape(-1, self.hidden_size)
+                self._add_repulsion_loss_fused(
+                    self._subsampled_gated(x2, W, spec, self.repulsion_subsample), W, pref)
             else:
                 self._add_repulsion_loss_fused(gated, W, pref)
 
@@ -1458,17 +1510,20 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         else:
             self._last_energy_per_token = None
 
-        if self.training and self.repulsion_coef > 0:
-            assert self.repulsion_space == "weight", (
-                "training with sparse_forward needs repulsion_space='weight': output-space "
-                "repulsion requires all K expert outputs, which is what sparse_forward skips"
-            )
+        # Repulsion and the alignment probe both need all K expert outputs, which this path
+        # deliberately does not compute -- so build them for a small token subsample. Sharing one
+        # `gated_sub` means the probe measures exactly what the repulsion acts on, and it is the
+        # only way to SEE alignment in a sparse arm (which is the metric that motivated all this).
+        need_rep = self.training and self.repulsion_coef > 0 and self.repulsion_space != "weight"
+        need_probe = self.training and self._cos_probe_fires()
+        if need_rep or need_probe:
+            gated_sub = self._subsampled_gated(xf, W, spec, self.repulsion_subsample or 64)
+            if need_rep:
+                self._add_repulsion_loss_fused(gated_sub, W, pref)
+            if need_probe:
+                self._probe_expert_cos(gated_sub, W=W, pref=pref)
+        elif self.training and self.repulsion_coef > 0:
             self._add_repulsion_loss_weight()
-        if self.training and self.cos_probe_interval > 0:
-            raise AssertionError(
-                "the expert-cosine probe needs all K expert outputs; it cannot run under "
-                "sparse_forward. Set cos_probe_interval: 0."
-            )
 
         if not torch.compiler.is_compiling():
             self._log_metrics(p_full, out)
@@ -2196,6 +2251,7 @@ def build_boltzmann_moe(
     sparse_forward: bool = False,
     sparse_candidates: int = 0,
     sparse_capacity_factor: float = 1.25,
+    repulsion_subsample: int = 0,
     repulsion_tensor_idx: bool = False,
     init_method: str = "normal",
     initializer_range: float = 0.02,
@@ -2293,6 +2349,7 @@ def build_boltzmann_moe(
         sparse_backproj=sparse_backproj,
         sparse_forward=sparse_forward,
         sparse_candidates=sparse_candidates,
+        repulsion_subsample=repulsion_subsample,
         sparse_capacity_factor=sparse_capacity_factor,
         repulsion_tensor_idx=repulsion_tensor_idx,
     )
