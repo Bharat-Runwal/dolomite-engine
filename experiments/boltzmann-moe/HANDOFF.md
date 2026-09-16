@@ -1623,11 +1623,24 @@ sparse **0.762** s/step. Cross-validated -- the dense figure matches the live 90
 sparse figure matches 0.776 measured on a different host.
 
 **Do NOT compare s/step across jobs.** The same sparse config measured 0.75-0.80 s/step on one
-host and 1.71-1.84 on another, a factor of 2.3, i.e. larger than the effect. Mechanism, and it is
-NOT what §11.7's placement note says: the slow host had all 8 GPUs taken by four other jobs and
-gave us a NON-CONTIGUOUS set (0,1,2,6) while its CPU sat at 12% utilisation. GPU-side contention
-and interconnect topology, not dataloader starvation. I initially asserted the CPU explanation and
-the load data refuted it. Earlier figures of 2.55x / 2.15-2.31x were cross-job and are WITHDRAWN.
+host and 1.71-1.84 on another, a factor of 2.3, i.e. larger than the effect. Earlier figures of
+2.55x / 2.15-2.31x were cross-job and are WITHDRAWN.
+
+**We did NOT lose GPU exclusivity — be precise about this.** `mode=exclusive_process` implies
+`j_exclusive=yes`, so no other job can be assigned our devices, and none was. What is shared on a
+node regardless is the NVLink/NVSwitch fabric, PCIe, host memory bandwidth and the power envelope.
+The slow host had its OTHER four GPUs held by four jobs belonging to OTHER USERS (osieberl x3,
+keshavr x1), filling it to 8/8.
+
+Two explanations RULED OUT, both of which I asserted before checking:
+* **Not CPU/dataloader starvation** (what §11.7's placement note diagnoses): the slow host was at
+  12% CPU utilisation, the fast one at 67%. Occupied CPU is fine.
+* **Not allocation topology.** Every arm here gets a non-contiguous GPU set (2,3,4,6 / 0,1,2,4 /
+  5,2,3,4) and most run at full speed, so scattering is the norm, not the cause. A `glink=yes`
+  suggestion based on this was withdrawn.
+What remains is neighbour LOAD rather than neighbour count: s90k later ran at 0.756 s/step on a
+host with four neighbours. §11.8's watchdog note independently measured 2.35 -> 6.05 s/step "when
+neighbours arrive", which is the same effect and larger.
 
 **The micro-batch trap.** Dense + `fused_experts` OOMs at mbs 4 (the (4, 4096, 71680) intermediate
 is 2.19 GiB), so a naive same-allocation probe forces dense to mbs 1, which costs 1.65x by itself
