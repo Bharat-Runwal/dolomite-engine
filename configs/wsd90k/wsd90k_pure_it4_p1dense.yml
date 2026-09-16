@@ -1,0 +1,204 @@
+# ============================================================================================
+# PHASE 1 of 2 -- DENSE warm-up whose ONLY job is to TEACH THE PROXY ROUTER.
+# Phase 2 is wsd90k_pure_it4_sparse.yml. They share `save_path`, which IS the handoff: phase 2
+# resumes this checkpoint through submit_selfresuming.sh and the model sees no discontinuity
+# except the intended one (selection moves from exact energies to the proxy).
+#
+# WHY THIS PHASE IS NOT OPTIONAL. Measured 2026-09-16, and the two mechanisms are complementary:
+#   * DENSE distillation LEARNS the ranking fast. `_proxy_step` targets the full all-K routing
+#     distribution. Job 1709497: proxy_topk_agree 0.1193 -> 0.7906 in 280 steps (chance 0.125).
+#   * SPARSE in-path distillation CANNOT learn it from scratch. Its target is only the p=4
+#     candidate set, and over 240 steps agreement sat at 0.47-0.53 against a chance floor of
+#     k/p = 0.50 -- it never moved.
+#   * But sparse in-path distillation IS needed to MAINTAIN the proxy afterwards, because the
+#     routing target drifts (the Sinkhorn dual moves 3.44 -> 1.97 over training).
+# An arm launched straight into the sparse path therefore trains for its whole life on a router
+# that never learned. That mistake was made twice: once by an arm that trained with a FIXED
+# RANDOM router (alignment 0.698 -> 0.785, no metric logged), and once on 2026-09-16 when the
+# first wsd90k sparse pair was launched without this phase and had to be killed.
+#
+# RUN THIS TO ~500-1500 STEPS, CONFIRM proxy_topk_agree > 0.75, THEN LAUNCH PHASE 2.
+# Do not just let it run: every step here is a step at the DENSE cost.
+# ============================================================================================
+# ============================================================================================
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [4]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 286720      # I_e = 286720 / 16 = 17920 (the 12.14 it4 width)
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0               # 0.35 was calibrated under the INVERTED sign
+        repulsion_form: abs
+        repulsion_coef: 2.0          # WEIGHT-space value (rep_wt2), NOT the output-space 0.1
+        repulsion_space: weight      # output-space needs all K expert outputs, which the sparse
+                                     # path never computes. 12.13 ranks the substitutes by the
+                                     # output alignment they reach from scratch: weight-block
+                                     # cosines 0.43-0.44, subsampled output estimator 0.53->0.74
+                                     # (WORST -- unbiased in value, but high variance, and Adam
+                                     # damps a high-variance term relative to its mean).
+                                     # THIS IS THE EXPERIMENT 12.13 SAYS WAS NEVER RUN.
+        cos_probe_interval: 100      # affordable under sparsity and the ONLY way to see expert
+                                     # alignment in a sparse arm. Watch it: if it climbs toward
+                                     # 0.7+ the diversity control has failed and 12.13 repeats.            # output-space value; a sparse arm needs weight-space 2.0
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected-sign variant (ROUTING_SIGN_BUG_20260915.md) ----
+        e_sign_override: "pos"         # pre-flight 8: hopfield anti-routes without this
+        sinkhorn_iters: 3              # exact chemical potential, no clamp
+        sinkhorn_persist_mu: true      # pre-flight 9: absent => trained tilted, evaluated
+        sinkhorn_mu_iters: 4           # untilted. Worth +1.6-1.8 nats on a PURE stack (12.1).
+        repulsion_tensor_idx: true     # tensor indices: 1 graph, 0 breaks. NOT optional.
+        # ---- SPARSITY (HANDOFF 12.9-12.13) ----
+        renormalize_topk: true       # MANDATORY, not a tuning knob. With it FALSE, top-2 of 16
+                                     # carries only ~55% of the softmax mass and top-k is a
+                                     # SCALING rather than a sparsification (12.12). No sparse
+                                     # path can estimate the all-K denominator; this deletes it.
+                                     # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
+        fused_experts: true
+        sparse_forward: false        # *** PHASE 1: DENSE. *** This is the ONLY line that
+                                     # differs from phase 2. Dense means _proxy_step distils the
+                                     # proxy against the EXACT all-K routing distribution, which is
+                                     # the only way it learns the ranking: measured on
+                                     # s90k_p1dense (job 1709497), proxy_topk_agree went
+                                     # 0.1193 -> 0.7906 over 280 dense steps against a 0.125 chance
+                                     # floor. In the SPARSE path the target is only the p=4
+                                     # candidate set and agreement never moves off its 0.50 floor
+                                     # (0.47-0.53 over 240 steps). LEARN HERE, MAINTAIN IN PHASE 2.
+        sparse_candidates: 2         # the proxy proposes 2...
+        sparse_explore: 2            # ...plus a deterministic rotation of 2 more, TRAINING ONLY.
+                                     # Without it the proxy is never trained in the sparse path
+                                     # (proxy_loss_coef is a no-op) and the arm trains with a FIXED
+                                     # RANDOM router -- that happened once and went unnoticed
+                                     # because no metric logged. Costs speed: p=4's ceiling is
+                                     # ~4.3x, not 6.2x. Inference uses top-2, no exploration.
+        proxy_rank: 16
+        proxy_kind: subspace         # "quad" FAILS (0.348 vs 0.125 chance)
+        proxy_out_dim: 512
+        proxy_iters: 1               # per-iteration heads are EVAL-ONLY: the call counter and
+                                     # activation checkpointing are incompatible.
+        proxy_loss_coef: 0.01        # online distillation against the exact energies that
+                                     # exploration makes available
+        activation_function: gelu
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/wsd90k/wsd90k_pure_it4_sparse
+  save_interval: 1000                  # ~53 min. At 5000 a preempted arm can make ZERO net
+  max_to_keep: 2                       # progress. max_to_keep must be an int, never null.
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: wsd90k_pure_it4_p1dense
+
+training_parameters:
+  num_training_steps: 90000            # x 262144 tok = 23.59B tokens
+  eval_interval: 5000
+  micro_batch_size: 1                  # NOT 4. Phase 1 is DENSE and dense+fused_experts OOMs at
+                                       # mbs 4. mbs 4 is a PHASE-2-only affordance created by
+                                       # sparsity cutting the intermediate ~4x.
+  gradient_accumulation_steps: 8        # 8 GPU x 1 x 8 x 4096 = 262144 -- IDENTICAL to phase 2,
+                                       # so the model sees no tokens/step discontinuity.
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+# ---- THE WSD SCHEDULE ----------------------------------------------------------------------
+# CosineScheduler already implements WSD when num_constant_steps > 0: warmup -> factor 1.0
+# (i.e. HELD AT PEAK) -> cosine down to lr * lr_decay_factor. Verified scheduler.py:90-106.
+# No new scheduler class, no code change.
+#   warmup   1000  ( 1.1%)  linear 0 -> 2e-3
+#   stable  80000  (88.9%)  HELD at 2e-3   <-- the exploration phase; loss looks worse here
+#   decay    9000  (10.0%)  cosine 2e-3 -> 2e-4
+# 9000 is already generous: 12.17 shows the bonus lands inside a 1.4x reduction. 74000/15000
+# (17% decay) is the more conservative literature default if you would rather over-provision.
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1                 # -> 2e-4. Floor is inert (12.5), so 0.1 not 0.01.
+  num_warmup_steps: 1000
+  num_constant_steps: 80000
+  num_decay_steps: 9000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0
+
+# ---- HOW TO BRANCH A DECAY OFF THE STABLE TRUNK --------------------------------------------
+# Legal: arguments.py:151-157 only forbids load_lr_scheduler true WITH load_optimizer false.
+# Copy this file, then:
+#   num_training_steps: 4000
+#   num_warmup_steps: 0 / num_constant_steps: 0 / num_decay_steps: 4000   (lr stays 2e-3)
+#   a NEW save_path and wandb name
+#   load_args:
+#     load_path: <this trunk's save_path>
+#     load_optimizer: true          # keep the Adam moments -- do not restart them
+#     load_lr_scheduler: false      # fresh decay-only schedule
+#     load_starting_iteration: false
+# NOT yet run end-to-end: check the load_dataloader_state interaction before trusting it, and
+# on a first attempt confirm the logged lr actually starts at 2e-3 and decays.
