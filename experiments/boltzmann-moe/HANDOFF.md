@@ -2164,3 +2164,66 @@ The verification added after 12.16a/c did its job: two failed attempts printed G
 `no harness_results_*.json` rather than a plausible wrong number, and the successful one printed a
 path that could be checked. **Keep the pattern: assert the output file exists, and require the
 aggregator to name the path it read, before quoting any delta.**
+
+### 12.20 SCALING TO 700M / 1B: sizing formula, and it IS reachable before Sep 24 -- with sparse
+
+#### Exact parameter formula, calibrated against real checkpoints (not estimated)
+
+Read off `sandwich400`'s safetensors: moe **260.0M**, embed **102.8M**, attn 9.4M, other 28.3M,
+total **400.6M**. So, with `tie_word_embeddings: true` and V = 100352:
+
+```
+params(d, I_tot) = d*I_tot  +  V*d  +  9.4M*(d/1024)^2  +  28.3M*(d/1024)^2
+                   ^mixture    ^embed     ^attn            ^GPT wrappers etc
+```
+`d*I_tot` is EXACT for the mixture (1024 x 253952 = 260.05M vs 260.0M measured) because a hopfield
+expert carries ONE weight matrix, not two. Predicts 400.5M against an actual 400.6M.
+Per-token mixture MACs = `d * I_tot * iterations`, and the mixture is **97.6%** of per-token FLOPs
+on the sandwich, so wall clock scales with `d*I_tot` to within a couple of percent.
+
+#### Sizing and wall clock, K=16, 90k steps at 262144 tok/step = 23.59B tokens, sparse at ~1.85x
+
+| target | d | I_e | I_tot | FLOPs vs 400M | 8 GPU | 16 GPU | 32 GPU |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 400M | 1024 | 15841 | 253456 | 1.00x | **1.7 d** | 0.8 d | 0.4 d |
+| 700M | 1024 | 34151 | 546416 | 2.15x | 3.6 d | 1.8 d | 0.9 d |
+| **700M** | **1280** | **25031** | **400496** | **1.97x** | 3.3 d | **1.6 d** | 0.8 d |
+| 1B | 1280 | 39679 | 634864 | 3.12x | 5.2 d | 2.6 d | 1.3 d |
+| **1B** | **1536** | **30966** | **495456** | **2.93x** | 4.9 d | **2.4 d** | 1.2 d |
+
+**Scale `d`, not `I_tot`.** 700M at d=1280 costs 1.97x against 2.15x at d=1024; 1B at d=1536 costs
+2.93x against 3.12x at d=1280. A wider model needs LESS `I_tot` for the same parameter count because
+the tied embedding (V*d) absorbs more of the budget -- so the wider option is simultaneously cheaper
+in wall clock AND avoids the FFN:Attn imbalance that CLAUDE.md records as having sunk the B-series
+("do not scale the iso-param design"). Note the embedding is 15% of a 1B model at d=1536; V=100352
+is a large vocabulary at these scales.
+
+Chinchilla-optimal (~20 tok/param) is 8B / 14B / 20B, so 23.59B is at or past optimal for all three
+-- 90k steps is a defensible budget at every size, not an under-trained one.
+
+#### Schedule: 5.5 usable days (finish ~Sep 22 for a Sep 24 deadline)
+
+Feasible with the big two at 16 GPUs: the 400M pair (8 GPUs each) lands ~Sep 18-19, then 700M
+(~1.6 d) and 1B (~2.4 d) in parallel from ~Sep 19 land ~Sep 21 and ~Sep 22. Peak demand 48 GPUs
+against `grp_preemptable` at 736/6144 -- quota is not the constraint, PLACEMENT is (a single-GPU
+eval sat PEND 30 min tonight).
+
+**DENSE IS NOT REACHABLE AT THESE SIZES.** 1B dense would be ~4.5 d even at 16 GPUs, and 700M dense
+~3 d. Sparsity is what puts 700M/1B inside the deadline at all, which is the strategic answer to
+"3 days is too long": at 400M sparse turns 3.1-3.3 d into ~1.7 d, and at 1B it turns ~4.5 d into
+2.4 d.
+
+**And WSD means the budget need not be chosen now.** Launch with the 90k shape (stable phase at
+peak), and branch a 4k decay off the trunk at whatever step the deadline forces. Report the tokens
+actually reached. Under cosine an early stop leaves the model mid-decay and badly annealed; under
+WSD every checkpoint on the trunk is one short decay away from being publishable. On a hard deadline
+this property is worth more than the ~0.11 nat annealing bonus itself.
+
+#### Unverified at these sizes -- check before trusting the table
+
+* Sparse has never been run above 400M. The `micro_batch_size: 4` (16384 tok/call) requirement may
+  OOM at d=1536 / I_e=30966 even with sparsity's ~4x cut; the fallback is mbs 1 / ga 8 at some
+  speedup cost, and at mbs 1 the sandwich still measured 1.83-1.91x because its experts are wide.
+* The proxy's quality at larger K*I_e is unknown. The ranking task gets harder as experts multiply;
+  `proxy_out_dim: 512` and `proxy_rank: 16` were fitted at I_e ~15-18k.
+* The ~1.85x sparse factor is measured on the 400M sandwich and is NOT placement-controlled.
