@@ -193,7 +193,11 @@
 >
 > **CANONICAL (2026-09-14 onward): `Avg11`**, the paper `tab:scaling` recipe, the
 > SAME number the EGPT-RL / FET colleagues headline — so ours are directly
-> comparable to theirs. **Compute it with `experiments/eval_scripts/compute_avg11.py`**
+> comparable to theirs. **`experiments/eval_scripts/compute_avg11.py` IS THE REFERENCE
+> IMPLEMENTATION** — it encodes the colleagues' recipe, it is tracked in the repo as of
+> 2026-09-16, and it reproduces the published values exactly (independently re-evaluated
+> 2026-09-16: `pure_hop_T12_sink` 40.96, `iclr_hop_K32_top2_sink` 44.58). Run it rather than
+> re-deriving the recipe. **Compute it with `experiments/eval_scripts/compute_avg11.py`**
 > (validated to reproduce the colleagues' stored Avg11 on the two shared
 > `math_egptdual` seed checkpoints to +0.004pp). Recipe:
 > - **11-task unweighted mean.** `acc_norm`: arc_challenge, arc_easy, hellaswag,

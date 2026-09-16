@@ -38,6 +38,39 @@
         OOMs at mbs 4 with I_tot=71680, so use mbs 1 x ga 16 unless sparse_forward is on (it cuts
         that intermediate 6.4x, which may re-enable mbs 4).
 
+### THE RETRAIN RECIPE — settled parts (as of 2026-09-16, pending 2 inputs)
+
+| setting | value | evidence |
+|---|---|---|
+| `renormalize_topk` | **true** | removes the all-K denominator, which is ~55% of the softmax mass (§12.12). FREE when trained: §12.3 has 44.54 vs 44.58. Retrofitting costs +0.483. |
+| `sparse_forward` | true | 4.69x at p=k; expect ~3.2x at p=4 (76% of the 4.3x ceiling) |
+| `sparse_candidates` | **4** | recall 0.973, and 0.946 of tokens get BIT-IDENTICAL routing to dense. p=6 gives 0.988/0.976 for a 3.2x ceiling instead. |
+| `proxy_kind` / `proxy_rank` / `proxy_out_dim` | subspace / 16 / 512 | 0.30% of dense MACs; the "quad" head fails (0.348 vs a 0.125 floor) |
+| `proxy_iters` | **1** | per-iteration heads (+0.05) are EVAL-only: a call counter is unsound under activation checkpointing |
+| `proxy_loss_coef` | 0.01 | online KL distillation, x detached so it cannot degrade the model |
+| `proxy_route` | phase 1 false, phase 2 true | phase 1 lets the proxy learn from the exact router; with renorm + proxy_route, flipping sparse_forward on is then ~numerically inert |
+| `repulsion_space` | weight | REQUIRED: output-space needs all K expert outputs. coef **BLOCKED** on rep_* sweep |
+| `micro_batch_size` | 4 (16384 tok/call) | below ~16384 the speedup collapses (1.36x at 4096). Sparse cuts the intermediate 6.4x so the mbs-4 OOM should not recur — VERIFY before the long run. |
+| `fused_experts` | true | required for the proxy to train at all (`_forward_looped` never calls `_proxy_step`) |
+
+**Two inputs still missing:** (a) the weight-space repulsion coefficient (rep_* sweep), (b) the
+full Avg11 delta for proxy selection on both models (benchpure/benchhyb). Do NOT launch without
+both, and confirm the END-TO-END step time on 4 GPUs before trusting any of the block numbers.
+
+**Calibrating the proxy's magnitudes (`--mse_coef`) IS a large part of the fix** — I claimed the
+opposite an hour earlier, from agreement and the selection rung, and the target metric overturned
+it. With lambda = 1.0 the full sparse path at p=2 goes **3.4346 -> 1.7920** bits/byte, i.e. the
+denominator error falls from +2.32 to +0.66 nats. The cost is real but small: agreement 0.883 ->
+0.850, and selection alone 1.1161 -> 1.1339.
+
+The two fixes are COMPLEMENTARY and address different halves of the same error:
+  * calibration fixes the SCALE of the proxy-supplied denominator terms;
+  * over-selection reduces their NUMBER (recall 0.882 -> 0.973 at p=4, with 0.946 of tokens
+    getting bit-identical routing);
+  * `renormalize_topk: true` removes the term ENTIRELY, and is free when trained.
+Use all three unless a measurement says otherwise. LESSON: agreement and the selection rung are
+NOT proxies for the denominator error -- only a sparse rung measures it.
+
 ### In progress
 - [ ] `pladder2` (1706725): p in {K,3,4,6,8} bits/byte. p=K is the correctness self-test.
 - [ ] `benchpure` (1706727) / `benchhyb` (1706728): FULL Avg11 + wikitext, dense vs

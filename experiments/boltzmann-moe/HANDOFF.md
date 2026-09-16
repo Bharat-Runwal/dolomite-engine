@@ -5,7 +5,35 @@ doc you need. This file carries (a) orientation, (b) the things that exist
 nowhere else, and (c) the 2026-09-12 session findings, which materially change
 the project's conclusions.
 
-Last updated: 2026-09-15 (ICLR draft migrated to Avg11).
+Last updated: 2026-09-16 (true sparsity §12.9-12.12; eval-metric banner added).
+
+> ## 📏 EVAL METRIC — THE REFERENCE IMPLEMENTATION IS A SCRIPT, NOT A DESCRIPTION
+>
+> **Every headline number in this project and in the ICLR paper is `Avg11`, and the reference is
+> `experiments/eval_scripts/compute_avg11.py`.** Run that; do not re-derive the recipe by hand and
+> do not read an "Avg" from an older doc without checking which convention it uses.
+>
+> ```bash
+> python experiments/eval_scripts/compute_avg11.py <run_dir_or_unsharded_dir>
+> ```
+>
+> * **11-task unweighted mean.** `acc_norm`: arc_challenge, arc_easy, hellaswag, openbookqa, piqa,
+>   sciq. `acc`: boolq, copa, winogrande, race, lambada_openai.
+> * **MMLU (acc) and GSM8K-CoT (flexible-extract) are reported SEPARATELY and are NEVER folded into
+>   the mean.** WikiText likewise separate — and report it as **bits/byte**, not `word_perplexity`
+>   (they differ by `exp(bpb * 3.7066)`, which turns a 1.55x regression into a 7.8x one).
+> * **This is the colleagues' recipe**, so our numbers are directly comparable to the EGPT-RL / FET
+>   series. Source of truth: `~/Code/GPT-experiments/projects/EGPT-RL/RESULTS.md:247-249`.
+>   `compute_avg11.py` is validated against their stored Avg11 on the two shared
+>   `math_egptdual` seed checkpoints to within 0.004pp.
+> * The script is now TRACKED in the repo (2026-09-16). It reproduces the published values exactly
+>   — independently re-evaluated this session: `pure_hop_T12_sink` **40.96** (§12.2) and
+>   `iclr_hop_K32_top2_sink` **44.58** (§12.3).
+> * **Two superseded conventions appear in older sections of this file — never mix them with
+>   Avg11.** `avg9` (9 tasks, MMLU excluded, race/lambada absent — the pre-`pyarrow>=20` bug) and
+>   `avg10` (10 tasks, MMLU INCLUDED, race/lambada EXCLUDED). Avg11 runs ~3pp BELOW avg10 because
+>   race (~0.28) and lambada (~0.23) sit near chance at our scale: a scoring-convention gap, not a
+>   model effect. Full detail in `CLAUDE.md`'s metric block and in the script's own docstring.
 
 > ## 📄 ACTIVE PAPER — the ICLR draft is the ONLY paper we are writing right now
 >
@@ -1345,9 +1373,10 @@ on `grp_preemptable` (1397/6144). `blimits`, not `bjobs`, is the authoritative q
 3. **Paper.** Pushed through `48da63b`. Open `\CC` items: the un-remeasured expert-cosine bound;
    the token-scaling paragraph pending §12.6; and the 400M pure router comparison, whose "+0.19pp
    in favour of energy" measures the SIGN-INVERTED router and must not be quoted as support.
-4. **Untracked and NOT in the repo**: `experiments/eval_scripts/compute_avg11.py` plus six Avg11
-   helpers. `compare_sign_correction_20260915.py` IMPORTS compute_avg11, so a fresh clone cannot
-   run it. Decide whether to track them.
+4. ~~**Untracked and NOT in the repo**: `experiments/eval_scripts/compute_avg11.py` plus six Avg11
+   helpers.~~ **DONE 2026-09-16** — `compute_avg11.py` and the six helpers are now tracked
+   (commit `8e726fa3`), so a fresh clone can reproduce every headline number. It is THE reference
+   implementation of the metric; see the banner at the top of this file.
 
 ### 12.8 Process rules added this session
 
