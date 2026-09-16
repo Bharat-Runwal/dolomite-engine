@@ -1,0 +1,227 @@
+# ============================================================================================
+# 2-NODE WEDGE PROBE. Throwaway. 120 steps. Do NOT read quality off this.
+#
+# QUESTION: does `fused_experts` still wedge at 16 GPU / 2 nodes?
+# ACCEL_FINDINGS_20260915.md recorded it hanging there -- 17+ min with NO first step and ZERO
+# inductor cache writes, against 98 s to first step unfused -- and it was reverted with the cause
+# undiagnosed. That doc names three suspects, and the LEADING one has since been fixed:
+#   (2) repulsion drew its pair indices with Python `random` into LISTS. dynamo cannot trace that,
+#       specialises on the list values, and it cost 2-3 graph breaks and ~17 recompiles per 8 calls.
+#       `repulsion_tensor_idx: true` (landed fca20d65, 2026-09-15) makes them tensors -- data, not
+#       graph constants -- for 1 graph and 0 breaks. It is explicitly labelled in mlp.py as "the
+#       leading suspect for the fused_experts multi-node hang", and it independently fixed a 2-node
+#       job that had stalled 13 min.
+# This config enables it, AND uses repulsion_space: weight, which avoids the output-space einsum
+# on data-dependent indices altogether. Either change alone could have removed the wedge. Neither
+# has ever been run at 2 nodes, so this probe is the missing test.
+#
+# PASS = a first step within ~5 min and steps continuing past the sparse switch at step 40.
+# FAIL = no first step (the wedge signature). Compare: 98 s to first step is the healthy baseline.
+# sparse_start_step is 40 so the probe also exercises the dense->sparse RECOMPILE at 2 nodes,
+# which is the one part of sparse_start_step that CPU tests cannot reach.
+# ============================================================================================
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 4, 1]        # GPT x1, energy block x4, GPT x1
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 3
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gattn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+      - *gattn
+    mlp_blocks:
+      - &gffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 253952      # I_e = 253952 / 16 = 15872 -- 3.5x the pure T12's 4480,
+                                       # which is why sparsity pays here even at mbs 1 (12.15)
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 2.0          # WEIGHT-space value (rep_wt2), NOT the output-space 0.1
+        repulsion_space: weight      # output-space needs all K expert outputs, which the sparse
+                                     # path never computes. 12.13 ranks the substitutes by the
+                                     # output alignment they reach from scratch: weight-block
+                                     # cosines 0.43-0.44, subsampled output estimator 0.53->0.74
+                                     # (WORST -- unbiased in value, but high variance, and Adam
+                                     # damps a high-variance term relative to its mean).
+                                     # THIS IS THE EXPERIMENT 12.13 SAYS WAS NEVER RUN.
+        cos_probe_interval: 100      # affordable under sparsity and the ONLY way to see expert
+                                     # alignment in a sparse arm. Watch it: if it climbs toward
+                                     # 0.7+ the diversity control has failed and 12.13 repeats.            # output-space; a sparse arm needs weight-space 2.0
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected-sign variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 3
+        sinkhorn_persist_mu: true      # ADDED vs parent -- see deviation (a) in the header
+        sinkhorn_mu_iters: 4           # == layer_iterations[1]. Parent had 1 against a 4x block.
+        repulsion_tensor_idx: true
+        # ---- SPARSITY (HANDOFF 12.9-12.13) ----
+        renormalize_topk: true       # MANDATORY, not a tuning knob. With it FALSE, top-2 of 16
+                                     # carries only ~55% of the softmax mass and top-k is a
+                                     # SCALING rather than a sparsification (12.12). No sparse
+                                     # path can estimate the all-K denominator; this deletes it.
+                                     # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
+        fused_experts: true
+        sparse_start_step: 40       # <<< DENSE until step 300, SPARSE from 300 on, IN ONE JOB.
+                                     # 300, not 500: MEASURED 2026-09-17 on the dense phase-1 arms
+                                     # at 262144 tok/step, proxy_topk_agree hit 0.7712 (sandwich)
+                                     # and 0.6982 (pure) by step 200 -- the sandwich already past
+                                     # the 0.75 handoff threshold, and faster than the reference
+                                     # run (0.7906 at 280). These arms run 524288 tok/step, DOUBLE
+                                     # that, so the proxy sees 2x the tokens per step and should
+                                     # clear it sooner still. 300 keeps margin at 0.5% of the run.
+                                     # Steps 1-499 take _forward_fused, whose _proxy_step distils
+                                     # the proxy against the EXACT all-K routing distribution --
+                                     # the only regime in which it learns the ranking (reference:
+                                     # 0.1193 -> 0.7906 in 280 dense steps). From 500 the sparse
+                                     # path MAINTAINS it as the routing target drifts.
+                                     # Costs ONE torch.compile recompile at step 500; the flag is
+                                     # a Python bool derived from global_step, so every rank flips
+                                     # on the same step with no communication.
+        sparse_forward: true         # skips BOTH projections for unselected experts. EXACT given
+                                     # the selection (4e-16), and sparse_candidates=K reproduces
+                                     # dense bit-for-bit on a real checkpoint.
+        sparse_candidates: 2         # the proxy proposes 2...
+        sparse_explore: 2            # ...plus a deterministic rotation of 2 more, TRAINING ONLY.
+                                     # Without it the proxy is never trained in the sparse path
+                                     # (proxy_loss_coef is a no-op) and the arm trains with a FIXED
+                                     # RANDOM router -- that happened once and went unnoticed
+                                     # because no metric logged. Costs speed: p=4's ceiling is
+                                     # ~4.3x, not 6.2x. Inference uses top-2, no exploration.
+        proxy_rank: 16
+        proxy_kind: subspace         # "quad" FAILS (0.348 vs 0.125 chance)
+        proxy_out_dim: 512
+        proxy_iters: 1               # per-iteration heads are EVAL-ONLY: the call counter and
+                                     # activation checkpointing are incompatible.
+        proxy_loss_coef: 0.01        # online distillation against the exact energies that
+                                     # exploration makes available
+        activation_function: gelu
+        add_bias: false
+      - *gffn
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/probe2node/p2n_sandwich
+  save_interval: 100000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: p2n_sandwich
+
+training_parameters:
+  num_training_steps: 120            # x 524288 tok = 32.00B tokens -- IDENTICAL to scale32B
+  eval_interval: 5000
+  micro_batch_size: 1                  # ONE micro_batch_size for BOTH phases, which is what makes
+                                       # a single job possible: mbs is a dataloader parameter, not a
+                                       # model attribute, so it cannot be flipped mid-run the way
+                                       # sparse_forward can. Dense needs mbs 1 (mbs 4 dense is
+                                       # 8.75 GiB and OOMs), so mbs 1 it is.
+                                       # COST: 4096 tok/call instead of 16384, so less than the peak
+                                       # sparse speedup. Acceptable HERE because both 400M shapes have
+                                       # wide experts (I_e 15872-17920) and 12.15 measured the sandwich
+                                       # at 1.83-1.91x even at mbs 1. Do NOT copy this to a hybrid
+                                       # shape with small I_e, where 4096 tok/call LOSES (0.41-0.49x).
+  gradient_accumulation_steps: 8        # *** 16 GPU x 1 x 8 x 4096 = 524288 tok/step *** -- this is
+                                       # the 16-GPU variant. ga is HALVED from the 8-GPU config's 16
+                                       # precisely to hold tokens/step fixed. Running THIS file on
+                                       # 8 GPUs gives 262144 (half the tokens); running the 8-GPU
+                                       # file on 16 gives 1048576 (double). Pre-flight 2/3.
+                                       # Original note: 8 GPU x 1 x 16 x 4096 = 524288 -- IDENTICAL to
+                                       # scale32B (16 x 1 x 8), so steps AND tokens both match and
+                                       # the LR schedules line up point-for-point.
+                                       # NOTE 8 GPUs here, not 4: at 4 GPUs this is 262144 and the
+                                       # run silently trains on HALF the tokens. That exact error
+                                       # made iclr_big_hop_pure_sink's -0.99pp unreadable.
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3                           # NOT lowered -- 12.17 refutes "2e-3 was too high"
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+# ---- THE WSD SCHEDULE ----------------------------------------------------------------------
+#   warmup   1000  ( 1.1%)  linear 0 -> 2e-3
+#   stable  80000  (88.9%)  HELD at 2e-3   <-- displayed loss looks WORSE here; that is the
+#                                              temperature penalty, not slower learning
+#   decay    9000  (10.0%)  cosine 2e-3 -> 2e-4
+# CosineScheduler implements exactly this once num_constant_steps > 0 (scheduler.py:90-106):
+# warmup -> factor 1.0 -> cosine to lr_decay_factor. No code change.
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000               # matches scale32B, so the two align step-for-step
+  num_constant_steps: 53000            # 86.8% HELD AT PEAK
+  num_decay_steps: 6035                # 9.9%; 2000+53000+6035 = 61035  <- PRE-FLIGHT 1
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0

@@ -132,8 +132,19 @@
 >
 > | script | use |
 > |---|---|
+> | **`scripts/bsub/submit_train.sh <name> <cfg> <gpus> [queue] [wall] [mem]`** | **ANY training run. Handles the node shape.** |
+> | `scripts/bsub/submit_selfresuming.sh <name> <cfg> <gpus> [wall] [mem]` | older single-node-only variant (preemptable) |
 > | `scripts/bsub/submit_gpu_test.sh <job> "<cmd>" [gpus] [wall] [mem]` | generic one-off GPU test/benchmark |
 > | `scripts/bsub/bench_sparse.sh` | the exact sparsity wall-clock sweep behind §12.9 |
+>
+> **NEVER hand-roll a training bsub.** Two failures on 2026-09-16 alone:
+> `-gpu "num=16/task" -n 1` asks for 16 GPUs ON ONE HOST, and hosts here have 8 — LSF answers
+> "There are no suitable hosts for the job" and the job PENDs forever. 16 GPUs means **2 nodes x 8**:
+> `-n 2 -gpu num=8/task -R span[ptile=1]` plus `blaunch`. And submitting to `normal`/`grp_ebm` while
+> it sits at 32/32 pends indefinitely — check with `blimits`, NOT `bjobs`.
+> `submit_train.sh` encodes the node shape, the ptile/blaunch rules, the `ut<0.5` host filter, the
+> BAD_HOSTS exclusion, and run-time `load_args` resolution. Pass `ebm` as the queue for
+> normal/grp_ebm; the default is preemptable.
 >
 > ```bash
 > bash scripts/bsub/submit_gpu_test.sh mytest \
