@@ -24,6 +24,53 @@
 >
 > Legacy avg9→avg10: `restate_avg9_to_avg10_20260912.py --md` / `AVG10_RESTATED.md`.
 
+## 2026-09-16 — TRUE SPARSITY: 4.69x measured, and the proxy router diagnosed
+
+Full detail in `HANDOFF.md` §12.9-12.11.
+
+**Speedup** (H100, compiled, forward+backward, at each arm's REAL tokens/call). `sparse_forward`
+(skip both projections for unselected experts) = **4.69x** on the pure_T12 block shape,
+2.09-2.37x on the hybrids. That is past the `1/2(1+k/K)` = **1.73x** floor which binds any EXACT
+router, and breaking it is the whole point of the proxy. `sparse_backproj` alone = 1.18-1.35x.
+**The speedup is batch-size dependent and the sign FLIPS**: at 4096 tokens/call `sparse_forward`
+LOSES on both hybrid shapes (0.41-0.49x). Never quote a sparsity number without the per-call
+token count.
+
+**Correctness.** With an oracle proxy, and independently with `sparse_candidates = n_experts`, the
+sparse path reproduces the dense output to 4-8e-16 in every routing configuration. So the proxy's
+prediction error is the ENTIRE approximation -- there is nothing to audit in the dispatch.
+
+**Quality** on `pure_hop_T12_sink`, wikitext bits/byte, dense = 1.0996:
+
+| configuration | bpb | attributable to |
+|---|---:|---|
+| + proxy SELECTION, exact energy weights | 1.1161 | **+0.0165** -- selection is cheap |
+| + `renormalize_topk: true` | 1.5996 | +0.483 -- a MODEL change, avoid it |
+| `sparse_forward` + renorm | 1.9177 | +0.318 sparse machinery |
+| `sparse_forward` as-trained | 3.4346 | proxy-filled denominator, -1.52 nats |
+
+Proxy selection is nearly free; the damage was the softmax DENOMINATOR. The proxy ranks well and
+sums badly. Fix: `sparse_candidates = p` over-selects, and the exact energies of the p candidates
+both re-rank to the final top-k and supply p exact denominator terms.
+
+**The proxy.** §7.6's "0.90 top-2" was for the exact energy restricted to a rank-r subspace, NOT
+for the diagonal-quadratic head it recommended; fitted post-hoc that head gives 0.348 against a
+`k/K` = 0.125 chance floor. Two corrections: `proxy_kind="subspace"` keeps the true `gelu(.)^2`,
+and training on the routing **KL** rather than energy MSE. Closed-form least squares gives
+0.33-0.60; 400 KL steps on the SAME parameterisation gives **0.82-0.88** on a held-out split.
+Per-iteration heads add ~+0.05 -- agreement ranged 0.080 (BELOW chance, i.e. anti-correlated) to
+0.592 across the 12 iterations of the shared block. `proxy_out_dim=512` is free in accuracy at
+0.15% of dense MACs, and is required: the full-`I_e` form holds the same `(T,K,I_e)` activations
+as the dense path.
+
+**Ops.** `t90k_pure_T12` had been restarting from step 0 on every preemption (~2670 steps lost):
+the watchdog resolved `load_args` at SUBMIT time while LSF requeues the original command. Fixed in
+both the configs and the watchdog (now resolved at run time). `slope90k_1blk_sink` retired.
+
+**Three silent no-ops found and closed:** `proxy_route` was set and never read; `sparse_backproj`
+never reached the pydantic config so was unusable from YAML; and `proxy_rank > 0` with
+`fused_experts: false` trains nothing, because `_forward_looped` never calls `_proxy_step`.
+
 ## 2026-09-14 — MoE training-step benchmark → repulsion is the cheap win; two-stage is not
 
 Goal: find where the Boltzmann arm's ~6.75 s/step goes vs gptswitch's ~1.34 s/step
