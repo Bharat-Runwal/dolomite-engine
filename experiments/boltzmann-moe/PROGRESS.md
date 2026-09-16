@@ -938,3 +938,37 @@ deep recurrence does not pay off in this architecture; the opposite is true.
 lower is clearly worse. So LR is a ~0.04-nat lever where the mu fix is a 1.6-1.8-nat one, i.e.
 ~40x smaller. The pure model's steeper log-log slope (-0.097 vs -0.082) means it wants more
 TOKENS, not a different step size.
+
+### 2026-09-16 (HEADLINE): the mu bug INVERTED the depth scaling law of pure-energy stacks
+
+Complete dose-response, all four pure arms plus the hybrid reference, bits/byte on wikitext
+(tokenizer-independent; word_perplexity exponentiates this by ~3.7 and should not be used for
+cross-model comparison):
+
+| arm | iters | bpb, mu DROPPED | bpb, mu RESTORED | Avg11 restored |
+|---|---:|---:|---:|---:|
+| hybrid K16 top2 | 6 (1 MoE of 7) | 1.0000 | -- | 43.50 |
+| big_hop_pure | 4 | 1.2524 | 1.2103 | 39.43 |
+| pure 1blk | 8 | 1.3966 | 1.1525 | 40.43 |
+| pure isoP | 8 | 1.5530 | 1.1201 | 40.42 |
+| **pure T12** | **12** | **1.6034** | **1.0996** | **40.96** |
+
+**Both columns are monotone, in OPPOSITE directions.**
+  mu dropped   : 4 -> 12 iterations makes it WORSE  (1.2524 -> 1.6034)
+  mu restored  : 4 -> 12 iterations makes it BETTER (1.2103 -> 1.0996)
+
+So T12 is the best pure-energy model on every axis (bpb 1.0996, Avg11 40.96), closing on the
+hybrid (1.0000, 43.50) -- and under the bug it was the WORST of the set.
+
+WHY THIS MATTERS BEYOND THE BUG. Anyone reading the pre-fix numbers would have concluded that
+depth hurts in a pure-energy stack, and would have concluded it MOST confidently from the deepest
+arm, which is exactly the one that shows the opposite. Depth was never the problem: evaluating a
+mu-tilted router with no tilt is, and the penalty compounds per iteration, so depth wore the
+blame. Any architecture claim about recurrence depth measured before 2026-09-16 is suspect for
+this reason alone.
+
+CONSEQUENCES:
+* `app:frontier`'s pure row (40.43, the 8-iteration arm) is correct but is NO LONGER the best pure
+  result -- T12 reaches 40.96. Whether T12 becomes a reported row is an open editorial decision.
+* A 400M design should push iterations UP, not down -- the opposite of what the pre-fix data
+  implied.
