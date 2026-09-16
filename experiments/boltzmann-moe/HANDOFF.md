@@ -1847,3 +1847,32 @@ nothing for 30 min on a healthy job; one that fired on a section HEADER instead 
 that read a single failed `bjobs` query as job death and reported a false alarm; and the
 `d400_it4_*` glob that also matched `d400_it4_5x_*` and printed two identical rows.
 **Confirm anything a monitor reports by job ID before acting on it.**
+
+#### 12.16a CORRECTION — the sandwich proxy-selection result does NOT exist yet
+
+A monitor reported the sandwich at **+0.00pp** (dense 43.36 / bpb 1.0247, proxy-selected 43.36 /
+1.0247) and concluded "hybrid-like, launch `sw400_sparse`". **That was an artifact. The gate is NOT
+passed. Do not launch on it.**
+
+Both Avg11 lines cite the SAME directory, `unsharded_mucal/` — the DENSE checkpoint — with
+timestamps 19:05 and 19:39. `ablate/C_proxysel/` contains **no `harness_results*.json` at all**. So
+the second eval re-evaluated the dense model; nothing measured proxy selection.
+
+Identical-to-4-decimals bits/byte is what gave it away: if routing changed for even a few tokens
+bpb would move. **Treat an exactly-zero delta as evidence of a plumbing fault, not of robustness.**
+
+Likely mechanism: `eval_harness.py` does NOT honour `--output_path` (found earlier today — it
+writes `harness_results_<timestamp>.json` next to the model), and `C_proxysel/model.safetensors` is
+a SYMLINK into `unsharded_sparse_r16m512/`, so results did not land where `compute_avg11.py` looks;
+it then fell back to the newest results in the tree.
+
+**To redo it properly:** run the harness against `ablate/C_proxysel` and then VERIFY that
+`ablate/C_proxysel/harness_results*.json` exists and that `compute_avg11.py` cites that path,
+before reading any delta. The proxy tensors themselves are present and correctly shaped —
+`proxy_V (4, 16, 1024, 16)`, `proxy_B (4, 16, 512, 16)`, i.e. 4 per-iteration heads x 16 experts —
+and `C_proxysel/config.json` correctly has `proxy_route: true, fused_experts: true, proxy_rank: 16,
+proxy_iters: 4, sparse_forward: false`. So only the eval bookkeeping is at fault, not the fit.
+
+One genuine byproduct: the harness is **deterministic to 4 decimal places** across two independent
+runs of the same checkpoint (43.36 / 1.0247 both times). That is a useful noise floor — it means a
+real Avg11 delta of 0.1pp is signal, not run-to-run variation.
