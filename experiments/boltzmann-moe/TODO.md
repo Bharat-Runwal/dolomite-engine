@@ -501,3 +501,37 @@ Axes to sweep (in priority order):
 - [ ] **Tell colleagues `sinkhorn_persist_mu: true` + `sinkhorn_mu_iters: <layer_iterations>`
       is REQUIRED** for pure/recurrence-heavy stacks. This supersedes the earlier
       "sinkhorn for hybrids only" note, which was based on the pre-fix measurements.
+
+## 2026-09-16 (part 2) — 400M launch queue and the WSD schedule
+
+- [ ] **THE GATE: sandwich proxy-selection Avg11 vs the dense 43.36.** Job `1716267` (PEND as of
+      20:55, no free exclusive GPU; `grp_preemptable` only 736/6144, so it is GPU scarcity not
+      quota). Near **−0.03pp** (hybrid-like) ⇒ launch `sw400_sparse`; near **−0.68pp** (pure-like)
+      ⇒ do not, and §12.15's mu-based prediction does not transfer.
+      **Before reading any delta, verify `ablate/C_proxysel/harness_results*.json` EXISTS and that
+      `compute_avg11.py` cites that path** — the first attempt reported +0.00pp off the dense
+      checkpoint (§12.16a/b). The job now `ls`-es the path before and after and prints
+      GATE-CLEAN / GATE-FAIL.
+- [ ] **Launch the two 90k WSD arms** — `configs/wsd90k/wsd90k_pure_it4.yml` and
+      `wsd90k_sandwich.yml` (committed `0cc32ebe`, all 10 pre-flight checks pass).
+      **8 GPUs each, non-negotiable**: at 4 they silently halve tokens/step to 131072, the error
+      that made `iclr_big_hop_pure_sink`'s −0.99pp unreadable. ~3.3 and ~3.1 days respectively.
+      Use `submit_selfresuming.sh` (resolves `load_args` per requeue) — do NOT add `load_args` to
+      the configs.
+      ⚠ 16 new GPUs on top of ~28 already committed, on a queue that currently cannot place a
+      single-GPU eval. Consider starting one and watching its placement before committing both.
+- [ ] **`sw400_sparse` — committed and pre-flighted, NOT launched.** Gated on the item above.
+- [ ] **Validate the decay-branch recipe end-to-end** (bottom of `wsd90k_pure_it4.yml`).
+      `load_optimizer: true` + `load_lr_scheduler: false` is legal per `arguments.py:151-157`, but
+      the `load_dataloader_state` interaction with `load_starting_iteration: false` is unchecked.
+      This is what makes a partial 90k run harvestable, so it should be proven on a throwaway
+      checkpoint BEFORE it is needed under deadline pressure.
+- [ ] **Read out `sw2k_sparse_c10x` (1714132) at step 2000** — the completed-decay endpoint against
+      `sw2k_sparse`'s at-peak 3.9413. §12.17 predicts the gap stays ~0.11, not that it grows.
+- [ ] **Decide the pure 400M iteration count for a 90k budget.** `it4` is in the config because it
+      is the only shape measured at 400M, but §12.14's ordering is established at ~1000 steps and
+      the gap was narrowing. The iso-FLOP hedge is a three-line change (`layer_iterations: [8]`,
+      `sinkhorn_mu_iters: 8`, `intermediate_size: 143360`) — all three together or not at all.
+- [ ] **Fix `bench_proxysel_one.sh` to fail loudly** rather than `|| echo "... FAILED"`, and make
+      `compute_avg11.py` refuse to glob outside the directory it was handed. This pattern has now
+      produced two wrong numbers in two days.

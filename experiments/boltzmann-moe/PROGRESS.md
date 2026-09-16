@@ -1019,3 +1019,77 @@ CONSEQUENCES:
   result -- T12 reaches 40.96. Whether T12 becomes a reported row is an open editorial decision.
 * A 400M design should push iterations UP, not down -- the opposite of what the pre-fix data
   implied.
+
+## 2026-09-16 (part 2) — depth-vs-width at 400M, the annealing bonus, and the WSD redesign
+
+Full detail in `HANDOFF.md` §12.14–12.17. Four things landed, one of which **corrects the closing
+line of the entry immediately above.**
+
+### ⚠ CORRECTION to "a 400M design should push iterations UP, not down"
+
+That conclusion came from the 134M mu-restored depth scan (§12.2), where bits/byte was monotone in
+depth (4 iters 1.2103 → 12 iters 1.0996). A direct **iso-FLOP ablation at 400M** (§12.14) found the
+**opposite ordering**: three arms at 1.17 G MAC/token, d=1024, `it4` (I_e 17920, 401M params) beat
+`it8` (8960, 254M) beat `it12` (5952, 204M) at **every logged step**, and `it4` was additionally
+**22% faster per step** because iterations are sequential in a launch-bound block. Iterations share
+weights, so holding FLOPs fixed while adding depth forces width — and parameters — down.
+
+Both can hold: parameters help early, compute-efficiency pays late, and §12.2's arms ran 15k+ steps
+against these ~1000. **But the 400M design guidance is now the reverse of what the line above says,
+at least at ~1000 steps.** The it4-minus-it8 gap narrows monotonically (0.258 → 0.132 over steps
+100–500) and would cross somewhere past a few thousand steps, so **"width wins" is established at
+~1000 steps and NOT at 90000.** Nothing measured settles which regime a 90k run lands in. Iso-FLOP
+is also not iso-time; anyone repeating this must report both axes.
+
+### The annealing bonus is a one-time, saturating payment (§12.17) — this drove the schedule choice
+
+`sw2k_sparse` (held at peak 1e-3) vs `sw2k_sparse_c10x` (same peak, decay completed in 2000 steps),
+identical otherwise. 100-step means: the gap opens 0.005 (step 400) → 0.116 (800) → ~0.11 flat
+through 1600. **The whole ~0.11 nats is realised while LR falls 1e-3 → 7.04e-4, a 1.4× reduction;
+the further 3× to 2.37e-4 adds nothing.**
+
+So the fast-drop arm does not have a better trajectory — it has the same trajectory plus a constant
+offset. Decaying early forfeits progress in exchange for a bonus available at any moment. Corroborated
+from the other side by §12.4 (60k steps pinned at a 2e-4 floor bought 0.015–0.019 nats) and §12.5
+(LR floor inert across a 50× range).
+
+**Also: "maybe the 2e-3 peak was too high" is NOT supported.** `sw2k_sparse_5e4` is behind the 1e-3
+arm at every step with the gap not closing (step 800: 4.6525 vs 4.5515; step 1600: 4.1231 vs 4.0492).
+And the "struggles early, then drops fast and steady" shape that prompted the doubt is the *expected*
+signature of a high peak: measured loss = valley progress + a temperature penalty growing with lr.
+**Do not lower a peak on early-loss appearance.**
+
+Consequence: `configs/wsd90k/wsd90k_pure_it4.yml` and `wsd90k_sandwich.yml` — true WSD, warmup 1000,
+**held at peak 2e-3 for 80000 steps**, cosine to 2e-4 over the last 9000. No code change;
+`CosineScheduler` already does WSD once `num_constant_steps > 0`. Both at 262144 tok/step (8 GPUs),
+23.59B tokens, verified by resolving the real scheduler. The deadline-relevant property: the trunk
+sits at peak, so a decay can be branched off ANY checkpoint — a run stopped at 60% is still
+harvestable, which is not true under cosine.
+
+### Sandwich: mu recalibrated, and a FLOP-share / robustness dissociation (§12.15)
+
+`iclr_big_hop_sandwich_sink` had the §12.1 bug (`persist_mu` false, `mu_iters` 1 against a 4× block).
+Recalibrated: **Avg11 43.24 → 43.36**, bpb 1.0274 → 1.0247. **Use 43.36.** Small — and the smallness
+is the finding: the sandwich has **pure-like FLOP concentration** (mixture = 97.6% of per-token
+FLOPs) but **hybrid-like robustness** to routing corruption (0.003 nats, vs 1.6–1.8 for pure 8–12
+iteration stacks). Two GPT layers worth 1.6% of FLOPs provide enough bypass that corrupting the
+energy router barely matters. If that extends to an imperfect *proxy* router, the sandwich is the
+best sparsity target of the three.
+
+### A retracted result, and the mechanism that produced it
+
+A monitor reported the sandwich proxy-selection ablation at **+0.00pp** and recommended launching the
+400M sparse arm. **Retracted** (§12.16a): both Avg11 lines cited the *dense* directory and
+`ablate/C_proxysel/` contained no results file. The tell was bits/byte identical to 4 decimals — if
+routing changed for even a few tokens that moves. **Treat an exactly-zero delta as evidence of a
+plumbing fault, not of robustness.**
+
+Real cause (§12.16b, correcting 12.16a's guess): a **CUDA OOM** — 15.50 GiB requested, 10.39 free.
+`proxy_route: true` with `sparse_forward: false` runs the dense all-K path *plus* the proxy heads,
+which does not fit at `batch_size 4` for 400M `I_e=15872`. It was masked because
+`bench_proxysel_one.sh` wraps the harness in `|| echo "... FAILED"`, turning a crash into a line of
+stdout, after which `compute_avg11.py` globbed for the newest `harness_results*.json` in the tree and
+found the dense one. **A stage that produces a number must fail loudly or verify its own output path.**
+
+Genuine byproduct: the harness is **deterministic to 4 decimal places** across independent runs of
+the same checkpoint, so a real 0.1pp Avg11 delta is signal, not variance.
