@@ -1,0 +1,139 @@
+# PEAK-LR vs FINAL-LR, DISENTANGLED (2026-09-16).
+#
+# The first sweep fixed lr_decay_factor at 0.1, so FINAL LR scaled with peak: 1x ended at 2e-4
+# while 5x ended at 1e-3. 5x won (3.7869 vs 3.8285) but the two effects were never separated,
+# and the open question is whether the win comes from the higher PEAK or from a different FLOOR
+# -- plausibly the latter, because a compressed schedule spends proportionally more of the run
+# near the floor than a 30k-step schedule does.
+#
+# This grid holds one and varies the other:
+#     #1 peak 2e-3  floor 2e-4   reference (the shipped recipe)
+#     #2 peak 2e-3  floor 2e-5   same PEAK, lower floor      -> isolates FLOOR
+#     #3 peak 1e-2  floor 1e-3   the 5x winner, proportional floor
+#     #4 peak 1e-2  floor 2e-4   floor matched to #1         -> isolates PEAK
+#     #5 peak 1e-2  floor 2e-5   floor matched to #2
+# Contrasts: #1 vs #2 = floor at fixed peak. #1 vs #4 = peak at fixed floor. #3/#4/#5 = floor at
+# high peak.
+#
+# 5000 steps, 200 warmup, 262144 tokens/step -- the SAME tokens/step as configs/pure_lr, so
+# these remain comparable to that sweep as well as to each other.
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [8]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 71680   # K=16 x I_e=4480; iso-param with the hybrids
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        balance_rate: 0.003   # 2026-09-13: aux-loss-FREE per-expert logit bias
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 0   # OFF: balance_rate below already solves this constraint
+        repulsion_tensor_idx: true
+        activation_function: gelu
+        add_bias: false
+
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/lrq/lrq_p1e2_f2e5
+  save_interval: 1000
+  max_to_keep: 2
+
+# NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
+# copying a parent config; only save_path was updated, so every derived arm logged to
+# wandb under the PARENT's name and collided there. Local results under save_path were
+# always correct (that is what the reported numbers come from), but the wandb view was
+# missing or merged. wandb name must equal the config basename.
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: lrq_p1e2_f2e5
+
+training_parameters:
+  num_training_steps: 5000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 1e-2
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.002
+  num_warmup_steps: 200
+  num_constant_steps: 0
+  num_decay_steps: 4800
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
