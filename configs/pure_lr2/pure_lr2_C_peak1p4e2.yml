@@ -1,0 +1,132 @@
+# FINAL-LR / PEAK-LR DISENTANGLEMENT (2026-09-16).
+#
+# The first sweep varied peak LR with lr_decay_factor fixed at 0.1, so FINAL LR scaled with
+# peak: 1x ended at 2e-4 but 5x ended at 1e-3. The 5x arm therefore won (3.7869 vs 3.8285)
+# WHILE ending at 5x the floor -- and a higher floor normally leaves you worse at the end, so
+# that result is a LOWER BOUND on what peak 1e-2 can do. These arms hold peak at 1e-2 and vary
+# only the floor, which isolates the two and tests whether a smaller final LR helps.
+#   A: decay_factor 0.02  -> final 2e-4  (matches the 1x arm's floor exactly)
+#   B: decay_factor 0.004 -> final 4e-5  (much lower floor)
+#   C: peak 1.4e-2, factor 0.02 -> brackets the optimum, which lies between 1e-2 and 2e-2
+#      (2e-2 diverged at 7.89)
+# Same 6000 steps / 200 warmup as the first sweep, so all arms remain mutually comparable.
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [8]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 71680   # K=16 x I_e=4480; iso-param with the hybrids
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        balance_rate: 0.003   # 2026-09-13: aux-loss-FREE per-expert logit bias
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 0   # OFF: balance_rate below already solves this constraint
+        repulsion_tensor_idx: true
+        activation_function: gelu
+        add_bias: false
+
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/pure_lr2/pure_lr2_C_peak1p4e2
+  save_interval: 1000
+  max_to_keep: 2
+
+# NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
+# copying a parent config; only save_path was updated, so every derived arm logged to
+# wandb under the PARENT's name and collided there. Local results under save_path were
+# always correct (that is what the reported numbers come from), but the wandb view was
+# missing or merged. wandb name must equal the config basename.
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: pure_lr2_C_peak1p4e2
+
+training_parameters:
+  num_training_steps: 6000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 1.4e-2
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.02
+  num_warmup_steps: 200
+  num_constant_steps: 0
+  num_decay_steps: 5800
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
