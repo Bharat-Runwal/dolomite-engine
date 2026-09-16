@@ -1,0 +1,212 @@
+# 400M SANDWICH, SPARSE -- PREPARED, NOT LAUNCHED.
+#
+# Sized to be DIRECTLY COMPARABLE to iclr_big_hop_sandwich_sink: same 15000 steps at 262144
+# tokens/step = 3.93B tokens, same architecture, same data. Only the mixture computation differs,
+# so the Avg11 delta against that arm's recalibrated 43.36 is a clean sparse-vs-dense measurement.
+#
+# WHY THE SANDWICH IS THE RIGHT SPARSITY TARGET (HANDOFF 12.15):
+#   * its mixture is 97.6% of per-token FLOPs -- pure-like (99.3%), not hybrid-like (22%);
+#   * measured 1.91x sparse speedup against an analytical 1.88x, and unlike the pure arm it does
+#     NOT need a large micro-batch, because I_e = 15872 is wide enough on its own;
+#   * it appears ROBUST to routing corruption: the mu bug cost it 0.003 nats where pure 8-12
+#     iteration arms lost 1.6-1.8. If that transfers to proxy routing (pure -0.68pp, hybrid
+#     -0.03pp Avg11) this is the best of the three.
+#
+# GATE BEFORE LAUNCHING: the proxy-selection ablation on this checkpoint (job swproxy) must land
+# near the hybrid's -0.03pp, not the pure arm's -0.68pp. If it lands near -0.68pp, do not launch --
+# sparse TRAINING already failed to match dense on the pure arm (12.13) and the same would be
+# expected here.
+#
+# Runtime at 8 GPUs: ~1.6 s/step sparse => ~6.7 h for 15000 steps (dense would be ~13 h).
+# CORRECTED-SIGN + SINKHORN RERUN of iclr_big/iclr_big_hop_sandwich (2026-09-15).
+#
+# The paper will report the CORRECTED model, so every EnergyFF_BoltzmannMoE arm in the
+# grid is rerun with the routing sign fixed and balance supplied by the exact dual.
+# Changes from the original, and ONLY these:
+#   e_sign_override: "pos"     the original ANTI-ROUTES (selects the worst-matching
+#                              experts, 0.62x average overlap) -- ROUTING_SIGN_BUG_20260915.md
+#   temperature: 1.0           0.35 was calibrated UNDER the inverted sign; 1.0 is what
+#                              the tau x balance sweep selected (T5) and 134M M3 validated
+#   sinkhorn_iters: 3          exact chemical-potential balancing, no clamp, no gain
+#   repulsion_tensor_idx: true REQUIRED: repulsion's Python-random index lists cost 3
+#                              dynamo graph breaks and ~17 recompiles per 8 calls, and
+#                              stalled a 2-node job for 13 min. Tensor indices: 1 graph,
+#                              0 breaks. NOT optional on a long run.
+#   save_interval: 1000        REQUIRED on preemptable: at 5000 an arm can be preempted
+#                              before ever reaching a checkpoint and make ZERO net
+#                              progress (observed on two pure-GPT baselines, 28 and 27
+#                              submissions with nothing to show).
+# NOT changed: architecture, tokens, steps, LR schedule, seed -- so these are directly
+# comparable to the originals at matched steps.
+#
+# NOTE cos_probe is deliberately absent: `_cos_probe_fires` calls Tensor.item(), an
+# unconditional graph break. Diagnostics only; use it on single-node probes.
+# OOM FIX (2026-09-13): first attempt OOM'd on 80GB (tried to alloc 3.06 GiB with
+# ~1.9 GiB free). At d=1024 with I_e=17920 the per-expert activations at
+# micro_batch_size=4 x 4096 tokens do not fit. Reduced to mbs=1 / ga=16, which
+# holds tokens-per-step identical, and enabled block gradient checkpointing.
+#
+# iclr_big_hop_sandwich
+#
+# SANDWICH: 1 GPT layer before + 1 after the Boltz-MoE block (the lenient variant), ~400M
+#
+# ~400M TIER. d=1024, T=4 iterations, 15000 steps (~15.8B tokens).
+# NOTE T=4 not 8 and 15000 not 30000: at T=8 a 400M single-block model is ~23h/run
+# because the shipped code computes ALL experts densely, so FLOPs ~ I_tot*T. This tier
+# is therefore its own iso-token/iso-depth group and is NOT directly comparable to the
+# 134M T=8 30k-step arms. Compare within the tier.
+#
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 4, 1]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 3
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: dual_unconstrained
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gattn
+        sequence_mixer_type: softmax_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 16
+        num_key_value_heads: 16
+        add_bias: false
+        attention_multiplier: 0.125
+      - *gattn
+    mlp_blocks:
+      - &gffn
+        mlp_type: MLP
+        activation_function: swiglu
+        intermediate_size: 4096
+        add_bias: false
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 253952
+        n_experts: 16
+        top_k: 2
+        renormalize_topk: true       # MANDATORY. The proxy fit on this very checkpoint has energy
+                                     # R^2 of -48 to -135000 across its 4 heads: ranking is good
+                                     # (agreement 0.84-0.93) but MAGNITUDES are unusable, so the
+                                     # all-K softmax denominator cannot be estimated. Renormalising
+                                     # removes that term. Free when trained (44.54 vs 44.58).
+        fused_experts: true
+        sparse_forward: true
+        sparse_candidates: 2
+        sparse_explore: 2            # proxy cannot train itself inside the sparse path without it
+        proxy_rank: 16
+        proxy_kind: subspace
+        proxy_out_dim: 512
+        proxy_iters: 1               # per-iteration heads are EVAL-only (call counter + activation
+                                     # checkpointing are incompatible)
+        proxy_loss_coef: 0.01
+        repulsion_space: weight      # output-space needs all K expert outputs
+        cos_probe_interval: 100      # the only way to watch alignment in a sparse arm
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 2.0          # weight-space value from rep_wt2, NOT the output-space 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 3
+        sinkhorn_persist_mu: true    # ABSENT from the parent config -- pre-flight 9. Its lack cost
+        sinkhorn_mu_iters: 4         # the dense arm 0.12pp Avg11 / 0.0027 bpb (12.15).
+        repulsion_tensor_idx: true
+        activation_function: gelu
+        add_bias: false
+      - *gffn
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/sw400/sw400_sparse
+  save_interval: 1000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: sw400_sparse
+
+training_parameters:
+  num_training_steps: 15000
+  eval_interval: 5000
+  micro_batch_size: 4          # 16384 tok/call. Sparse cuts the intermediate 6.4x so mbs 4
+                               # fits where the DENSE sandwich could not (its comment says so).
+  gradient_accumulation_steps: 2   # 8 GPU x 4 x 2 x 4096 = 262144 -- IDENTICAL to the dense arm
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 1000       # 1000 + 14000 = 15000 = num_training_steps (pre-flight 1).
+  num_constant_steps: 0
+  num_decay_steps: 14000       # the PARENT had 1000 + 15000 = 16000 against 15000 steps, so it
+                               # never reached its floor -- a mild version of the slope90k bug.
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0
+
+# 2026-09-15: AUTO-RESUME, added mid-run. Without this an arm restarts from step 0 whenever
+# LSF REQUEUES it. LSF preemption here goes SSUSP -> PEND -> RUN on the SAME job id, which
+# re-executes the original bsub command with this original config; the watchdog's
+# auto-resume never runs because the watchdog never resubmitted. Measured damage before the
+# fix: iclr_hop_K16_dense_sink lost ~19000 steps, slope90k_hyb_sink ~18500, across 4 starts
+# each. save_interval alone does NOT protect against this -- the checkpoints were on disk
+# the whole time and simply never loaded.
