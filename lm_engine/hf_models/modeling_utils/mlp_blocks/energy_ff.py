@@ -1450,12 +1450,23 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         p_cand = self.sparse_candidates or k
         n_exp = self.sparse_explore if self.training else 0
         if sel_idx is None and n_exp > 0 and p_cand + n_exp <= K:
-            # top-(p) from the proxy, plus `n_exp` random experts. Shapes are static (p + n_exp),
-            # so this stays compile-safe; the draw is RNG-based but activation checkpointing
-            # restores RNG state before recompute, and the SIZE never varies.
+            # top-p from the proxy, plus `n_exp` explored experts.
+            #
+            # NO RNG. The first version drew these with torch.randint inside the forward and the
+            # job HUNG: 14 minutes, zero optimiser steps, a log frozen at 26 MB with 544 mentions
+            # of randint and ten distinct recompile frames, against 66 seconds to first step for
+            # the same config without exploration. Random number generation inside a compiled,
+            # FSDP-sharded graph is not worth fighting -- and the deterministic form below is
+            # strictly better anyway, since it guarantees UNIFORM expert coverage instead of
+            # merely unbiased coverage.
+            #
+            # Rotation by token position: token t explores experts (t + 1 ... t + n_exp) mod K. Over
+            # a batch of T >> K tokens every expert is explored by exactly 1/K of tokens each step,
+            # which is what the distillation needs, and it is free, replay-stable and static.
+            tt = torch.arange(T, device=xf.device).unsqueeze(1)
+            jj = torch.arange(1, n_exp + 1, device=xf.device).unsqueeze(0)
             top = s_prox.topk(p_cand, dim=-1).indices                       # (T, p)
-            rnd = torch.randint(K, (T, n_exp), device=xf.device)            # (T, n_exp)
-            sel_idx = torch.cat([top, rnd], dim=-1)                         # (T, p + n_exp)
+            sel_idx = torch.cat([top, (tt + jj) % K], dim=-1)               # (T, p + n_exp)
             p_cand = p_cand + n_exp
         elif sel_idx is None:
             # p = K needs no proxy at all: every expert is a candidate, so the re-rank below is
@@ -1492,6 +1503,16 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # than the weight of a zero energy
         neg = torch.finfo(lg.dtype).min
         lg = lg.masked_fill(~kept, neg)
+
+        # DUPLICATE CANDIDATES. Exploration can propose an expert the proxy already picked, and a
+        # repeated (token, expert) pair would be given two capacity slots and counted twice in the
+        # softmax -- double-weighting that expert's contribution. topk alone never collides, so
+        # this could not arise before exploration existed; it is a correctness bug that would have
+        # been silent had the RNG version compiled. Keep only the FIRST occurrence; p is small so
+        # the (T, p, p) comparison is cheap, and the shape is static.
+        if p_cand > k:
+            eq = sel_idx.unsqueeze(-1) == sel_idx.unsqueeze(-2)             # (T, p, p)
+            kept = kept & ~eq.tril(-1).any(-1)
 
         # ---- 4b. RE-RANK: the exact energies pick the final top-k out of the p candidates ----
         # This is the point of over-selecting. The proxy only has to get the true top-k INTO its
