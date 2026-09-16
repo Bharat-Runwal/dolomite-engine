@@ -75,6 +75,66 @@
 > and 1.61x at **4 GPU / 1 node**, but it **WEDGES at 16 GPU / 2 nodes** and is
 > reverted on the live arm — validated single-node only.
 
+> ## 🛑 CONFIG PRE-FLIGHT — RUN THIS BEFORE ANY LONG RUN. NO EXCEPTIONS.
+>
+> Every buggy long run in this project came from a config that *looked* right. A week of
+> deadline does not buy time to re-run; it makes each wasted run unaffordable. Before launching
+> anything longer than ~1 h, verify EVERY line below against the config as parsed, not as
+> written, and against the arm it will be compared with.
+>
+> **1. Schedule covers the run.** `num_warmup_steps + num_constant_steps + num_decay_steps`
+> MUST equal `num_training_steps`. The `slope90k_*` arms set 2000+28000=30000 against 90000, so
+> **60000 steps ran pinned at the 2e-4 floor** and bought 0.015–0.019 nats across 45–51k steps.
+> This bug is in the PUBLISHED configs, so it corrupts a paper claim, not just a rerun.
+>
+> **2. Tokens/step matches the arm you will compare against.**
+> `tokens/step = GPUS × micro_batch_size × gradient_accumulation_steps × sequence_length`.
+> GPUS is NOT in the config — it comes from the launcher (watchdog conf field 5, or the bsub
+> `-gpu num=N/task` × tasks). `iclr_big_hop_pure_sink` was registered at 4 GPUs while its
+> published counterpart ran at 8, so the rerun saw **half the tokens** and its −0.99pp delta was
+> read as a sign effect when it was an undertraining effect.
+> Verify empirically, not from the config:
+> `tokens/step = billion_tokens_per_day × 1e9 × step_time / 86400` from the training log.
+>
+> **3. GPU count is what you think.** `nexec_host` is HOSTS, not GPUs. `bjobs -l` shows
+> `num=8/task` and `gpus=0..7`; 2 hosts × 8 = 16. Do not infer 4/host.
+>
+> **4. `load_args` present iff resuming.** Absent ⇒ a restart silently begins at step 0 (LSF
+> requeues a preempted job on the SAME jid, re-running the original command). Present but
+> pointing at an empty dir ⇒ a fresh run fails. The watchdog appends it only when a checkpoint
+> exists, which is correct; hand-written configs must match that.
+>
+> **5. `latest_checkpointed_iteration.json` names a directory that EXISTS.** With
+> `max_to_keep: 2`, a from-scratch restart writes a LOW checkpoint, points at it, and pruning
+> (which keeps the HIGHEST) deletes it — every subsequent start then dies instantly.
+>
+> **6. Names and paths are unique.** A distinct `save_path` AND wandb `name` per arm. Beware
+> **prefix collisions** when globbing logs or results: `foo_*` matches `foo_sink_*` and
+> `foo_s7_*`. Anchor on the numeric job id (`foo_\d+\.stderr`). This produced two wrong
+> numbers in one session, both plausible-looking rather than erroring.
+>
+> **7. Knobs reach the model, not just the YAML.** `get_mlp_block` forwards kwargs EXPLICITLY,
+> so a field can parse onto the pydantic args object and never reach the builder. Verify by
+> RESOLVING: `build_boltzmann_moe(**kw).moe.e_sign` — and note `e_sign` lives on `.moe`, not on
+> the `FusedMoEContainer` the builder returns, so a probe reading the container gets `None` for
+> everything and its fallback branch will report whatever you told it to.
+>
+> **8. The sign is direction-dependent per expert kind.** hopfield needs
+> `e_sign_override: "pos"`; composable w1w2 needs `"neg"`. A blanket `"pos"` is a silent no-op
+> on w1w2.
+>
+> **9. Required for Sinkhorn arms:** `sinkhorn_persist_mu: true` and
+> `sinkhorn_mu_iters` = this block's `layer_iterations` entry. Without them the router is
+> trained tilted and EVALUATED untilted: **+1.587 nats at 8 iterations, +1.827 at 12**, ~0.003
+> for a hybrid. Also `repulsion_tensor_idx: true`, and NO `cos_probe_interval`.
+>
+> **10. Diff against the arm you are copying.** `diff <(grep -vE '^\s*#|^\s*$' old.yml)
+> <(grep -vE '^\s*#|^\s*$' new.yml)` and account for EVERY line. Unexplained differences are
+> bugs; expected-but-absent differences are also bugs.
+>
+> Then, 30–60 s after launch, confirm the arm reached a first step and that its logged
+> `learning_rate` and tokens/step are the intended values.
+
 > ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
 >
 > **CANONICAL (2026-09-14 onward): `Avg11`**, the paper `tab:scaling` recipe, the
