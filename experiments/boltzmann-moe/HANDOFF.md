@@ -1876,3 +1876,125 @@ proxy_iters: 4, sparse_forward: false`. So only the eval bookkeeping is at fault
 One genuine byproduct: the harness is **deterministic to 4 decimal places** across two independent
 runs of the same checkpoint (43.36 / 1.0247 both times). That is a useful noise floor — it means a
 real Avg11 delta of 0.1pp is signal, not run-to-run variation.
+
+#### 12.16b CORRECTION to 12.16a — the PROXYSEL harness OOMed. It was not the symlink.
+
+12.16a guessed the missing result was `--output_path` bookkeeping plus a symlinked
+`model.safetensors`. **That guess was wrong.** The real cause, in
+`swproxy_1713960.stderr` (visible only after `tr '\r' '\n'` — the progress bars make it one
+giant line that defeats `grep`):
+
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 15.50 GiB.
+GPU 0 has a total capacity of 79.18 GiB of which 10.39 GiB is free.
+```
+
+`C_proxysel` has `proxy_route: true` with `sparse_forward: false`, so it runs the **dense**
+all-K path *plus* the proxy heads. At 400M with `I_e=15872` that does not fit at
+`--batch_size 4`, which is what worked for the 134M models. The DENSE arm on the same
+checkpoint succeeded at batch 4 in the same job, which is why the loop looked healthy and
+`compute_avg11.py` silently fell back to the newest results in the tree.
+
+Resubmitted as **1715589**: `--batch_size 2`, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`,
+1 GPU, `-W 08:00`, and the job body now `ls`-es `C_proxysel/harness_results*.json` BOTH before
+(confirmed absent → clean measurement) and after, so a fallback cannot be mistaken for a result.
+
+The fit itself was fine: per-iteration heads refined to KL 0.016–0.021, top-2 recall 0.836,
+top-3 0.926, top-4 0.955, top-8 0.987.
+
+**Generalisable lesson, and it is the second time this bit us:** `|| echo "... FAILED"` in a
+shell loop turns a hard crash into a line of stdout, and the NEXT stage then reads whatever
+stale artifact is lying around. `compute_avg11.py` globbing for the newest
+`harness_results*.json` in the tree is what converted a crash into a plausible number.
+**A stage that produces a number must fail loudly, or verify its own output path exists.**
+
+### 12.17 MEASURED: the annealing bonus saturates after a 1.4x LR reduction
+
+This is the answer to "the sharp-drop arm has the lowest loss, how do we bank on that?" —
+and it says: **there is nothing to bank. Do not decay early.**
+
+`sw2k_sparse` (1e-3, 90k-shaped decay, so effectively pinned at peak for all 2000 steps) vs
+`sw2k_sparse_c10x` (1e-3, decay COMPLETED in 2000 steps). Identical model, data, warmup 200.
+100-step means:
+
+| step | at peak | `c10x` | gap | `c10x` lr | reduction from peak |
+|---|---|---|---|---|---|
+| 400 | 5.0401 | 5.0353 | +0.005 | 9.73e-4 | 1.03x |
+| 600 | 4.7333 | 4.7101 | +0.023 | 8.95e-4 | 1.12x |
+| 800 | 4.5515 | 4.4359 | **+0.116** | 7.75e-4 | **1.29x** |
+| 900 | 4.4517 | 4.3082 | +0.143 | 7.04e-4 | 1.42x |
+| 1200 | 4.1921 | 4.0927 | +0.099 | 4.72e-4 | 2.12x |
+| 1600 | 4.0492 | 3.9393 | +0.110 | 2.37e-4 | 4.22x |
+
+**The whole ~0.11 nat gain is realised by a 1.4x LR reduction. The further 3x (7.04e-4 ->
+2.37e-4) adds NOTHING** — the gap is flat 900->1600, and the 0.143 at step 900 is probably
+a noise excursion on a 100-step mean, so quote **0.11**, not 0.14.
+
+So the fast-drop arm does not have a better trajectory. It has the SAME trajectory plus a
+one-time, saturating offset. Consistent with 12.5 ("floor is inert", 50x range inside noise)
+and with 12.4 (60k steps pinned at the 2e-4 floor bought 0.015-0.019 nats): once the offset
+is collected there is no more to earn, and no step size left to earn it with.
+
+Minor confound, does not affect the contrast: `c10x` has `lr_decay_factor: 0.1` vs `0.02` on
+the at-peak arm, but the at-peak arm never leaves ~1e-3 inside 2000 steps.
+
+#### The peak: 12.16's "maybe 2e-3 was too high" is NOT supported
+
+`sw2k_sparse_5e4` is behind `sw2k_sparse` (1e-3) at **every** step and the gap is not closing:
+step 800 4.6525 vs 4.5515 (0.101), step 1600 4.1231 vs 4.0492 (0.074). Lower peak = uniformly
+worse, same direction as 12.5's "peak is worth ~0.06 nats".
+
+And the observation that originally motivated halving 2e-3 -> 1e-3 — "struggled to drop at
+first, then dropped fast and steady" — is the **expected signature of a high peak**, not
+evidence against it: measured loss = valley-floor progress + a temperature penalty that grows
+with lr, so a high peak looks worse early and better late. **Do not lower the peak on
+early-loss appearance.** 2e-3 stands unless something at 400M actually diverges.
+
+#### Recommended WSD, and the distinction that matters
+
+Two DIFFERENT runs; do not conflate their schedules.
+
+1. **`sw400_sparse` (15k, 2e-3, cosine, `num_constant_steps: 0`) — DO NOT TOUCH.** It is the
+   sparsity ablation against the dense **43.36**. Changing its schedule destroys the
+   like-for-like comparison. It is already pre-flighted.
+2. **The 90k headline runs** — this is where WSD goes. Drop-in, NO code change
+   (`CosineScheduler` already implements WSD when `num_constant_steps > 0`; verified
+   `scheduler.py:90-106`):
+
+```yaml
+lr: 2e-3
+lr_decay_style: cosine
+num_warmup_steps: 1000
+num_constant_steps: 80000     # 89% at PEAK -- the stable phase
+num_decay_steps: 9000         # 10%; 12.17 says the bonus lands within a 1.4x reduction
+lr_decay_factor: 0.1          # -> 2e-4; floor is inert per 12.5
+# 1000 + 80000 + 9000 = 90000 = num_training_steps   <- PRE-FLIGHT 1
+```
+`74000/15000` (17%) is the more conservative literature default if 9000 feels tight.
+
+#### Branch a decay off the stable trunk — this is WSD's real payoff on a deadline
+
+`LoadArgs` supports it: the assert in `arguments.py:151-157` only forbids
+`load_lr_scheduler: true` with `load_optimizer: false`, so `load_optimizer: true` +
+`load_lr_scheduler: false` is legal. Copy a stable-phase checkpoint, run a short decay-only
+schedule, and get a properly annealed evaluable model WHILE THE TRUNK KEEPS RUNNING AT PEAK.
+
+```yaml
+# decay-only branch: num_training_steps: 4000, num_warmup_steps: 0,
+#                    num_constant_steps: 0, num_decay_steps: 4000, lr: 2e-3
+load_args:
+  load_path: <stable trunk>
+  load_optimizer: true          # keep the Adam moments
+  load_lr_scheduler: false      # fresh short decay schedule
+  load_starting_iteration: false
+```
+Consequence: **no need to commit to a token budget up front.** Evaluable checkpoints on
+demand. NOT yet run end-to-end — check the `load_dataloader_state` interaction before trusting it.
+
+#### Why the 4-phase "drop to 1e-4, plateau, crawl to 1e-5" shape is the worst option
+
+It forfeits valley progress (12.4: a low plateau is nearly inert) AND pre-spends the annealing
+bonus (12.17: it is one-time and terminal). It also needs a new scheduler class. Dropped.
+On multi-stage/cyclical cosine: restarts (SGDR) and staged decay are real practices, but for a
+single fixed budget they are not what people use — staging is for continued pretraining or a
+data-mixture change.
