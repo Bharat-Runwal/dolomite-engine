@@ -2101,3 +2101,66 @@ step 1000. If it ever needs to be a figure, plot the FIRST segment only (it reac
    General lesson: `save_interval` must be << the remaining run length on a preemptable queue, or
    an arm can burn GPUs indefinitely while making zero net progress. For a 2000-step probe,
    save_interval should have been ~250.
+
+### 12.19 THE GATE RESOLVED: sandwich proxy selection costs -0.40pp. 12.15's prediction is REFUTED.
+
+Job **1716546**, verified properly this time: `ablate/C_proxysel/harness_results_2026-09-16T21-46-40`
+exists (33497 bytes) and `compute_avg11.py` cites that exact path. The evaluated `config.json` has
+`proxy_route: true, proxy_rank: 16, proxy_iters: 4, proxy_kind: subspace, sparse_forward: false`.
+
+**All three arms measured IDENTICALLY** (`renormalize_topk: False` in both dense and proxy legs, so
+the only difference is who selects the experts):
+
+| model | dense Avg11 | proxy-routed Avg11 | delta |
+|---|---:|---:|---:|
+| `iclr_hop_K32_top2_sink` (hybrid) | 44.58 | 44.55 | **-0.03pp** |
+| `iclr_big_hop_sandwich_sink` | **43.36** | **42.96** | **-0.40pp** |
+| `pure_hop_T12_sink` | 40.96 | 40.28 | **-0.68pp** |
+
+Sandwich WikiText 47.49 word-PPL vs the dense 44.62, i.e. ~1.0415 vs 1.0247 bpb (+0.017).
+
+**VERDICT: the gate ("near -0.03pp => launch") is NOT passed.** -0.40pp is 13x the hybrid's cost
+and 59% of the pure arm's, i.e. squarely in the middle rather than at the hybrid end.
+
+**12.15's dissociation does not generalise.** It observed that the sandwich has pure-like FLOP
+concentration (mixture = 97.6% of per-token FLOPs) but hybrid-like robustness to dropping the
+Sinkhorn dual (0.003 nats vs 1.6-1.8 for pure stacks), and predicted the sandwich would therefore
+tolerate an imperfect PROXY router like a hybrid. It does not. **Robustness to a mis-tilted router
+(a shift in mu, shared across experts) and robustness to mis-SELECTION (picking the wrong experts)
+are different properties, and the first does not imply the second.** Two GPT layers can carry a
+bypass around a mis-scaled energy landscape while still being unable to substitute for the right
+expert. Do not reuse the mu-sensitivity number as a proxy-sensitivity predictor for any arm.
+
+#### What this does and does NOT settle
+
+**Settled:** a POST-HOC proxy retrofit onto a trained dense sandwich costs -0.40pp. So
+"fit a proxy to the existing 43.36 checkpoint and ship it sparse" is not viable at the -0.03pp
+standard the hybrid set.
+
+**NOT settled: from-scratch sparse TRAINING**, which is what `wsd90k_*_sparse` (1717220/1717221)
+actually does. Three reasons the retrofit number does not transfer:
+1. In a retrofit the model is frozen and the proxy must chase it. In training the model
+   CO-ADAPTS to the proxy, and `sparse_explore` supplies exact energies for experts the proxy
+   would not propose.
+2. The retrofit ran `renormalize_topk: False`, so the proxy had to estimate the all-K denominator
+   from energies whose R^2 is **-48 to -135000** (ranking fine, magnitudes unusable). The training
+   arms set it TRUE, which deletes that term. 12.13: renormalisation is "free when TRAINED
+   (44.54 vs 44.58)" but "+0.483 bpb retrofitted".
+3. Consequently **neither** retrofit variant predicts a from-scratch arm: `C_proxysel` carries the
+   denominator error, and `Cp_proxysel_renorm` (built, never evaluated) would carry the +0.483 bpb
+   renormalisation-retrofit penalty. **Do not spend a GPU on `Cp_proxysel_renorm` expecting a
+   verdict** -- it answers neither question.
+
+**So the real gate for the launched arms is their own first ~1000 steps**, not this eval:
+* `expert_cos_abs_mean` -- 12.13's ranking says weight-space repulsion should hold **0.43-0.44**
+  from scratch. If it climbs toward 0.7, diversity control has failed and 12.13 is repeating.
+* `proxy_topk_agree` -- chance is k/p = 2/4 = 0.50 with exploration on. The 134M s90k arm reached
+  **0.7628 by step 27840**.
+* loss against the dense `sw2k_dense` trajectory at matched steps (5.88 s/step at 4 GPUs).
+
+#### Standing correction to the eval protocol, now proven to work
+
+The verification added after 12.16a/c did its job: two failed attempts printed GATE-FAIL and
+`no harness_results_*.json` rather than a plausible wrong number, and the successful one printed a
+path that could be checked. **Keep the pattern: assert the output file exists, and require the
+aggregator to name the path it read, before quoting any delta.**
