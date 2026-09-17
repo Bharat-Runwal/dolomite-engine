@@ -19,7 +19,10 @@ CMD=${2:?command}
 GPUS=${3:-1}
 WALL=${4:-00:30}
 MEM=${5:-32G}
-REPO=/proj/dmfexp/nima/Code/dolomite-engine
+# Machine-specific paths come from experiments/paths.sh (REPO_ROOT is self-located, so this
+# works in any clone from any cwd; VENV/DATA_ROOT default to this cluster and are overridable
+# with DOLOMITE_VENV / DOLOMITE_DATA_ROOT).
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/experiments/paths.sh"
 mkdir -p "$HOME/bsub_logs"
 
 bsub \
@@ -31,7 +34,7 @@ bsub \
     -e "$HOME/bsub_logs/${JOB}_%J.stderr" \
 <<INNER
 #!/bin/bash
-source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
+source ${VENV}/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 cd ${REPO}
 ${CMD}

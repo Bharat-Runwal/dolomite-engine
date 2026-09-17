@@ -2,8 +2,8 @@
 
 > ## 📄 ACTIVE PAPER — the ICLR draft is the ONLY paper we are writing right now
 >
-> **Path: `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`**
-> (Overleaf remote `https://git@git.overleaf.com/6a9ace75a92fce262f38ec18`, branch `main`.)
+> **Path: `~/Code/overleaf/boltzmann-moe-ICLR-2026/`**
+> (Overleaf git-bridge remote, branch `main`; the URL is in the clone's `git remote -v`.)
 > Files: `main.tex` + `sec/{intro,theory,experiments,appendix}.tex`.
 > Table locations: `tab:frontier`, `tab:pure`, `tab:cost`, `tab:threeway` in
 > `sec/experiments.tex`; `app:frontier`, `app:eval` (metric definition), `app:scale400`,
@@ -576,9 +576,9 @@ Full detail and the gelu_grad / h2 A/B studies are in `PROGRESS.md`.
 
 ## Key paper and reports
 
-- **★ ACTIVE — ICLR 2026 paper** (Overleaf): `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`
+- **★ ACTIVE — ICLR 2026 paper** (Overleaf): `~/Code/overleaf/boltzmann-moe-ICLR-2026/`
   — main file: `main.tex`; sections in `sec/{intro,theory,experiments,appendix}.tex`
-  — remote: `https://git@git.overleaf.com/6a9ace75a92fce262f38ec18` (branch `main`)
+  — remote: the clone's Overleaf git-bridge `origin` (branch `main`)
   — **all numbers are `Avg11`**; metric defined in `sec/appendix.tex` `\label{app:eval}`
   — **this is the only paper being written. Start and finish here.**
 - **Local report**: `experiments/boltzmann-moe/paper/report.pdf` (10 pages)

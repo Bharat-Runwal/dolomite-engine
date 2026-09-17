@@ -1098,7 +1098,7 @@ the same checkpoint, so a real 0.1pp Avg11 delta is signal, not variance.
 
 ## 2026-09-17 — ICLR appendix: new ABLATION STUDY section (`app:ablations`)
 
-Written into `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/sec/appendix.tex`, committed
+Written into `~/Code/overleaf/boltzmann-moe-ICLR-2026/sec/appendix.tex`, committed
 locally as `0718b7c` (**not pushed** — Overleaf push needs explicit confirmation). Sits between
 `app:threeway` and `app:setup`; a one-paragraph pointer was added to the `app:findings` overview.
 Six labelled groups: `app:abl-sign`, `app:abl-balance`, `app:abl-mu`, `app:abl-depthwidth`,

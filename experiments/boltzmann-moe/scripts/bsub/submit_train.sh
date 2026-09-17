@@ -50,7 +50,10 @@ QUEUE_IN=${4:-preemptable}
 WALL=${5:-24:00}
 MEM=${6:-160G}
 GPN_FORCE=${7:-}
-REPO=/proj/dmfexp/nima/Code/dolomite-engine
+# Machine-specific paths come from experiments/paths.sh (REPO_ROOT is self-located, so this
+# works in any clone from any cwd; VENV/DATA_ROOT default to this cluster and are overridable
+# with DOLOMITE_VENV / DOLOMITE_DATA_ROOT).
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/experiments/paths.sh"
 [ -f "$CFG" ] || CFG="$REPO/$CFG"
 [ -f "$CFG" ] || { echo "config not found: $CFG" >&2; exit 1; }
 
@@ -102,7 +105,7 @@ TMP=$(mktemp --tmpdir submit_train.XXXXXX.sh)
 cat > "$TMP" <<INNER
 #!/bin/bash
 unset TMPDIR TEMP TMP
-source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
+source ${VENV}/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 CFG="${CFG}"
 SP="${SP}"

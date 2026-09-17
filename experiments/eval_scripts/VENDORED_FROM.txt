@@ -1,5 +1,5 @@
 Vendored 2026-09-12T06:28:01Z from /proj/dmfexp/energy-gpt/lm-evaluation-harness
-(colleague bsaha3's checkout), copied WITHOUT .git.
+(a colleague's checkout on this cluster), copied WITHOUT .git.
 
 upstream   : https://github.com/EleutherAI/lm-evaluation-harness.git
 commit     : ad3f4d0cad1cfcdb815f1e795f7947e49ed9f2e9

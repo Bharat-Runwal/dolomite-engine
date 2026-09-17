@@ -5,7 +5,7 @@ this file points at it, because a second copy is a second thing to forget to upd
 
 ## Scope
 
-Paper: `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/` (Overleaf remote, branch `main`).
+Paper: `~/Code/overleaf/boltzmann-moe-ICLR-2026/` (Overleaf remote, branch `main`).
 `main.tex` + `sec/{intro,theory,experiments,appendix}.tex`. Deadline is days away, so the job is
 **correct + defensible**, not expanded.
 

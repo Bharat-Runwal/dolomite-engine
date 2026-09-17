@@ -176,7 +176,7 @@ Touched prose:
 ## 4. Overleaf integration
 
 Cloned the **full paper Overleaf project** from
-`https://git.overleaf.com/69eb9b62c6f271a5b29323bb`.
+the project's Overleaf git-bridge remote (see the clone's `git remote -v`).
 
 **Local clone paths** (same repo, different machines):
 - **Beast** (other server): `~/__work/LLM/energy/energy-GPT-neurips2026/`

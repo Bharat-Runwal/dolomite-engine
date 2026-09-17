@@ -10,7 +10,10 @@
 # SUBMIT time cannot work; the job script has to decide it each time it starts.
 set -euo pipefail
 JOB=${1:?job name}; CFG=${2:?config}; GPUS=${3:-8}; WALL=${4:-24:00}; MEM=${5:-128G}
-REPO=/proj/dmfexp/nima/Code/dolomite-engine
+# Machine-specific paths come from experiments/paths.sh (REPO_ROOT is self-located, so this
+# works in any clone from any cwd; VENV/DATA_ROOT default to this cluster and are overridable
+# with DOLOMITE_VENV / DOLOMITE_DATA_ROOT).
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/experiments/paths.sh"
 SP=$(grep -E "^\s*save_path:" "$CFG" | head -1 | sed 's/.*save_path:\s*//')
 mkdir -p "$HOME/bsub_logs"
 bsub -q preemptable -G grp_preemptable -J "$JOB" \
@@ -18,7 +21,7 @@ bsub -q preemptable -G grp_preemptable -J "$JOB" \
      -o "$HOME/bsub_logs/${JOB}_%J.stdout" -e "$HOME/bsub_logs/${JOB}_%J.stderr" <<INNER
 #!/bin/bash
 unset TMPDIR TEMP TMP
-source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
+source ${VENV}/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
 CFG="${CFG}"
 SP="${SP}"

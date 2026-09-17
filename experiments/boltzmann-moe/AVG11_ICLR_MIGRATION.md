@@ -1,7 +1,7 @@
 # ICLR draft: `avg10` → `Avg11` migration (2026-09-15)
 
 Record of the metric migration applied to
-**`/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`**. Every number below was
+**`~/Code/overleaf/boltzmann-moe-ICLR-2026/`**. Every number below was
 recomputed from raw per-task harness JSON with
 `experiments/eval_scripts/compute_avg11.py`. **Nothing was rescaled, interpolated, or
 converted by formula.**

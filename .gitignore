@@ -51,3 +51,17 @@ experiments/energy-inference/paper/*.log
 # remains exactly reproducible without carrying the tree in history.
 experiments/eval_scripts/lm-evaluation-harness/
 experiments/boltzmann-moe/scripts/*.log
+
+# Session transcripts and recovered session dumps. These are internal dialogue, not code:
+# they carry candid discussion, colleague names, cluster topology and unpublished numbers.
+# Keep the distilled record in PROGRESS.md / HANDOFF.md / CLAUDE.md instead.
+*.jsonl
+**/recovered_*_sessions/
+
+# Editor / manual backup copies -- several of these were committed by accident.
+*.bak
+*.bak-*
+*.bak_*
+
+# Runtime logs from the watchdog / babysitter drivers (watchdog.log is listed above).
+experiments/boltzmann-moe/scripts/*.log

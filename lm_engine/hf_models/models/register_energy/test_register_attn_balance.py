@@ -15,7 +15,8 @@ import torch
 torch.manual_seed(0)
 torch.set_default_dtype(torch.float32)
 
-sys.path.insert(0, '/proj/dmfexp/nima/Code/dolomite-engine')
+# Repo root, derived from this file's location -- works in any clone.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 
 from lm_engine.hf_models.models.register_energy.config import RegisterEnergyConfig
 from lm_engine.hf_models.models.register_energy.main import RegisterEnergyForCausalLM

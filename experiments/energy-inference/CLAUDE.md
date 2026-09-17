@@ -77,16 +77,19 @@ The NeurIPS 2026 paper lives in one repo cloned from IBM Overleaf, with public o
 as a second push remote (mirror only — never push to public independently).
 
 - **Local clone**: `~/Code/energy/overleaf_neurips26/`
-- **`origin`** (IBM, primary): `https://overleaf.sl.cloud9.ibm.com/git/69c269c76db1d96d6c3c639a`
-- **`public`** (overleaf.com, mirror): `https://git.overleaf.com/69ebe3ed5c91a9639cc3576b`
-- Both tokens in `~/.netrc` — no password prompts. Token files: `~/OVERLEAF_TOKEN`, `~/OVERLEAF_PERSONAL_TOKEN`.
-- **IBM Overleaf is only reachable from compute nodes**, not login nodes.
+- **`origin`** (internal Overleaf, primary) and **`public`** (overleaf.com, mirror): run
+  `git remote -v` in the clone. The URLs are deliberately not recorded here — this file is in a
+  public repo, and the internal host is an internal-only service.
+- Credentials come from the machine's git credential store, so there are no password prompts.
+  **Do not record token file locations in this repo.**
+- **The internal Overleaf is only reachable from compute nodes**, not login nodes.
 
 ```bash
-# Clone (first time — compute node only):
-git clone https://overleaf.sl.cloud9.ibm.com/git/69c269c76db1d96d6c3c639a ~/Code/energy/overleaf_neurips26
+# Clone (first time — compute node only). Both URLs live in the existing clone's `git remote -v`;
+# substitute them here rather than committing them to a public repo.
+git clone "$INTERNAL_OVERLEAF_URL" ~/Code/energy/overleaf_neurips26
 cd ~/Code/energy/overleaf_neurips26
-git remote add public https://git.overleaf.com/69ebe3ed5c91a9639cc3576b
+git remote add public "$PUBLIC_OVERLEAF_URL"
 
 # Push to both remotes:
 git add -A && git commit -m "update figures/results"

@@ -11,10 +11,12 @@ kernel), but indexing bugs will surface as wrong outputs or Python-level
 IndexErrors / wrong-shape errors.  To confirm OOB-style bugs we should also
 run a GPU pass.
 """
+import os
 import sys
 import torch
 
-sys.path.insert(0, '/proj/dmfexp/nima/Code/dolomite-engine')
+# Repo root, derived from this file's location -- works in any clone.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 
 from lm_engine.hf_models.models.register_energy.config import RegisterEnergyConfig
 from lm_engine.hf_models.models.register_energy.main import RegisterEnergyForCausalLM

@@ -224,7 +224,7 @@ Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
 - [ ] (b) patch: ship it opportunistically (safe, ~2–3% step) once sign-off is given;
       `repulsion_interval: 10, repulsion_scale_comp: true`. Not gating on it.
 - [x] **Overleaf Avg11 — RESOLVED 2026-09-15.** User's call: the target paper is the
-      **ICLR draft** (`/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`), NOT the
+      **ICLR draft** (`~/Code/overleaf/boltzmann-moe-ICLR-2026/`), NOT the
       NeurIPS one, and it migrates fully to Avg11. This turned out to need **no
       re-eval at all**: every `iclr_*` run already carries race+lambada, so all 22
       yield a COMPLETE Avg11. Migration applied and PUSHED to Overleaf (commit
@@ -576,7 +576,7 @@ Axes to sweep (in priority order):
 - [x] **New appendix section written** — six groups (sign, balance, mu, depth-vs-width, LR,
       proxy-selection cost), all `Avg11`, compiles clean at 5.5 in. Local commit only.
 - [ ] **PUSH DECISION**: `0718b7c` is committed in
-      `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026` and needs the user's explicit go-ahead
+      `~/Code/overleaf/boltzmann-moe-ICLR-2026` and needs the user's explicit go-ahead
       before `git push`.
 - [ ] **FIX `app:routing`'s sign sentence** — as written it states the *inverted* convention
       ("$s_k=-E_k$ for Hopfield ... lower is better"). With `app:expert-forms`' energies the

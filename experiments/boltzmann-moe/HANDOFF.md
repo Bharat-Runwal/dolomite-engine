@@ -37,8 +37,8 @@ Last updated: 2026-09-16 (true sparsity §12.9-12.12; eval-metric banner added).
 
 > ## 📄 ACTIVE PAPER — the ICLR draft is the ONLY paper we are writing right now
 >
-> **Path: `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`**
-> (Overleaf remote `https://git@git.overleaf.com/6a9ace75a92fce262f38ec18`, branch `main`.)
+> **Path: `~/Code/overleaf/boltzmann-moe-ICLR-2026/`**
+> (Overleaf git-bridge remote, branch `main`; the URL is in the clone's `git remote -v`.)
 > Files: `main.tex` + `sec/{intro,theory,experiments,appendix}.tex`.
 > Table locations: `tab:frontier`, `tab:pure`, `tab:cost`, `tab:threeway` in
 > `sec/experiments.tex`; `app:frontier`, `app:eval` (metric definition), `app:scale400`,
@@ -66,7 +66,7 @@ Last updated: 2026-09-16 (true sparsity §12.9-12.12; eval-metric banner added).
 | **`HANDOFF.md` §11** | 🔴 The 2026-09-15 session: sign inversion, chemical-potential balancing, Sinkhorn, energy stability | **always, with §0** |
 | **`PLACEMENT_ARTIFACT_20260915.md`** | 🔴 The "5x slower" figure is mostly host placement (6.76 → 2.49 s/step, same code). Invalidates the launch-overhead reading | **before any s/step claim** |
 | `ACCEL_FINDINGS_20260915.md` | fused-GEMM 1.61x (single-node ONLY — wedges at 2 nodes), repulsion sweep, proxy router 0.942, ReLU negative result | before optimisation work |
-| **`/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`** | **★ THE ACTIVE PAPER.** `main.tex` + `sec/*.tex`; all numbers `Avg11` | whenever writing or quoting results |
+| **`~/Code/overleaf/boltzmann-moe-ICLR-2026/`** | **★ THE ACTIVE PAPER.** `main.tex` + `sec/*.tex`; all numbers `Avg11` | whenever writing or quoting results |
 | `AVG11_ICLR_MIGRATION.md` | What changed in the 2026-09-15 avg10→Avg11 migration, number by number | before touching any paper number |
 | `CLAUDE.md` | Operational guide: config fields, how to submit runs, routing metrics, results summary | before touching configs or launching anything. **Its "Key source files" table is stale — see §10** |
 | `PROGRESS.md` | Full experiment log B/C/H series + the master baseline table (lines 146-178) + the `gelu_grad_method` A/B | when you need a number or the history of a design choice |
@@ -243,6 +243,11 @@ build. For inference/analysis, borrow the nanoGPT venv and set `PYTHONPATH`:
 source /proj/dmfexp/nima/Code/nanoGPT-og/.venv/bin/activate
 export PYTHONPATH=/proj/dmfexp/nima/Code/dolomite-engine:${PYTHONPATH:-}
 ```
+New launchers should not hardcode either path. Source `experiments/paths.sh`, which self-locates
+`REPO_ROOT` (so it is correct in any clone, from any cwd) and supplies `VENV` / `DATA_ROOT` with
+this cluster's values as overridable defaults (`DOLOMITE_VENV`, `DOLOMITE_DATA_ROOT`).
+`scripts/bsub/submit_train.sh` is the worked example. This does **not** apply to `configs/**` --
+those paths are read by the trainer and are baked into saved checkpoint configs; see §4 gotcha 2.
 Verified present: torch 2.12.0+cu130, transformers 4.46.3, accelerate 1.13.0,
 safetensors 0.8.0, wandb 0.19.6. The energy model falls back to
 `F.scaled_dot_product_attention` when flash-attn is absent.
@@ -315,9 +320,9 @@ conclusion recorded there: architecture advantages are **real but modest**
 
 | Repo | Remote | Boltz-MoE content |
 |---|---|---|
-| **`/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/`** | `https://git@git.overleaf.com/6a9ace75a92fce262f38ec18` | **★ ACTIVE PAPER.** `main.tex` + `sec/{intro,theory,experiments,appendix}.tex`. Tables: `tab:frontier`/`tab:pure`/`tab:cost`/`tab:threeway` (experiments), `app:frontier`/`app:eval`/`app:scale400`/`app:threeway`/`tab:attribution` (appendix). **All `Avg11` since 2026-09-15.** |
-| `~/Code/energy/energy-GPT-neurips2026/` | `https://git@git.overleaf.com/69eb9b62c6f271a5b29323bb` | **ARCHIVE — still `avg10`, do not read unless asked.** `nima/sec/appendices/boltz_moe.tex` (37 KB), included from `nima/paper_v2.tex:108` |
-| `~/Code/overleaf/energy-GPT-reformulation-2026/` | `https://git@git.overleaf.com/69ebe3ed5c91a9639cc3576b` | **ARCHIVE — `avg10`/`avg9`.** `moe_bs.tex` at top level + `slides/`, talk frames with the MoE results table and scatter plot |
+| **`~/Code/overleaf/boltzmann-moe-ICLR-2026/`** | Overleaf git-bridge `origin` | **★ ACTIVE PAPER.** `main.tex` + `sec/{intro,theory,experiments,appendix}.tex`. Tables: `tab:frontier`/`tab:pure`/`tab:cost`/`tab:threeway` (experiments), `app:frontier`/`app:eval`/`app:scale400`/`app:threeway`/`tab:attribution` (appendix). **All `Avg11` since 2026-09-15.** |
+| `~/Code/energy/energy-GPT-neurips2026/` | Overleaf git-bridge `origin` | **ARCHIVE — still `avg10`, do not read unless asked.** `nima/sec/appendices/boltz_moe.tex` (37 KB), included from `nima/paper_v2.tex:108` |
+| `~/Code/overleaf/energy-GPT-reformulation-2026/` | Overleaf git-bridge `origin` | **ARCHIVE — `avg10`/`avg9`.** `moe_bs.tex` at top level + `slides/`, talk frames with the MoE results table and scatter plot |
 
 Local report: `experiments/boltzmann-moe/paper/report.pdf`. Scatter figures are
 generated by `paper/make_moe_scatter.py` into `paper/figs/`.
@@ -1348,7 +1353,7 @@ hybrid) means it wants more TOKENS, not a bigger step.
 | `slope90k_{1blk,hyb}_sink` | preemptable | 4 each | ~75-82k/90k | BROKEN schedule; kept only for like-for-like vs the published 44.32 |
 | `iclr_big_hop_sandwich_sink` | preemptable | 4 | 8k/15k | |
 
-`grp_ebm` is **32/32**: bsaha3's `s8e4_f5kl_distill` (16) + our 400M arm (16). Everything else is
+`grp_ebm` is **32/32**: another group member's job (16) + our 400M arm (16). Everything else is
 on `grp_preemptable` (1397/6144). `blimits`, not `bjobs`, is the authoritative quota check.
 
 ### 12.7 WHAT WE ARE FOCUSED ON NEXT
