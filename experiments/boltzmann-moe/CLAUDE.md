@@ -176,8 +176,13 @@
 > `tokens/step = GPUS × micro_batch_size × gradient_accumulation_steps × sequence_length`.
 > GPUS is NOT in the config — it comes from the launcher (watchdog conf field 5, or the bsub
 > `-gpu num=N/task` × tasks). `iclr_big_hop_pure_sink` was registered at 4 GPUs while its
-> published counterpart ran at 8, so the rerun saw **half the tokens** and its −0.99pp delta was
+> published counterpart ran at 8, so the rerun saw **half the tokens** and its delta was
 > read as a sign effect when it was an undertraining effect.
+> **Two figures for that delta are in circulation and they are NOT in conflict** — they use
+> different corrected checkpoints against the same published inverted arm (Avg11 **40.02**):
+> `unsharded` scores **39.04** (**−0.98pp**, before the §12.1 mu recalibration) and
+> `unsharded_mucal2` scores **39.43** (**−0.59pp**, after it). **Quote −0.59pp.** Either way the
+> cause is the token mismatch, not the routing sign.
 > Verify empirically, not from the config:
 > `tokens/step = billion_tokens_per_day × 1e9 × step_time / 86400` from the training log.
 >

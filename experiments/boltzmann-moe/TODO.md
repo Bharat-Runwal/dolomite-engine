@@ -570,3 +570,40 @@ Axes to sweep (in priority order):
 - [ ] **Phase-1 handoff threshold**: `proxy_topk_agree > 0.75`, reference 0.1193→0.7906 in 280 dense
       steps (job 1709497). Judge `expert_cos_abs_mean` (weight-space repulsion, the 12.13 experiment
       never run) only at step ~300-500 — it is meaningless at step 30-100.
+
+## 2026-09-17 — from writing the ICLR ablation section (`app:ablations`, Overleaf `0718b7c`, NOT pushed)
+
+- [x] **New appendix section written** — six groups (sign, balance, mu, depth-vs-width, LR,
+      proxy-selection cost), all `Avg11`, compiles clean at 5.5 in. Local commit only.
+- [ ] **PUSH DECISION**: `0718b7c` is committed in
+      `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026` and needs the user's explicit go-ahead
+      before `git push`.
+- [ ] **FIX `app:routing`'s sign sentence** — as written it states the *inverted* convention
+      ("$s_k=-E_k$ for Hopfield ... lower is better"). With `app:expert-forms`' energies the
+      correct rule is $s_k=+E_k$ for Hopfield and $s_k=-E_k$ for the W1W2 form as written there.
+      This is a method-section error, not a results one, and it is the most visible remaining
+      artefact of the sign bug.
+- [ ] **Separate the sign from the gradient scale.** `app:degenerate` blames `c` (mean vs
+      1/sqrt(I_e)); §11.2 blames the routing sign. The two arms differ in K *and* `c`, so nothing
+      is attributed. A {sign} x {c} 2x2 at one shape, ~300 steps, would settle it. Until then
+      `app:degenerate` must not be presented as an energy-scale finding.
+- [ ] **Reconcile the routing-collapse numbers.** `app:collapse` reports effK 5.18/16 for the
+      single-block arm and 2.52 for "no fixes"; `audit_expert_collapse.py` (quoted in
+      `configs/iclr_balance/pure_hop_isoP_bal.yml`) reports 1.38 for pure isoP and 2.52 for pure
+      1blk. One label is wrong. Re-run the audit on both checkpoints and pick one probe.
+- [ ] **Strike the §12.14 cross-scale claim** ("134M T12 beat the 400M 4-iteration arm"): the 400M
+      arm is `iclr_big_hop_pure_sink`, which §12.3 already strikes for half tokens. Either re-run
+      it token-matched at 8 GPUs or drop the comparison. The within-scale statements stand.
+- [ ] **Discriminate the balancer result** (the one new number in the section): a pure arm with
+      `sinkhorn_iters: 3` but **mu frozen after warm-up**. That separates "balance beyond effK ~14
+      buys nothing" from "per-forward re-solution injects batch-dependent noise into a recurrent
+      fixed-point iteration". ~30k steps at 4 GPUs to be comparable with the pair above.
+- [ ] **`app:accel-train`'s activation-footprint figure is the inference one.** It quotes
+      `c_f k/K` = 6.4x; during training the buffer is sized by `p = candidates + explore = 4`, so
+      it is 3.2x (§12.21). The section now states both — check the earlier sentence still reads
+      correctly once someone edits `app:accel-train`.
+- [ ] **`app:findings` is stale on the sandwich**: it says the sandwich variant "has not
+      finished". It has — 43.36 Avg11 (mu-recalibrated). One-sentence fix, deliberately not made
+      while adding a new section.
+- [ ] **No completed WSD run exists.** `app:abl-lr` carries a `\CC` saying so; `wsd90k_*_sparse`
+      (1718594 / 1718598) are the arms that would remove it.
