@@ -2385,3 +2385,38 @@ so it is not a like-for-like win over either. Quote it with its token count, alw
    with a 6x block -- the 12.1 bug). The raw `unsharded` eval is queued in the same job and will
    give the delta at this scale; the sandwich's was +0.12pp and this block runs 6x, so it may be
    larger.
+
+#### 12.23a The switch has a TRANSIENT. Do not judge the repulsion setting inside ~200 steps of it.
+
+I read the first 120 steps after the sandwich's switch as "weight-space repulsion is failing" and
+recommended reverting both arms to the subsampled output-space setting. **That was wrong, and the
+data reversed within another 90 steps.** Recorded because the shape is reproducible and the wrong
+call is tempting.
+
+`expert_cos_abs_mean` (lower = more diverse) on the sandwich, switch at step 300:
+
+```
+310 0.6855 | 340 0.7644 | 370 0.8037 | 400 0.8147 | 410 0.8159  <- PEAK
+420 0.8125 | 440 0.8078 | 460 0.8044 | 480 0.8012 | 490 0.7969 | 500 0.7764 | 510 0.7743
+```
+Ten consecutive falls after the peak, i.e. sustained, not noise. `proxy_topk_agree` over the same
+window rose 0.4617 -> 0.4930.
+
+**Pure reproduces the identical shape ~100 steps behind**, and its proxy never dropped below the
+0.50 candidate-set floor at all: 0.6850 (dense) -> 0.5161 at 350 -> 0.5386 at 390 -> 0.5287 at 400,
+with cos still climbing (0.7559 at 400) i.e. still pre-peak.
+
+**Mechanism:** handing selection to the proxy perturbs which experts see which tokens, diversity
+degrades while the routing re-equilibrates, and the regulariser then reasserts. It is a transient of
+the SWITCH, not a verdict on the regulariser.
+
+**Rule: the earliest honest read on `expert_cos_abs_mean` is ~200 steps after the switch, and the
+real comparison against 12.13's 0.43-0.44 target belongs at step 3000-5000.** The project record
+already warned about exactly this class of error -- "a step-30 reading of the tau sweep gave the
+wrong answer and had to be retracted" -- and this is the same mistake with a different metric.
+
+Matched-age comparison against `s90k_pure_T12_sparse` (subsampled output-space, the setting 12.13
+ranked WORST) is still the right yardstick, but quote it at a fair age: at step ~500 the sandwich is
+at cos 0.7764 against that arm's 0.7412, a gap of 0.035 and closing, not the 0.073 it appeared to be
+at step 400. That arm went on to reach cos 0.5628 / proxy 0.7632 by step 27800, so recovery over
+thousands of steps is the documented expectation for either setting.
