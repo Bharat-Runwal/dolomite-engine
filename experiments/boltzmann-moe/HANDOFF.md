@@ -2737,3 +2737,43 @@ Cost the 700M/1B ladder at 8 GPUs / 1 node: 3.3 d and 4.9 d.
 
 The wedge verdict is still worth having for the record and for post-deadline work -- job **1722297**
 is the third attempt at it -- but it is no longer on the critical path.
+
+#### 12.27d MY W-REUSE FIX WAS INSUFFICIENT. The wedge is the RESHAPE, and it is inherent.
+
+Job **1722297**, weight-space repulsion at 2 nodes WITH the `adb90ac9` fix: **626 s, 0 step lines,
+0 NCCL errors, 0 inductor cache writes** -- the wedge signature, distinct from the cluster startup
+fault (which is loud, `ncclRemoteError` at SeqNum=1). So removing the second `_fused_W()` read was
+necessary-looking but **not sufficient**, and 12.27's claim that the second read *was* the mechanism
+is downgraded to "was one of the mechanisms".
+
+**The remaining cause, and it is not a redundancy this time** (`energy_ff.py`,
+`_add_repulsion_loss_weight`):
+
+```python
+Wv = W.reshape(self.n_experts, -1)      # regroups rows BY EXPERT
+```
+
+With `fsdp_algorithm: 2` (per-parameter sharding, DTensor) `W` is sharded on dim 0 -- the `K*I_e`
+dimension. The expert GEMM is happy with that: each rank multiplies its own row slice. But repulsion
+must compare experts pairwise, so it has to regroup dim 0 into `(n_experts, I_e*hidden)`, and that
+reshape crosses shard boundaries -- DTensor must redistribute. **Weight-space repulsion inherently
+requires the whole weight matrix regrouped by expert, so it is inherently a collective**, and passing
+`W` in cannot avoid it. That is why output-space repulsion is fine: it consumes `expert_grads`, which
+are activations and already replicated.
+
+**Keep the fix anyway.** It is bit-identical (verified, aux loss 0.03364023566246033 both ways) and it
+does delete a redundant all-gather of a tensor the forward already held, which is a small win
+single-node. It just does not unlock multi-node.
+
+**Candidate real fixes, none attempted -- this is now POST-DEADLINE work** (12.27c already put
+multi-node off the critical path: ~50% startup flakiness plus 2x8 being unschedulable):
+1. compute the repulsion outside the FSDP forward entirely -- an optimizer-step hook or a
+   post-backward callback, where a gather is legal and cheap because the term is O(1) in tokens;
+2. compute it on local shards and all-reduce the cosine -- needs the sampled pair's rows co-located,
+   which dim-0 sharding does not guarantee, so probably requires choosing pairs per-shard;
+3. use `fsdp_algorithm: 1` for weight-space arms, if its sharding leaves the regroup local;
+4. accept the current state: **weight-space repulsion => single node.**
+
+**Operational rule unchanged and now well-supported: weight-space repulsion is 8-GPU / single-node.
+Output-space repulsion runs multi-node.** Both 400M arms use weight-space and are single-node for
+life, which is fine because 8 GPUs is what the deadline plan assumes anyway.
