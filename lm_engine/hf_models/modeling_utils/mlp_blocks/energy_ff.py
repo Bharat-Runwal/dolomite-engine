@@ -1423,7 +1423,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
 
         if self.training and self.repulsion_coef > 0:
             if self.repulsion_space == "weight":
-                self._add_repulsion_loss_weight()
+                self._add_repulsion_loss_weight(W)   # reuse the gathered W -- see 12.27
             elif self.repulsion_subsample > 0:
                 # same estimator the sparse path uses, so a dense and a sparse arm with the same
                 # repulsion_subsample are directly comparable on this term
@@ -1619,7 +1619,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             if need_probe:
                 self._probe_expert_cos(gated_sub, W=W, pref=pref)
         elif self.training and self.repulsion_coef > 0:
-            self._add_repulsion_loss_weight()
+            self._add_repulsion_loss_weight(W)       # reuse the gathered W -- see 12.27
 
         if not torch.compiler.is_compiling():
             self._log_metrics(p_full, out)
@@ -1932,11 +1932,23 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             self._sink_mu_absmax.copy_(mu.abs().max())
         return mu
 
-    def _add_repulsion_loss_weight(self) -> None:
-        """Repulsion on expert WEIGHT blocks. No token dimension, so O(1) in N."""
+    def _add_repulsion_loss_weight(self, W: torch.Tensor | None = None) -> None:
+        """Repulsion on expert WEIGHT blocks. No token dimension, so O(1) in N.
+
+        PASS `W` IN WHENEVER THE CALLER ALREADY HAS IT. `self._fused_W()` resolves the closure
+        `lambda: holder.W.weight`, which under FSDP is a SHARDED parameter -- so calling it here
+        is a SECOND gather of a tensor the fused/sparse forward has already materialised for its
+        own GEMM. Inside the compiled region that second read is an all-gather issued from within
+        a dynamo graph, and ACROSS NODES IT DEADLOCKS: HANDOFF 12.27 isolated the long-standing
+        2-node wedge to exactly this path (weight-space repulsion wedges at 2 nodes; the same
+        config with repulsion off, or with output-space repulsion, runs clean). Reusing the
+        caller's `W` removes the second read, so it is both faster and multi-node safe.
+        The no-argument form is kept for the looped path, which has no fused W to hand.
+        """
         if not self._repulsion_fires():
             return
-        W = self._fused_W() if self.fused_experts else None
+        if W is None:
+            W = self._fused_W() if self.fused_experts else None
         if W is None:                      # looped path: stack the expert slices
             W = torch.cat([e._W_slice() for e in self.experts], dim=0)
         Wv = W.reshape(self.n_experts, -1)
