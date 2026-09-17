@@ -2450,3 +2450,53 @@ Practical consequence: for hybrids the mu recalibration is nearly optional (+0.0
 harness is deterministic to 4 dp -- but small). For pure arms it is worth 1.6-1.8 nats and is
 mandatory. The sandwich sits in between, which is consistent with it also sitting between hybrid
 (-0.03pp) and pure (-0.68pp) on proxy-selection cost.
+
+### 12.25 NEGATIVE: the 2-node wedge is NOT fixed. `repulsion_tensor_idx` was not the cause.
+
+Job **1719429**, 2 nodes x 4 GPUs, `fused_experts: true` + `sparse_forward: true` +
+`repulsion_tensor_idx: true` + `repulsion_space: weight`. Killed at **790 s**. All three of
+ACCEL_FINDINGS' documented wedge signatures reproduced:
+
+| signature | 2026-09-15 wedge | 1719429 |
+|---|---|---|
+| first log line -> first step | never (17+ min, killed) | **never, 790 s, 0 step lines** |
+| inductor cache writes | **0** | **0 in the last 3 min** (76 total, all stale) |
+| log frozen on | one dynamo warning | **a dynamo `functools.lru_cache` warning** |
+
+**So the hypothesis in 12.22/`d0f2fef1` was WRONG.** `repulsion_tensor_idx` is labelled in
+`config/mlp.py` as "the leading suspect for the fused_experts multi-node hang" and it independently
+unstuck a 2-node job that had stalled 13 min -- but with it enabled AND with `repulsion_space:
+weight` (which avoids the output-space einsum on data-dependent indices altogether), the wedge
+persists. Suspect (2) is eliminated.
+
+**Scope caveat:** the 2026-09-15 wedge was `fused_experts` ALONE; this probe runs `fused_experts` +
+`sparse_forward`, so it does not isolate which component hangs. Operationally that does not matter --
+our configs require both (`sparse_forward` asserts `fused_experts`) -- but a diagnosis must not
+assume the two wedges share a cause.
+
+**Remaining suspects, from ACCEL_FINDINGS:**
+1. the single large fused GEMM shape;
+3. an FSDP-gather interaction with the `weight_fn` closure that reads `holder.W.weight` inside the
+   compiled region.
+Bisect in flight: job **1719489**, identical but `repulsion_coef: 0.0`, which removes the repulsion
+path entirely. RUNS => repulsion is implicated even with tensor indices. WEDGES => it is (1) or (3).
+
+#### The planning consequence, which is the expensive part
+
+**One node / 8 GPUs is the only validated shape.** And 2x8 could not even be SCHEDULED (job 1718609
+sat PEND 1.5 h: "requirements for reserving resource (ngpus_physical) not satisfied: 236 hosts"),
+whereas 2x4 placed instantly -- so 16-GPU runs are blocked twice over, by the wedge and by
+placement. Cost the ladder at 8 GPUs:
+
+| arm | 8 GPUs, sparse |
+|---|---|
+| 400M (running now) | ~2.2 d |
+| 700M (d=1280, I_e 25031) | ~3.3 d |
+| 1B (d=1536, I_e 30966) | ~4.9 d |
+
+With ~7 days to Sep 24, **1B does not fit** alongside the two 400M arms. Options, in order of
+preference: (a) diagnose the wedge -- suspects (1) and (3) are one config change apart and each
+probe is ~10 min on 8 GPUs; (b) make 700M the top of the ladder; (c) launch 1B anyway and use WSD's
+branch-decay (12.20) to harvest whatever step it reaches by the deadline, reporting the tokens
+actually trained. (c) is the only option that yields a 1B number at all, and WSD is what makes it
+publishable rather than half-annealed.
