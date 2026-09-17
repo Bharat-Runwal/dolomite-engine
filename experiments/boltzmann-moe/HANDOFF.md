@@ -2701,3 +2701,39 @@ higher `proxy_rank`, and see whether agreement lifts off the floor.
 reference sits at 0.68, the proxy is contributing nothing and the sparse arms are effectively running
 `sparse_explore`'s deterministic rotation as their router -- which works, but is not the method the
 paper describes.
+
+#### 12.27c MULTI-NODE IS ~50% FLAKY AT STARTUP, independently of the wedge
+
+Four 2-node x 4-GPU attempts tonight, four distinct host pairs:
+
+| job | hosts | outcome |
+|---|---|---|
+| 1719489 | p1-r18-n3, p2-r16-n1 | clean, 120 steps |
+| 1719508 | p1-r15-n4, p2-r22-n1 | **`ncclRemoteError` at SeqNum=1** |
+| 1719544 | p4-r25-n4, p3-r03-n1 | clean, 120 steps |
+| 1720214 | p2-r15-n4, p3-r10-n3 | **`ncclRemoteError` at SeqNum=1**, 8 errors |
+
+**Two of four died on the FIRST collective**, each on a different host pair, with
+`last completed work: -1` on every rank. Initially I treated this as bad hosts and added
+`p1-r15-n4` / `p2-r22-n1` to a `SUSPECT_HOSTS` list. **That inference now looks wrong**: if a handful
+of hosts among ~500 were at fault, drawing them twice in four attempts would be very unlikely. This
+reads as general 2-node initialisation flakiness on this cluster, so the suspect list is not the
+right tool and was not extended.
+
+**Do not confuse the two multi-node failures. They are different and only one is ours:**
+
+| | wedge (ours) | startup fault (cluster) |
+|---|---|---|
+| NCCL errors | **0** | **8**, `ncclRemoteError` |
+| inductor cache writes | 0 | n/a, dies first |
+| symptom | silent hang, log frozen on a dynamo warning | loud failure at SeqNum=1, `last completed work: -1` |
+| when | after compile, never reaches step 1 | before training begins |
+
+**Consequence for planning, and it is the important part.** Even with the wedge fixed, a 16-GPU run
+has roughly a coin-flip chance of failing at startup and would need babysitting to restart. Combined
+with 12.25's finding that 2x8 could not be SCHEDULED at all (1.5 h PEND against 2x4 placing
+instantly), **multi-node is not a viable path for the Sep 24 deadline regardless of the wedge.**
+Cost the 700M/1B ladder at 8 GPUs / 1 node: 3.3 d and 4.9 d.
+
+The wedge verdict is still worth having for the record and for post-deadline work -- job **1722297**
+is the third attempt at it -- but it is no longer on the critical path.
