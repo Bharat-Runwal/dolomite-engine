@@ -2500,3 +2500,63 @@ probe is ~10 min on 8 GPUs; (b) make 700M the top of the ladder; (c) launch 1B a
 branch-decay (12.20) to harvest whatever step it reaches by the deadline, reporting the tokens
 actually trained. (c) is the only option that yields a 1B number at all, and WSD is what makes it
 publishable rather than half-annealed.
+
+### 12.26 DIAGNOSED: the 2-node wedge is REPULSION, not the fused GEMM
+
+Bisect job **1719489**: identical to the wedging probe except `repulsion_coef: 0.0`. It **RUNS** at
+2 nodes x 4 GPUs -- step 10 at 4.279 s/step, step 20 at 2.970 s/step -- and crossed the
+`sparse_start_step` recompile too.
+
+**So `fused_experts` + `sparse_forward` are FINE multi-node.** ACCEL_FINDINGS' suspect (1), "the
+single large fused GEMM shape", is **exonerated**: that GEMM is present and running in the bisect.
+The hang is in the repulsion path, and `repulsion_tensor_idx: true` does not prevent it (12.25).
+
+This matters beyond the wedge: it means the 1.61x fusion and the ~2x sparsity are NOT
+single-node-only capabilities. Only repulsion is.
+
+#### The suspected mechanism, and it merges suspects (2) and (3)
+
+`build_boltzmann_moe` (energy_ff.py:2406-2411) builds the fused spec with
+
+```python
+# `weight_fn` is a closure so FSDP re-gathers are picked up
+# (same reason the expert W_slice closures exist).
+"weight_fn": (lambda: holder.W.weight),
+```
+
+and the repulsion branch (energy_ff.py:1177) is
+
+```python
+if self.repulsion_space == "weight":
+    self._add_repulsion_loss_weight()      # goes through weight_fn -> the SHARDED parameter
+else:
+    self._add_repulsion_loss(expert_grads) # activations only
+```
+
+**Weight-space repulsion reads an FSDP-sharded parameter inside the compiled region**, which needs an
+all-gather; at 2 nodes that is an INTER-NODE collective issued from inside a dynamo graph. That is
+the deadlock shape the project memory already warned about -- *"the inductor `spmd_check` all_gather
+hang that data-dependent MoE routing triggers"*. So ACCEL_FINDINGS' suspects (2) and (3) are probably
+ONE mechanism, reachable specifically when `repulsion_space: weight`.
+
+**Decisive test in flight: job 1719508**, identical but `repulsion_space: output` +
+`repulsion_subsample: 64`, which routes to `_add_repulsion_loss(expert_grads)` and never touches
+`holder.W.weight`.
+* RUNS => the culprit is the sharded-weight read, and multi-node is available with output-space
+  repulsion.
+* WEDGES => repulsion hangs in either space, so the sharded read is not it and the remaining
+  candidate is the repulsion graph itself.
+
+#### If output-space wins, this changes the 700M/1B plan
+
+The running 32B arms use `repulsion_space: weight` (12.13 ranks it better for expert diversity from
+scratch, and the sandwich is currently vindicating that -- cos 0.6490 at step 1000 against the
+subsampled arm's 0.7350). **Those two arms therefore cannot go multi-node, ever, without changing
+the regulariser mid-run.** But 700M/1B are not launched yet, so they could take output-space
+repulsion and 16 GPUs, halving their wall clock -- at the cost of the weaker diversity control, and
+of not being regulariser-matched to the 400M arms.
+
+That is a real trade to decide deliberately, not by default:
+* weight-space + 8 GPUs: better diversity, matched to the 400M arms, 1B ~4.9 d (does not fit Sep 24).
+* output-space + 16 GPUs: weaker diversity, unmatched, 1B ~2.4 d (fits) -- IF 2x8 can be scheduled,
+  which tonight it could not (1.5 h PEND; 2x4 placed instantly).
