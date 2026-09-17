@@ -84,7 +84,13 @@ BAD_HOSTS="p4-r10-n4"
 # rank) while an otherwise-identical job on p1-r18-n3 / p2-r16-n1 ran clean. Remove them once
 # either is seen healthy, and promote to BAD_HOSTS on a second failure (that is the bar
 # ACCEL_FINDINGS used for p4-r10-n4: two runs, 10 fabric errors each).
-SUSPECT_HOSTS="${SUSPECT_HOSTS-p1-r15-n4 p2-r22-n1}"
+# SUSPECT list is now EMPTY on purpose. p1-r15-n4 and p2-r22-n1 were put here after a single
+# SeqNum=1 ncclRemoteError each, then p2-r15-n4 and p3-r10-n3 failed the same way -- four distinct
+# hosts, one fault apiece, which reads as general multi-node startup flakiness rather than bad
+# hardware. Excluding hosts on one fault shrinks the candidate pool for no gain.
+# The bar for BAD_HOSTS is TWO faults on the same host (what p4-r10-n4 met). Check the accumulated
+# evidence before adding anything:  bash scripts/host_placement_log.sh report
+SUSPECT_HOSTS="${SUSPECT_HOSTS-}"
 sel=""
 for h in $BAD_HOSTS ${SUSPECT_HOSTS:-}; do sel="$sel && hname!='$h'"; done
 sel="${sel# && }"
