@@ -2623,3 +2623,31 @@ whole life. 700M/1B are unlaunched and may pick either:
 
 The third row is the only one that is both fast and matched, which is the argument for spending an
 hour on the fix rather than accepting the trade.
+
+#### 12.27a OPERATIONAL: watch step time on a multi-day run and REQUEUE on a sustained 2x regression
+
+`t32B_pure_it4_sparse` ran at ~3.2 s/step to step ~1100, then settled at **8.7-9.2 s/step** and
+stayed there. Not noise, not the model: its exec host `p4-r05-n1` had **17 job slots in use** while
+the sandwich's `p5-r20-n1` had **1**, and the two arms are the same size, same GPU count, same code.
+
+Killed and resubmitted (job 1718598 -> **1720770**). It drew `p2-r20-n4` at **2 slots** and returned
+to **~3 s/step** immediately, resuming from its step-1200 checkpoint.
+
+**Why this is the only lever.** The watchdog comments already record that every alternative fails
+here: `-x` (whole node) is unobtainable -- "requirement for exclusive execution not satisfied: 663
+hosts" -- and left both 32B arms PEND; reserving 16 of a host's 96 slots does not schedule
+("ngpus_physical not satisfied"); and `select[ut<0.5]` filters only at DISPATCH, so a host chosen at
+1 slot drifts to 9. The root cause is that `-n <nnodes>` requests ONE slot per host for EIGHT GPUs,
+so the job is cgroup-limited to about one core and the dataloader starves as soon as neighbours
+arrive.
+
+**The rule.** A 3x step-time regression is INVISIBLE in the loss curve -- the curve just advances
+more slowly in wall-clock -- and it silently converts a 2.2-day run into 6.4 days, which was the
+difference between making and missing the Sep 24 deadline. With `save_interval: 200` a requeue costs
+~10 minutes. So: log step time, compare against the arm's own early median, and requeue on a
+sustained 2x+ regression. Check the host's slot count (`bhosts -l <host>`, the `njobs`/`run`
+columns) to confirm it is contention before blaming the code.
+
+**Gap found while diagnosing this:** `sparse_overflow` is NOT appearing in either arm's logged
+metrics, so capacity overflow could not be ruled out as a contributor by measurement -- only by the
+17-vs-1 slot difference. Worth wiring into the metrics if this recurs.
