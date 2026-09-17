@@ -1,0 +1,235 @@
+# =============================================================================
+# s8e4_denseGPT_energyMoE_K64k2.yml
+# For Bharat -- runnable AS-IS on 64 GPUs (8 nodes x 8), same budget as your own run.
+#
+# This is your s8e4_stdmoe_fh2_boltz_topk2.yml with (a) our sparse energy MoE in the
+# energy layers and (b) the 8 GPT layers made DENSE. (b) is the point: with no standard
+# MoE anywhere, any gain is attributable to the energy MoE rather than to "there is an
+# MoE somewhere in the model".
+#
+# IDENTICAL to yours:
+#   - datamix: 0.35/0.35 web-nemotron-cc-hq p2_0/p2_1 + 0.15 megamath-web-pro_0
+#              + 0.15 finemath-3plus-rewritten_0, split 99,0.5,0.5, seq 4096
+#   - tokenizer granite-4.0-tiktoken, vocab 100352
+#   - 12 DISTINCT layers, NO recurrence: 8x softmax_attention then 4x energy_attention
+#   - d=1024, 16 heads; 30000 steps; lr 2e-3 cosine, 2000 warmup, decay_factor 0.1
+#   - micro_batch_size 1, gradient_accumulation_steps 4, seq 4096
+#     => 64 x 1 x 4 x 4096 = 1,048,576 tokens/step, 31.5B total. Same as yours.
+#
+# CHANGED, and why:
+#  1. GPT layers 0-7: MoE (8x1664 top-2) -> DENSE swiglu, intermediate_size 4096.
+#     Removes the confound. Frees parameter budget, which goes to the energy experts.
+#  2. Energy layers 8-11: BoltzmannMoE_Energy_MLP -> EnergyFF_BoltzmannMoE with
+#     expert_kind: hopfield. The legacy class predates Sinkhorn, sparsity and the sign audit.
+#  3. e_sign_override: "pos" -- REQUIRED for hopfield, which stores +A_i. (Composable w1w2
+#     needs "neg"; a blanket "pos" is a silent no-op there. The sign is per expert kind.)
+#  4. K 8 -> 64 experts, top_k 2, I_e 2846. Same total expert params, 8x more experts:
+#     p/K falls 0.50 -> 0.0625, so the sparse ceiling rises from ~2x to ~16x on the expert
+#     GEMMs (~6x Amdahl on the full forward). k stays 2 -- active width is k*I_e, and k=8
+#     spends 4x the compute for no extra capacity (it also OOMed for us at this scale).
+#  5. Sinkhorn load balancing (sinkhorn_iters: 3) -- the chemical potential, i.e. the dual
+#     variable of the batch-marginal constraint. No learned gate, no auxiliary loss.
+#     sinkhorn_persist_mu: true and sinkhorn_mu_iters: 1 (== layer_iterations here) are
+#     MANDATORY: without them the router trains tilted and evaluates untilted (+1.587 nats).
+#  6. Sparse training: sparse_start_step 500 => DENSE for 500 steps so the rank-16 proxy
+#     distils against the exact all-K routing distribution, then sparse for the rest, in ONE
+#     job. Costs one torch.compile recompile at the switch; the flag derives from global_step
+#     so all ranks flip on the same step with no communication.
+#     renormalize_topk: true is MANDATORY, not a tuning knob -- without it top-2 of 64 carries
+#     only a fraction of the softmax mass and top-k becomes a rescaling, not a sparsification.
+#  7. repulsion_space: output (+ repulsion_subsample: 64). Weight-space repulsion regroups a
+#     dim-0-sharded DTensor by expert and WEDGES on more than one node -- a silent hang with
+#     zero NCCL errors. You are on 8 nodes, so this one matters.
+#  8. energy_proj_type: psd_anti (your `proj_mode` spelling does not exist in the code -- it
+#     was a silent no-op). Pi = SS^T + (A-A^T): SS^T is PSD by construction and the update is
+#     h := h - Pi(grad_E), so Edot = -||S^T grad_E||^2 <= 0, a real energy-descent guarantee.
+#     Measured free: step times matched the unconstrained form to 0.3%.
+#  9. max_to_keep: 2 -- pydantic rejects a null reloaded from a checkpoint config.
+#
+# TWO THINGS YOU MUST PATCH ON YOUR TREE, or results will mislead:
+#  * torch._dynamo.config.recompile_limit defaults to 8. `_run_block` guards on the layer
+#    index, so a 12-DISTINCT-layer model exceeds it at layer 7 and dynamo silently falls back
+#    to EAGER -- torch_compile becomes a no-op and any wall-clock number is meaningless.
+#    We raise it in lm_engine/distributed.py (8 -> 56 for 12 blocks).
+#  * export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True inside the job script (not at
+#    submit time -- an LSF requeue re-runs the original command and drops submit-time env).
+#
+# A NOTE ON YOUR HEADER: it says the purpose is energy_scale_mode: sqrt_inv_d replacing a
+# learnable temperature -- but the file never sets energy_scale_mode and does set
+# temperature: 1.0, and that field does not exist in our tree at all. Worth checking whether
+# the "fixed sqrt(1/d) beats learnable T" result actually had it enabled.
+#
+# MEASURED on our side (8 GPUs, this exact 12-layer dense-GPT shape): ~4.44 s/step in the
+# dense phase, median grad_norm ~0.85 (healthy, below the 1.0 clip), loss descending
+# monotonically. ~1.00B params: embed 103M + attn 50M + dense gpt_ffn 101M + energy 746M.
+# =============================================================================
+
+datasets:
+  # THE COLLEAGUES' MIX, verbatim: 70% web / 30% math. All four paths verified present.
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 12
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]   # NO recurrence, as upstream
+    init_method: normal
+    tie_word_embeddings: true
+      # PSD-antisymmetric: Pi = SS^T + (A-A^T). SS^T is PSD by construction and the
+      # update is h := h - Pi(grad_E), so Edot = -||S^T grad_E||^2 <= 0 -- the block
+      # cannot ascend, and the antisymmetric part rotates at constant energy.
+      # Chosen 2026-09-17: computationally free (step times matched dual to 0.3%) and
+      # measurably indistinguishable in loss (all three arms inside a +-0.010 CI).
+      # WATCH: PSDA had a documented 5k-10k step instability at d=1280 / lr 2e-3 before
+      # the 0.5/sqrt(d) S-init rescale; our A/B only ran 2500 steps, so that window is
+      # NOT covered by evidence. Monitor grad_norm and loss through 10k.
+    energy_proj_type: psd_anti      # was upstream's no-op `proj_mode: unconstrained`
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+
+    sequence_mixer_blocks:
+      - &sattn {sequence_mixer_type: softmax_attention, num_attention_heads: 16, num_key_value_heads: 16, add_bias: false, attention_multiplier: 0.125}
+      - *sattn
+      - *sattn
+      - *sattn
+      - *sattn
+      - *sattn
+      - *sattn
+      - *sattn
+      - &eattn {sequence_mixer_type: energy_attention, num_attention_heads: 16, num_key_value_heads: 16, add_bias: false, attention_multiplier: 0.125}
+      - *eattn
+      - *eattn
+      - *eattn
+
+    mlp_blocks:
+      - &sffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 4096, add_bias: false}
+      - *sffn
+      - *sffn
+      - *sffn
+      - *sffn
+      - *sffn
+      - *sffn
+      - *sffn
+      - &emoe
+        mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 182144        # I_e = 182144/64 = 2846
+        n_experts: 64
+        top_k: 2
+        e_sign_override: "pos"          # hopfield stores +A_i
+        hopfield_grad_scale: sqrt_consistent
+        routing_norm: zscore
+        temperature: 1.0
+        # ---- balancing: chemical potential, no learned gate, no aux loss ----
+        sinkhorn_iters: 3
+        sinkhorn_persist_mu: true
+        sinkhorn_mu_iters: 1            # == layer_iterations entry for these layers
+        repulsion_tensor_idx: true
+        # ---- diversity: OUTPUT space, the only multi-node-safe choice ----
+        repulsion_form: abs
+        repulsion_space: output
+        repulsion_coef: 0.1
+        repulsion_subsample: 64
+        n_repulsion_pairs: 4
+        cos_probe_interval: 100
+        # ---- sparsity ----
+        renormalize_topk: true
+        fused_experts: true      # MANDATORY with sparse_forward -- the sparse path is built on the
+                                 # fused-weight view and asserts this (energy_ff.py). An earlier
+                                 # attempt to set false as an OOM workaround died in 31s on that
+                                 # assert. K=64 at I_e<=2846, mbs 2 needs ~2.99 GiB for the dense
+                                 # intermediate vs the 5.42 GiB that OOMed at I_e=5549, so fused fits here.
+        sparse_forward: true
+        sparse_start_step: 500   # dense warmup so the proxy distils vs exact all-K
+        sparse_candidates: 2
+        sparse_explore: 2
+        proxy_rank: 16
+        proxy_kind: subspace
+        proxy_out_dim: 512
+        proxy_iters: 1
+        proxy_loss_coef: 0.01
+        gelu_grad_method: sigmoid
+        activation_function: gelu
+        add_bias: false
+      - *emoe
+      - *emoe
+      - *emoe
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/s8e4_denseGPT_energyMoE_K64k2
+  save_interval: 2000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: s8e4_denseGPT_energyMoE_K64k2
+
+training_parameters:
+  num_training_steps: 30000
+  eval_interval: 2000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 28000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
+  gradient_checkpointing_method: block

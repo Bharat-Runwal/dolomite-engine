@@ -327,6 +327,16 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   "subspace" was ever measured at high agreement -- HANDOFF 7.6's 0.90 top-2 is for that
     #   form; the fitted "quad" head reaches 0.348 at r=8 against a 0.125 chance floor.
     proxy_kind: str = "quad"
+    # proxy_init: how proxy_V / proxy_B start. "random" (default, back-compatible) is
+    # torch.randn. "svd" refits them from the ACTUAL rank-r factorisation of each expert
+    # weight at the dense->sparse switch: W_k = U S V^T, take V[:, :r] as proxy_V and the
+    # m most energetic rows of U S as proxy_B. MEASURED 2026-09-17 on a trained 1B ckpt:
+    # top-2 agreement with the exact energies was 0.0893 (distilled) vs 0.5541 (SVD) vs
+    # 0.0378 (random) -- a 6.2x improvement over what distillation had reached.
+    # NOTE SVD is optimal for ||W_k x|| in Frobenius norm, NOT for RANKING
+    # mean(gelu(W_k x)^2) across experts, so it is a warm start, not a replacement for the
+    # distillation that continues afterwards.
+    proxy_init: str = "random"
     # proxy_out_dim: m rows of B_k to evaluate, 0 = all I_e. E_k is a MEAN over I_e coordinates,
     #   so an m-subsample is unbiased with variance ~1/m. Needed because the full-I_e form does
     #   the SAME elementwise work and holds the SAME (T,K,I_e) activations as the dense path,

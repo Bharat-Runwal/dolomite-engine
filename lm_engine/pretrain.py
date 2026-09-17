@@ -682,6 +682,33 @@ def main(args_class: type[DistillationArgs | TrainingArgs] = TrainingArgs) -> No
     total_params, active_params = model_container[0].calculate_num_parameters()
     experiments_tracker.log_config({"num_parameters": total_params, "active_parameters": active_params})
 
+    # REPRODUCIBILITY: world size is NOT in the config -- it comes from the launcher -- so
+    # tokens/step and the total token budget could not be recovered from a wandb run alone, and
+    # two arms were compared at different budgets before anyone noticed. Push the resolved
+    # numbers into the run config so every run self-documents what it actually trained on.
+    import os as _os
+    _world = int(_os.environ.get("WORLD_SIZE", "1"))
+    _local = int(_os.environ.get("LOCAL_WORLD_SIZE", "0")) or 1
+    _mbs = args.training_parameters.micro_batch_size
+    _ga = args.training_parameters.gradient_accumulation_steps
+    _seq = args.datasets[0].class_args.get("sequence_length") if args.datasets else None
+    _tps = (_world * _mbs * _ga * _seq) if _seq else None
+    experiments_tracker.log_config(
+        {
+            "world_size": _world,
+            "gpus_per_node": _local,
+            "num_nodes": max(1, _world // max(1, _local)),
+            "micro_batch_size": _mbs,
+            "gradient_accumulation_steps": _ga,
+            "sequence_length": _seq,
+            "tokens_per_step": _tps,
+            "total_tokens": (_tps * args.training_parameters.num_training_steps) if _tps else None,
+            "launch_cmd": _os.environ.get("DOLOMITE_LAUNCH_CMD", ""),
+            "lsf_job_id": _os.environ.get("LSB_JOBID", ""),
+            "lsf_hosts": _os.environ.get("LSB_MCPU_HOSTS", ""),
+        }
+    )
+
     # main training loop
     with disable_generation_cache(), enable_kernels(args.kernel_args.kernels):
         train(

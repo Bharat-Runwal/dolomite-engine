@@ -225,6 +225,118 @@
 > Then, 30–60 s after launch, confirm the arm reached a first step and that its logged
 > `learning_rate` and tokens/step are the intended values.
 
+> ## 📊 DATAMIX REFERENCE — `configs/cmix/REFERENCE_s8e4_stdmoe_fh2_boltz_topk2.yml`
+>
+> **That vendored file is THE reference for the datamix.** It is the colleagues'
+> `s8e4_stdmoe_fh2_boltz_topk2.yml` (`Bharat-Runwal/dolomite-engine`, branch
+> `bsaha/boltzmoe-iclr27`), copied in verbatim on 2026-09-17. Any new run that needs to be
+> comparable to a colleague's number takes its `datasets:` block from there, not from our
+> older configs.
+>
+> **The mix differs from ours, and it is the reason our numbers are not comparable to theirs
+> on any task:**
+>
+> | | reference (theirs) | our historical mix |
+> |---|---|---|
+> | `web-nemotron-cc-hq-p2_0` | 0.35 | 0.5 |
+> | `web-nemotron-cc-hq-p2_1` | 0.35 | 0.5 |
+> | **`megamath-web-pro_0`** | **0.15** | — |
+> | **`finemath-3plus-rewritten_0`** | **0.15** | — |
+> | `split` | `99,0.5,0.5` | `99.5,0.5,0` |
+>
+> **70% web / 30% math against our 100% web / 0% math.** Expect this to move MMLU and
+> GSM8K-CoT most, but it is not confined to those — treat EVERY cross-group comparison as
+> confounded until the mix is matched. Both math sets are present on disk
+> (`megamath-web-pro_0` 52 GB, `finemath-3plus-rewritten_0` 79 GB ≈ 13B and 21B tokens), so
+> 0.15 × 32B = 4.8B each stays under one epoch.
+>
+> Use a **separate `data_cache_path`** (`/proj/dmfexp/nima/.cache/megatron_cmix`) — the
+> Megatron blend index is keyed on the mix, so pointing at the 100%-web cache dir either
+> collides or silently forces a rebuild. Do NOT write into the colleagues' `cache-bsaha`.
+>
+> **Datamix-controlled arms live in `configs/cmix/`:**
+> - `cmix_134M_recur.yml`, `cmix_400M_pure_it4_sparse.yml`, `cmix_400M_sandwich_sparse.yml`
+>   — byte-identical to their `projab_dual_unconstrained` / `t32B_*` parents EXCEPT the
+>   datamix and the run names (verified: 0 diff lines outside those). Our recurrence,
+>   hopfield experts, Sinkhorn and sparsity are UNCHANGED, so each is a clean A/B for the
+>   mix alone.
+> - `cmix_1B_stacked_sparse.yml` — the colleagues' architecture (12 DISTINCT layers, **no
+>   recurrence**: 8× softmax-attn + std MoE, then 4× energy-attn + Boltzmann MoE) ported to
+>   our code. Their `mlp_type: BoltzmannMoE_Energy_MLP` (legacy w1w2, pre-Sinkhorn,
+>   pre-sparsity) → `EnergyFF_BoltzmannMoE` + `expert_kind: hopfield` + `e_sign_override:
+>   "pos"`.
+>
+> **Three traps in the upstream file, all corrected in our port:**
+> 1. `proj_mode: unconstrained` — **that spelling does not exist in our tree** (0 refs). It
+>    was a silent no-op that happened to land on the same default. Ours says
+>    `energy_proj_type`.
+> 2. Its header states its whole purpose is `energy_scale_mode: sqrt_inv_d` "instead of a
+>    learnable temperature" — but **the body never sets `energy_scale_mode`** and does set
+>    `temperature: 1.0`, and the field does not exist in our tree either. So the file is not
+>    what its header claims. Worth raising with them: any "fixed sqrt(1/d) beats learnable T"
+>    conclusion may rest on a config that never enabled it.
+> 3. Hopfield stores **one** matrix per expert where legacy w1w2 stores two, so at their
+>    `intermediate_size: 76288` the port is **~793M, not the ~1105M** of the upstream file.
+>    Restoring 1.1B is either 2× `I_e` (19072) or 2× experts (K=16); K=16 is what our own
+>    results favour, but expert count was left at their 8 for the first port.
+>
+> **`repulsion_space` differs by scale, deliberately.** The `cmix_400M_*` arms inherit
+> `weight` from their parents (single-node only — weight-space reshapes a dim-0-sharded
+> DTensor by expert and WEDGES on >1 node, silently, with 0 NCCL errors). The 1B port is
+> multi-node by construction, so it uses `output` + `repulsion_subsample: 64`.
+
+> ## 🔒 RUN CONSISTENCY FOR THE PAPER — ISO-TOKEN, AND GPU COUNT IS RECORDED, NOT REMEMBERED
+>
+> **Every paper arm trains on exactly 32.0B tokens on the `configs/cmix/` datamix.** Decided
+> 2026-09-17 after an audit found the whole 134M tier at **7.9B** (a quarter of budget) and
+> `cmix_134M_gptswitch` at **23.6B** — i.e. the baseline had 3x the tokens of the arms it was
+> being compared against. That single defect inverted two reported conclusions:
+> at 90000 steps gptswitch looked competitive (Avg11 43.82) and looked *better* on wiki ppl
+> (40.58 vs 44.54); re-evaluated at its **step-30000** checkpoint for a matched 7.9B it scores
+> **42.31** with ppl **55.45** — so hybrid actually leads by **+2.46pp** and wins on perplexity
+> too. Never compare arms without checking the budget first.
+>
+> **`tokens/step = GPUS x micro_batch_size x gradient_accumulation_steps x sequence_length`, and
+> GPUS IS NOT IN THE CONFIG.** It comes from the launcher, so a config alone cannot tell you what
+> a run trained on. Three mechanisms now close that hole — use them instead of reasoning:
+>
+> 1. **wandb run config** (`lm_engine/pretrain.py`): every run logs `world_size`,
+>    `gpus_per_node`, `num_nodes`, `micro_batch_size`, `gradient_accumulation_steps`,
+>    `sequence_length`, `tokens_per_step`, `total_tokens`, `launch_cmd`, `lsf_job_id`,
+>    `lsf_hosts` into the run config, so they are sortable run columns and each run
+>    self-documents its own budget.
+> 2. **Launch ledger** (`experiments/boltzmann-moe/logs/launch_ledger.tsv`), written by
+>    `scripts/bsub/submit_train.sh` on every submission: utc, jobid, name, config, **gpus /
+>    nodes / gpus_per_node**, queue, wall, mem, mbs, ga, seq, steps, **tokens_per_step**,
+>    **total_tokens**, git commit, config sha256, and the exact command line. The resolved
+>    config is snapshotted to `logs/launch_configs/<name>_<jobid>.yml`.
+> 3. **`scripts/report_cmix_evals.py`** prints Avg11 / MMLU / GSM8K(flex AND strict) / wiki-ppl
+>    per arm, resolves GPU count from the ledger or EMPIRICALLY from the log
+>    (`billion_tokens_per_day * 1e9 * step_time / 86400`), and **refuses to assume** — it prints
+>    `NOT ISO-TOKEN` with the budget groups whenever arms disagree.
+>
+> **Do not hand-assemble a results table.** A dropped cell once reported wiki-ppl 40.58 as a
+> GSM8K score, and `flexible or strict` silently reported strict-match because a genuine `0.0`
+> flexible score is falsy in Python. Both are fixed in `report_cmix_evals.py`; run it.
+>
+> **The 32B reruns are `configs/cmix/cmix_134M_*_32B.yml`** — 122070 steps x 262144 tok/step,
+> mbs 4 / ga 2, **LAUNCH AT EXACTLY 8 GPUs**. They are RERUNS, not resumes: the 30000-step arms
+> completed their cosine decay to the LR floor, so extending the schedule and resuming would
+> re-raise the LR mid-run. The 7.9B numbers remain valid as a shorter-budget datapoint.
+>
+> **Eval harness:** the colleague's checkout is `experiments/eval_scripts/lm-evaluation-harness`
+> (`lm_eval 0.4.9.2`); site-packages has **0.4.11**. For our tasks the definitions are
+> scoring-identical — every diff is a `dataset_path` rename (`openai/gsm8k` vs `gsm8k`) — and
+> `gsm8k-cot.yaml`'s filters are byte-identical (`strict-match` on `The answer is (...)`,
+> `flexible-extract` on `(-?[$0-9.,]{2,})|(-?[0-9]+)` with `group_select: -1`). **Report
+> flexible-extract**, but record both.
+>
+> **CHECKPOINT RETENTION: `max_to_keep: 2` everywhere.** `cmix_134M_gptswitch` was the lone
+> exception at **95**, which is why its step-30000 checkpoint survived to rescue the iso-token
+> comparison — but it also cost **136 GB of the 237 GB** under `results/cmix`, on a filesystem
+> at **94% full**. Keep 2, plus landmark checkpoints deliberately preserved for iso-token
+> re-evaluation.
+
 > ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
 >
 > **CANONICAL (2026-09-14 onward): `Avg11`**, the paper `tab:scaling` recipe, the

@@ -1,0 +1,8 @@
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix1B_12layers_K64k2_gptDense
+  iteration: 500
+
+mixed_precision_args:
+  dtype: bf16
+
+unsharded_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix1B_12layers_K64k2_gptDense/unsharded_step500

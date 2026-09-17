@@ -3,6 +3,7 @@
 # **************************************************
 
 import logging
+import os
 from functools import partial
 from typing import Callable
 
@@ -54,6 +55,11 @@ if is_torchao_available():
 
     from .fp8 import FP8Manager
 
+# NOTE: this is OURS, not a torch default -- every related torch default is off. It makes
+# `_needs_spmd_graph_preservation()` true, which pulls in inductor's `spmd_check` pass. That
+# pass calls dist.all_gather_object DURING COMPILE (twice: hashes, then diagnostics on the
+# mismatch path). If ranks compile a different NUMBER of graphs they make a different number
+# of blocking collective calls and DEADLOCK. Overridden for multi-node below.
 torch._inductor.config.reorder_for_compute_comm_overlap = True
 
 
@@ -373,6 +379,60 @@ def wrap_model_container_for_distributed_training(
 
     if torch_compile:
         log_rank_0(logging.INFO, "using torch compile")
+
+        # `_run_block` guards on the layer index `i`, so a model with L DISTINCT blocks
+        # produces L specializations of it. torch._dynamo's default recompile_limit is 8:
+        # past it dynamo gives up and falls back to EAGER for that function, silently, so
+        # torch_compile stops doing anything and any wall-clock number becomes meaningless.
+        # Recurrent configs are safe (num_layers 3-7), but a non-recurrent stack is not --
+        # the 12-layer port of the colleagues' s8e4 config hits the limit at i == 7.
+        # Raise the ceiling to cover the deepest model present, with headroom for the
+        # dense->sparse switch (sparse_start_step) which legitimately adds one more.
+        num_distinct_blocks = max(
+            (len(getattr(m.config, "sequence_mixer_blocks", []) or []) for m in model_container),
+            default=0,
+        )
+        recompile_limit = max(torch._dynamo.config.recompile_limit, 4 * num_distinct_blocks + 8)
+        if recompile_limit > torch._dynamo.config.recompile_limit:
+            log_rank_0(
+                logging.INFO,
+                f"raising torch._dynamo recompile_limit "
+                f"{torch._dynamo.config.recompile_limit} -> {recompile_limit} "
+                f"for {num_distinct_blocks} distinct blocks",
+            )
+            torch._dynamo.config.recompile_limit = recompile_limit
+            torch._dynamo.config.accumulated_recompile_limit = max(
+                torch._dynamo.config.accumulated_recompile_limit, 16 * recompile_limit
+            )
+
+        # MULTI-NODE COMPILE DEADLOCK (measured 2026-09-17). At 16 GPU / 2 nodes the two hosts
+        # compiled structurally DIFFERENT graphs for the same frame -- inductor's spmd_check
+        # reported ranks 0-7 with 2 call_function nodes and ranks 8-15 with 27, a split exactly on
+        # the host boundary. spmd_check does blocking dist.all_gather_object during compile, so
+        # divergent graph counts across hosts deadlock it: the job sat 108 min at 0 steps with
+        # cpu_used flat (746 -> 748s across 16 ranks), and with the default 30-min gloo timeout it
+        # instead died as `InductorError: Timed out waiting 1800000ms`.
+        # The SPMD machinery exists only to protect comm/compute overlap REORDERING, which is a
+        # performance optimisation we enable ourselves. Single node is unaffected (all ranks on one
+        # host agree), so keep the optimisation there and drop it when hosts could disagree.
+        world = int(os.environ.get("WORLD_SIZE", "1"))
+        local = int(os.environ.get("LOCAL_WORLD_SIZE", "0")) or torch.cuda.device_count() or 1
+        n_nodes = max(1, world // max(1, local))
+        # DOLOMITE_SPMD_DIAG=1 re-enables the check and makes a mismatch RAISE instead of hang,
+        # so a bisect gets a diagnostic rather than a 108-minute wedge. Debug only.
+        spmd_diag = os.environ.get("DOLOMITE_SPMD_DIAG", "0") == "1"
+        if spmd_diag:
+            torch._inductor.config.aten_distributed_optimizations.spmd_check = True
+            torch._inductor.config.aten_distributed_optimizations.spmd_mismatch = "error"
+            log_rank_0(logging.INFO, "DOLOMITE_SPMD_DIAG=1: spmd_check ON, mismatch=error (fail fast)")
+        elif n_nodes > 1:
+            torch._inductor.config.reorder_for_compute_comm_overlap = False
+            torch._inductor.config.aten_distributed_optimizations.spmd_check = False
+            log_rank_0(
+                logging.INFO,
+                f"multi-node ({n_nodes} nodes): disabled reorder_for_compute_comm_overlap and "
+                f"inductor spmd_check to avoid the compile-time all_gather deadlock",
+            )
 
         for i, model in enumerate(model_container):
             model_container[i] = torch.compile(model)

@@ -628,3 +628,60 @@ Axes to sweep (in priority order):
       Gate on a bit-identity test (tolerance 0, this is a pure relabelling) modelled on
       `scripts/test_logits_refactor_equiv_20260916.py`.
       Do NOT touch the two live 61035-step arms; they must finish on current code.
+
+## 2026-09-17 — cmix / datamix port
+
+- [x] Fetch + vendor the colleagues' datamix reference (`configs/cmix/REFERENCE_*.yml`)
+- [x] Document the datamix in `CLAUDE.md` and `HANDOFF.md`
+- [x] `cmix_134M_recur` / `cmix_400M_pure_it4_sparse` / `cmix_400M_sandwich_sparse`
+      (datamix-only swaps, diff-verified)
+- [x] `cmix_1B_stacked_sparse` — their non-recurrent stack ported to our code
+- [x] Fix dynamo `recompile_limit` silently disabling torch_compile at >8 distinct blocks
+- [x] Projection A/B verdict: null result, `psd_anti` nominally last, all inside noise
+- [ ] **Validate the 1B port end-to-end** (job 1733998) — confirm it crosses
+      `sparse_start_step`, then measure the sparse speedup at 8192 tokens/call
+- [ ] **Replace the `\CC` placeholder in `app:expert-forms`** with the projection null result
+- [ ] Re-arm the 2-node output-space sparse test (`p2n_long_outrep`) — last attempt preempted
+- [ ] Decide whether to resume the 32B pure/sandwich arms (killed at ~6.5k) or relaunch them
+      on the cmix datamix instead
+- [ ] Ask the colleagues about `energy_scale_mode` never being set in their config
+- [ ] Expert-count suggestion for the 1B: K=8/top-2 is a poor sparsity fit (p=4 of K=8,
+      ceiling ~2x); K=16 both restores the 1.1B budget and improves the sparse ceiling
+
+## 2026-09-17 overnight — open items
+
+- [x] 1B scaled Boltzmann MoE validated (effK 57.64/64, no collapse)
+- [x] sparse training 2.631x at 1B; sparse inference +0.008 nats (1.008x ppl)
+- [x] 32B run live on 16 GPUs (rung 3, gptDense) — projected ~32 h
+- [x] handoff configs for the colleague (gptDense and gptMoE variants)
+- [ ] **DECIDE: build the 2-energy-block hybrid?** The single-block hybrid failed on
+      torch.compile (InductorError + timeout at I_total 773760), NOT on memory. Two blocks
+      halves I_total/block to 386880 and should shrink the compile graph too — untested.
+- [ ] **DECIDE: set `NCCL_NVLS_ENABLE=0` globally in submit_train.sh?** Would likely fix most
+      multi-node startup flakiness; costs NVLS collective acceleration.
+- [ ] Re-judge `sparse_start_step` 2000 for K=64. Raised from 200 defensively, but the measured
+      proxy cost is only 0.8% ppl, so 2000 may be unnecessary insurance (~2.3 h per run).
+- [ ] Sparse-inference number should be repeated on IN-DISTRIBUTION text (tonight's used
+      README/source, so ppl 507 is not a quality figure — only the gap is valid).
+- [ ] Measure the cost of sparsifying a DENSE-trained checkpoint (tonight's ckpt was
+      sparse-trained, so it answers a different question).
+- [ ] 134M four-way comparison (pure/hybrid/sandwich/gptswitch on the colleague datamix) still
+      running on preemptable — read when they finish.
+- [ ] 400M lr calibration (1e-3 vs 2e-3) — read at steps 4000-5500 where the two slow jumps were.
+
+## 2026-09-17 (later) — multi-node
+
+- [x] Fix inductor spmd_check multi-node compile deadlock (distributed.py, gated on n_nodes>1)
+- [x] Identify ncclRemoteError root cause: IB `IBV_WC_RETRY_EXC_ERR`, fabric-wide, NOT our code
+- [x] Prove our code is multi-node-correct via NCCL_IB_DISABLE=1 TCP control (40/40 steps, DONE)
+- [ ] **DECIDE: measure TCP (NCCL_IB_DISABLE=1) throughput at 2x8 over a few hundred steps?**
+      If it holds near 2/3 of IB it is a usable workaround to scale NOW while the fabric is broken.
+      Current 202k tok/s figure is from n=2 points at 2x4 — do not rely on it.
+- [ ] **Report the IB fault to cluster admins.** Shape: IBV_WC_RETRY_EXC_ERR on first inter-node
+      RDMA, 6+ HCAs, 7+ peers, 4 host pairs, ~100% since ~11:30 while a 12:00-ish run succeeded.
+      Peer addrs and HCA ids are in PROGRESS.md.
+- [ ] Chase why two hosts compile 2- vs 27-node graphs for the same frame (possible real
+      non-determinism in the sparse path; currently only worked around).
+- [ ] OPTIONAL (needs sign-off): finer FSDP wrapping to break the 191M FlatParameter into smaller
+      collectives. Reliability/memory lever, NOT a speed one.
+- [ ] Revisit `timeout_minutes: 180` — added on a wrong diagnosis; harmless but no longer justified.

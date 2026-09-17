@@ -113,6 +113,35 @@ cat > "$TMP" <<INNER
 unset TMPDIR TEMP TMP
 source ${VENV}/bin/activate
 export PYTHONPATH=${REPO}:\${PYTHONPATH:-}
+# recorded into wandb config by pretrain.py so a run self-documents its own launch
+export DOLOMITE_LAUNCH_CMD="submit_train.sh ${NAME} ${CFG} ${GPUS} ${QUEUE} ${WALL} ${MEM} ${GPN_FORCE}"
+# Allocator: expandable segments. Large-K MoE dense phases strand a lot of memory as
+# "reserved but unallocated" fragmentation -- a K=64 / I_e=5549 arm failed a 5.42 GiB
+# allocation with 3.76 GiB free while holding 11.48 GiB reserved-unallocated. Set here,
+# INSIDE the job script, so it survives an LSF requeue (a requeue re-runs the ORIGINAL
+# command, so anything exported only at submit time is silently lost).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# NCCL: disable NVLink SHARP (NVLS) multicast. The cluster throws
+#   "Failed to bind NVLink SHARP (NVLS) Multicast memory: CUDA error 401 ... usually caused by a
+#    system or configuration error in the Fabric Manager or NVSwitches"
+# and separately ncclRemoteError at SeqNum=1 with "last completed work: -1" on the FIRST
+# inter-node allreduce -- the ~50% multi-node startup flakiness. The error message names this
+# variable as the mitigation. COST: loses NVLS SHARP collective acceleration, so multi-node
+# collectives get slower; the trade is throughput for actually starting. Set inside the job
+# script so an LSF requeue cannot drop it.
+export NCCL_NVLS_ENABLE=0
+# InfiniBand robustness. MEASURED 2026-09-17: multi-node jobs die on the FIRST inter-node
+# allreduce with
+#   NET/IB: completion ... status=IBV_WC_RETRY_EXC_ERR(12) opcode=IBV_WC_RECV_RDMA_WITH_IMM
+#   -> ncclRemoteError "remote process exited or there was a network error"
+# RETRY_EXC_ERR means an RDMA write exhausted its retries without an ACK from the peer HCA --
+# a FABRIC fault (link/switch/SM/congestion), NOT our code, and NOT NVLS (which is intra-node).
+# Raising the IB timeout exponent and retry count is the standard mitigation for transient
+# congestion; it costs nothing when the fabric is healthy (longer waits only on retry paths).
+# NCCL_DEBUG=WARN so the transport error is printed next time without hand-digging.
+export NCCL_IB_TIMEOUT=22
+export NCCL_IB_RETRY_CNT=13
+export NCCL_DEBUG=WARN
 CFG="${CFG}"
 SP="${SP}"
 if [ -n "\$SP" ] && [ -f "\$SP/latest_checkpointed_iteration.json" ]; then
@@ -142,5 +171,36 @@ out=$(bsub -q "$QUEUE" -G "$GRP" -J "$NAME" \
 rm -f "$TMP"
 echo "$out"
 jid=$(echo "$out" | grep -oE 'Job <[0-9]+>' | grep -oE '[0-9]+' | head -1)
+
+# ---- LAUNCH LEDGER --------------------------------------------------------------------------
+# world size is NOT in the config, so tokens/step and the total budget cannot be recovered from
+# the config alone. Two arms were once compared at different budgets because of exactly that.
+# Every launch appends one row here, and the resolved config is snapshotted beside it.
+LEDGER="$REPO/experiments/boltzmann-moe/logs/launch_ledger.tsv"
+mkdir -p "$(dirname "$LEDGER")" "$REPO/experiments/boltzmann-moe/logs/launch_configs"
+[ -s "$LEDGER" ] || printf 'utc	jobid	name	config	gpus	nodes	gpus_per_node	queue	wall	mem	mbs	ga	seq	steps	tokens_per_step	total_tokens	git_commit	config_sha256	cmdline
+' > "$LEDGER"
+_vals=$(python3 - "$CFG" <<'PYX' 2>/dev/null
+import sys, yaml
+c = yaml.safe_load(open(sys.argv[1]))
+tp = c.get('training_parameters', {})
+ds = (c.get('datasets') or [{}])[0].get('class_args', {})
+print(tp.get('micro_batch_size',''), tp.get('gradient_accumulation_steps',''),
+      ds.get('sequence_length',''), tp.get('num_training_steps',''))
+PYX
+)
+set -- $_vals; _mbs=${1:-}; _ga=${2:-}; _seq=${3:-}; _steps=${4:-}
+if [ -n "$_mbs" ] && [ -n "$_ga" ] && [ -n "$_seq" ]; then
+    _tps=$(( GPUS * _mbs * _ga * _seq )); _tot=$(( _tps * _steps ))
+else _tps=; _tot=; fi
+_sha=$(sha256sum "$CFG" 2>/dev/null | cut -c1-16)
+_commit=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
+cp "$CFG" "$REPO/experiments/boltzmann-moe/logs/launch_configs/${NAME}_${jid:-nojob}.yml" 2>/dev/null
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${jid:-none}" "$NAME" "$CFG" "$GPUS" "${nnodes:-?}" "${gpn:-?}" \
+  "$QUEUE" "$WALL" "$MEM" "$_mbs" "$_ga" "$_seq" "$_steps" "${_tps:-?}" "${_tot:-?}" \
+  "${_commit:-?}" "${_sha:-?}" "submit_train.sh $NAME $CFG $GPUS $QUEUE $WALL $MEM ${7:-}" >> "$LEDGER"
+echo "ledger: $LEDGER  (gpus=$GPUS tok/step=${_tps:-?} total=${_tot:-?})"
+
 [ -n "$jid" ] && { echo; echo "verify in 30-60s:  bjobs -l $jid | grep -E 'Status|PENDING'"; \
   echo "tokens/step from the log: billion_tokens_per_day * 1e9 * step_time / 86400"; }

@@ -202,6 +202,7 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             proxy_loss_coef=getattr(block, "proxy_loss_coef", 0.0),
             proxy_route=getattr(block, "proxy_route", False),
             proxy_kind=getattr(block, "proxy_kind", "quad"),
+            proxy_init=getattr(block, "proxy_init", "random"),
             proxy_out_dim=getattr(block, "proxy_out_dim", 0),
             proxy_iters=getattr(block, "proxy_iters", 1),
             cos_probe_interval=getattr(block, "cos_probe_interval", 0),

@@ -1,0 +1,161 @@
+# ============================================================================================
+# PROJECTION A/B -- 134M, DENSE, 4 GPUs, ~1 h. Arm: energy_proj_type = psd_anti
+#
+# QUESTION. The paper says the block takes a descent step on E = E^AT + E^FF. The implementation
+# applies a LEARNED map to -grad E before adding it to the residual, and every reported arm leaves
+# that map unconstrained -- so what is realised is the descent DIRECTION composed with an arbitrary
+# linear transform, not a descent step. Only a positive-definite map gives the latter.
+#
+# THREE ARMS, because a two-arm test would confound two variables. psd_anti is a SINGLE projection
+# while dual_unconstrained is TWO, so:
+#   dual_unconstrained  2 maps, unconstrained   <- what every reported arm ships
+#   unconstrained       1 map,  unconstrained   <- isolates one-vs-two maps
+#   psd_anti            1 map,  Pi = SS^T + (A - A^T), PSD by construction -> strict descent
+# psd_anti vs unconstrained isolates the PSD CONSTRAINT; unconstrained vs dual_unconstrained
+# isolates the MAP COUNT. Neither comparison alone would.
+#
+# DENSE on purpose. Sparse would add the proxy router and the two-phase sparse_start_step handoff
+# as confounds; this question is about the projection only.
+#
+# Identical to configs/iclr_sink/iclr_hop_K16_top2_sink.yml (the corrected-sign 134M hybrid that
+# scores Avg11 43.50) EXCEPT: energy_proj_type, a compressed 2500-step schedule so all three arms
+# finish inside the hour, save_interval, save_path and wandb name. Same data, seed, tokens/step
+# (4 GPU x mbs 4 x ga 4 x 4096 = 262144) and LR schedule shape, so the arms are token-identical at
+# every step and comparable at whatever step they all reach.
+#
+# READ IT AT A MATCHED STEP, and remember 12.5's noise floor: ~0.038 nats between seeds on this
+# backbone. A gap smaller than that is not a result.
+# ============================================================================================
+datasets:
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron
+      data_path:
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.5
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+      split: 99.5,0.5,0
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 6]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - sequence_mixer_type: energy_attention
+        num_attention_heads: 12
+        num_key_value_heads: 12
+        add_bias: false
+        attention_multiplier: 0.125
+    mlp_blocks:
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      # Full-size BoltzmannMoE: 4 experts × 2048 each = 8192 total (matches h1_topk capacity)
+      - mlp_type: EnergyFF_BoltzmannMoE
+        expert_kind: hopfield
+        intermediate_size: 16384   # total across K; I_e = 1024
+        n_experts: 16
+        top_k: 2
+        hopfield_grad_scale: sqrt_consistent   # 2026-09-12 fix; REVERT = mean
+        routing_norm: zscore
+        temperature: 1.0
+        repulsion_form: abs
+        repulsion_coef: 0.1
+        n_repulsion_pairs: 4
+        gelu_grad_method: sigmoid
+        # ---- corrected variant ----
+        e_sign_override: "pos"
+        sinkhorn_iters: 3
+        repulsion_tensor_idx: true
+        activation_function: gelu
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/projab/projab_psd_anti
+  save_interval: 1000
+  max_to_keep: 2
+
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: projab_psd_anti
+
+training_parameters:
+  num_training_steps: 2500
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 150
+  num_constant_steps: 0
+  num_decay_steps: 2350
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
+
+# 2026-09-15: AUTO-RESUME, added mid-run. Without this an arm restarts from step 0 whenever
+# LSF REQUEUES it. LSF preemption here goes SSUSP -> PEND -> RUN on the SAME job id, which
+# re-executes the original bsub command with this original config; the watchdog's
+# auto-resume never runs because the watchdog never resubmitted. Measured damage before the
+# fix: iclr_hop_K16_dense_sink lost ~19000 steps, slope90k_hyb_sink ~18500, across 4 starts
+# each. save_interval alone does NOT protect against this -- the checkpoints were on disk
+# the whole time and simply never loaded.

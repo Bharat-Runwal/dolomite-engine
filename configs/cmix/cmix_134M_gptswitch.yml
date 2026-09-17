@@ -1,0 +1,178 @@
+# 134M arm on the COLLEAGUE DATAMIX (70/30 web/math). Architecture UNCHANGED from its parent.
+# TOKEN-SCALING SET, 90000 steps = 23.6B tokens, CORRECTLY SCHEDULED (2026-09-16).
+#
+# WHY THIS EXISTS. The published slope90k_* arms set num_training_steps 90000 but
+# num_warmup_steps 2000 + num_decay_steps 28000 = 30000, so their last 60000 steps ran pinned
+# at the 2e-4 floor. Measured on the reruns: loss falls 0.12-0.15 per 10k steps while the LR
+# decays, then -0.002..0.000 per 10k at the floor -- the final 45-51k steps bought 0.015-0.019
+# nats. So there is currently NO sound token-scaling measurement, and the paper's
+# "+0.41pp for 3x the tokens" is a lower bound rather than a result.
+#
+# Here decay covers the whole run: warmup 2000 + decay 88000 = 90000.
+#
+# One representative per family, all at 262144 tokens/step on 4 GPUs so the three are directly
+# comparable to each other AND to the 30000-step (7.86B) arms of the same lineage:
+#   hybrid boltz : iclr_hop_K32_top2_sink   Avg11 44.58, the best corrected hybrid
+#   pure boltz   : pure_hop_T12_sink        Avg11 40.96, the best pure arm (12 iterations)
+#   GPT switch   : gptmoe_last_isoP         Avg11 44.43, the paper's plain-GPT iso-param row
+#                                           (NOT gptmoe_all_isoP, which is 43.05)
+#
+# Boltzmann arms carry sinkhorn_persist_mu + sinkhorn_mu_iters from the start, so mu reaches
+# inference. Without it the router is trained tilted and evaluated untilted: +1.827 nats at 12
+# iterations, +1.587 at 8, ~0.003 for a hybrid.
+# THIS ARM: cmix_134M_gptswitch  (base configs/iclr_gptmoe/gptmoe_last_isoP.yml)
+
+datasets:
+  # ===== COLLEAGUE DATAMIX (bsaha/boltzmoe-iclr27 s8e4_stdmoe_fh2_boltz_topk2.yml) =====
+  # 70% web / 30% MATH. Our historical mix is 100% web / 0% math -- this is THE difference
+  # that makes our numbers non-comparable to the colleagues' on every task, MMLU/GSM8K most.
+  # Separate data_cache_path: the Megatron blend index is keyed on the mix, so reusing the
+  # 100%-web cache dir would either collide or silently force a rebuild.
+  - class_name: MegatronDataset
+    data_name: Megatron
+    data_sampling_ratio: 1
+    class_args:
+      eval_steps: 2
+      data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+      data_path:
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+        - 0.35
+        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+        - 0.15
+        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+      split: 99,0.5,0.5
+      sequence_length: 4096
+
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations: [1, 1, 1, 1, 1, 1, 1]
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+      # PSD-antisymmetric: Pi = SS^T + (A-A^T). SS^T is PSD by construction and the
+      # update is h := h - Pi(grad_E), so Edot = -||S^T grad_E||^2 <= 0 -- the block
+      # cannot ascend, and the antisymmetric part rotates at constant energy.
+      # Chosen 2026-09-17: computationally free (step times matched dual to 0.3%) and
+      # measurably indistinguishable in loss (all three arms inside a +-0.010 CI).
+      # WATCH: PSDA had a documented 5k-10k step instability at d=1280 / lr 2e-3 before
+      # the 0.5/sqrt(d) S-init rescale; our A/B only ran 2500 steps, so that window is
+      # NOT covered by evidence. Monitor grad_norm and loss through 10k.
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+      - &gpt_attn {sequence_mixer_type: softmax_attention, num_attention_heads: 12, num_key_value_heads: 12, add_bias: false, attention_multiplier: 0.125}
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+      - *gpt_attn
+    mlp_blocks:
+      - &gpt_ffn {mlp_type: MLP, activation_function: swiglu, intermediate_size: 2048, add_bias: false}
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - *gpt_ffn
+      - mlp_type: MoE
+        activation_function: swiglu
+        intermediate_size: 341   # PER EXPERT
+        num_experts: 16
+        num_experts_per_tok: 2
+        normalized_topk: true
+        add_bias: false
+
+tuning_args:
+  tuning_method: pretraining
+
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix_134M_gptswitch
+  save_interval: 1000
+                     # before ever reaching 5000, so they NEVER checkpointed and every
+                     # resubmit restarted from step 0 -- 28 submissions, zero net progress.
+  max_to_keep: 95   # 90000/1000 = 90 ckpts; keep ALL so intermediate token counts stay evaluable
+
+# NOTE 2026-09-14: the wandb name was wrong here. These configs were created by
+# copying a parent config; only save_path was updated, so every derived arm logged to
+# wandb under the PARENT's name and collided there. Local results under save_path were
+# always correct (that is what the reported numbers come from), but the wandb view was
+# missing or merged. wandb name must equal the config basename.
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: cmix_134M_gptswitch
+
+training_parameters:
+  num_training_steps: 90000
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 88000
+
+mixed_precision_args:
+  dtype: bf16
+
+distributed_args:
+  fsdp_algorithm: 2
+  # torch_compile: false (2026-09-14). REQUIRED for the standard MoE class, and this arm
+  # inherited `true` because the config was copied from an energy arm.
+  #
+  # Two symptoms, one cause. (a) SPEED: gptmoe_last_isoP ran at 5.77 s/step under compile
+  # against 0.46 s/step for the otherwise-identical iclr_switch_K16_top2 with compile off --
+  # 12.5x slower, i.e. 48 h instead of 3.8 h for 30000 steps. (b) CRASHES: gptmoe_all_isoP
+  # died repeatedly with
+  #     RuntimeError: [gloo/transport/tcp/pair.cc:547] Connection closed by peer
+  # a gloo collective failure of the same family as the inductor spmd_check hang that killed
+  # iclr_big_learn_pure. Both come from the MoE class routing with DATA-DEPENDENT shapes
+  # (tokens per expert varies per step), which under torch_compile triggers rank-dependent
+  # recompiles. The Switch arms were fixed this way on 2026-09-13; the fix simply was not
+  # carried over when these configs were derived.
+  torch_compile: false
+  stage: 0
+
+# 2026-09-16: added after t90k_pure_T12 lost 2670 steps. LSF preemption REQUEUES the job on the
+# same jid and re-runs the ORIGINAL command; the watchdog resolves load_args at SUBMIT time, so
+# an arm launched before its first checkpoint existed had none baked in and restarted from step 0
+# on every requeue. Pre-flight check 4. Safe here because the checkpoint dir is non-empty; a
+# duplicate load_args from the watchdog's own append is last-wins on the same path.
+load_args:
+  load_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix_134M_gptswitch

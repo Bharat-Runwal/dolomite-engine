@@ -1224,3 +1224,208 @@ Also noted: `iclr_decide/w1w2_K32_top2` — the arm the paper twice says "is tra
 progress" — has an interim eval at **step 10000 of 30000** reading Avg11 41.63 / 56.00 wppl.
 That is one third of the budget, so it is NOT the answer to the Hopfield-vs-W1W2 question and
 must not be quoted; the paper's "in progress" wording is still correct.
+
+## 2026-09-17 — colleague datamix port (`configs/cmix/`), a dynamo bug, and the projection null result
+
+**Datamix reconciled with the colleagues.** Fetched their
+`s8e4_stdmoe_fh2_boltz_topk2.yml` (`Bharat-Runwal/dolomite-engine`, branch
+`bsaha/boltzmoe-iclr27`) via the existing `bharat` git remote and vendored it verbatim as
+`configs/cmix/REFERENCE_s8e4_stdmoe_fh2_boltz_topk2.yml` — that file is now THE datamix
+reference (documented in `CLAUDE.md` and `HANDOFF.md`).
+
+**Their mix is 70% web / 30% math; ours was 100% web / 0% math** (they add
+`megamath-web-pro_0` 0.15 and `finemath-3plus-rewritten_0` 0.15, and use `split 99,0.5,0.5`
+against our `99.5,0.5,0`). This confounds EVERY cross-group comparison, not only MMLU and
+GSM8K. All four paths verified present; the math sets are 52 GB and 79 GB (~13B and ~21B
+tokens) so 0.15 x 32B = 4.8B each stays under one epoch. New arms use a separate
+`data_cache_path` (`.cache/megatron_cmix`) because the Megatron blend index is keyed on the
+mix; do NOT write into the colleagues' `cache-bsaha`.
+
+`cmix_134M_recur.yml`, `cmix_400M_pure_it4_sparse.yml`, `cmix_400M_sandwich_sparse.yml` are
+their parents with ONLY the datamix and run names changed — verified by diff, 0 lines
+outside those — so each is a clean datamix A/B against a run we already have.
+`cmix_1B_stacked_sparse.yml` is their architecture (12 DISTINCT layers, NO recurrence)
+ported to our code.
+
+**Three defects in the upstream file, corrected in the port:**
+1. `proj_mode: unconstrained` — that spelling does not exist in our tree (0 refs); it was a
+   silent no-op that happened to land on the same default. Ours says `energy_proj_type`.
+2. Its header states its whole purpose is `energy_scale_mode: sqrt_inv_d` replacing a
+   learnable temperature, but the body never sets it and does set `temperature: 1.0`, and
+   the field does not exist in our tree either. **Raise with them**: a "fixed sqrt(1/d)
+   beats learnable T" conclusion may rest on a config that never enabled it.
+3. Hopfield stores ONE matrix per expert where legacy w1w2 stores two, so at their
+   `intermediate_size: 76288` the port is **~793M, not ~1105M**. Restoring 1.1B is 2x `I_e`
+   or 2x experts; expert count was left at their 8 for the first port.
+
+**NEW BUG FOUND AND FIXED — `torch._dynamo` recompile_limit silently disables
+torch_compile on non-recurrent stacks.** `_run_block` guards on the layer index `i`, so L
+distinct blocks produce L specializations. The default `recompile_limit` is **8**: past it
+dynamo falls back to EAGER for that function, silently, so `torch_compile` stops doing
+anything and any wall-clock number becomes meaningless. The 12-layer port hit it at
+`i == 7`. Our recurrent arms were never exposed (`num_layers` 3 and 7 — note **7 is one
+under the ceiling**). Fixed at the compile site in `lm_engine/distributed.py`, scaling the
+limit with the distinct-block count (`8 -> 56` for 12 blocks, confirmed in the log).
+Numerics untouched — it only raises a compiler specialization ceiling.
+
+**Projection A/B (`projab_*`, 134M, 2500 steps) is a NULL RESULT.** Median `lm_loss` over
+steps >= 2000: `unconstrained` **3.6081**, `dual_unconstrained` **3.6096**, `psd_anti`
+**3.6177**. Bootstrap 95% CIs are +-0.010 and overlap heavily against a 0.0096 spread, so
+**no difference is resolvable**; `psd_anti` is nominally last. Step times were identical
+(0.4212-0.4223 s), so the PSD-antisymmetric constraint is computationally free and buys
+nothing here. This supports describing Pi as unconstrained in the paper. NOTE it does NOT
+reproduce "dual consistently a tiny bit better" — plain `unconstrained` is nominally ahead,
+inside noise.
+
+**`p2n_long_outrep` (1733007) was PREEMPTED, not a code failure** — stdout says `preempt`
+and the signal pattern is LSF teardown (SIGTERM + SIGABRT across ranks), not a wedge and
+not an NCCL error. Ran ~25 min. Needs a re-arm to confirm it crosses the sparse switch.
+
+**GPUs freed:** `t32B_sandwich_sparse` (1730874) and `t32B_pure_it4_sparse` (1720770) killed
+at ~step 6.5k/61035 to make room for the port work; checkpoints intact for resume.
+
+## 2026-09-17 overnight — 1B scale-up: both priorities answered, 32B run launched
+
+**PRIORITY 1 — the scaled Boltzmann MoE works at 1B.** `cmix1B_12layers_K64k2_gptDense`
+(12 distinct layers, NO recurrence, 8 DENSE-GPT + 4 energy, K=64 top-2, I_e 2846, psd_anti,
+1.000B params) ran 500/500 steps to `DONE`, loss 10.4384 -> 3.8738 monotone. Routing at K=64,
+windowed medians over steps >= 230:
+  `effective_n_experts` **57.64 / 64**   (the shipped K=32 arm was 5.0/32 -- no collapse)
+  `max_expert_load` 0.0479              (uniform is 1/64 = 0.0156, so 3x uniform)
+  `expert_cos_abs_mean` 0.2114          (0.85 is the collapse bar)
+  `grad_norm` 0.5857 dense / 0.2301 sparse -- both well under the 1.0 clip.
+Sinkhorn balances K=64 with no auxiliary loss and no learned gate.
+
+**PRIORITY 2a — sparse TRAINING: 2.631x at 1B.** dense 4.5478 s/step (n=18) -> sparse
+1.7285 s/step (n=28) at 8192 tokens/call. Compare 1.175x at K=8: the lever is p/K, which falls
+0.50 -> 0.0625. Realised 2.631x against a ~6x Amdahl ceiling (44%).
+
+**PRIORITY 2b — sparse INFERENCE works. NEW measurement on a real trained checkpoint**
+(`scripts/test_sparse_inference_20260917.py`, unsharded step-500 ckpt, one fixed batch, three
+paths, identical weights):
+  (1) DENSE all-K                  loss 6.228001
+  (2) SPARSE p=K=64 (exact select) loss 6.228086   -> **+8.5e-5 nats**: dispatch EXACT on real weights
+  (3) SPARSE p=2 (inference path)  loss 6.236036   -> **+0.008035 nats = 1.0081x ppl**
+So the rank-16 proxy costs **0.8% perplexity** at inference. **`proxy_topk_agree` of 0.32
+OVERSTATES the harm** -- disagreement about WHICH top-2 win is not disagreement about the
+OUTPUT, because the substituted experts are near-equivalent in energy. Caveats: eval text was
+README/source (out of distribution for a web+math model), so ppl 507 is not a quality figure,
+only the gap is; and the checkpoint was TRAINED through the sparse path, so this answers
+"would switching to dense help?" not "what does sparsifying a dense-trained model cost?".
+
+**32B RUN LAUNCHED (rung 3 of the fallback ladder).** `cmix1B_12L_gptDense_32B`, job 1740630,
+16 GPUs (2 nodes x 8) on grp_ebm, 61035 steps x 524288 tok/step = 32.0B, sparse_start_step 2000.
+Projection from arm A's measured sparse step time: ~2.5 h dense warmup + ~29 h sparse
+= **~32 h ≈ 1.3 days**. Without sparsity it would be ~77 h, so sparsity buys ~2 days.
+
+**THE SINGLE-BLOCK HYBRID FAILED, AND NOT FOR THE REASON PREDICTED.**
+`cmix1B_hybrid_K64k2_feas` (6 dense-GPT + ONE energy block recurred x6, I_total 773760)
+EXIT 1 after 1921 s with **0 steps and 0 OOM**; peak host memory 39.4 GB of a 200 GB limit.
+Signature: **`InductorError` x8 plus a timeout** -- torch.compile could not compile a single
+773,760-wide recurrent energy block. The 5.90 GiB dense-warmup analysis was correct arithmetic
+aimed at the WRONG failure mode. Consequence: the memory argument against single-block
+recurrence at 1B stands on paper but was never the binding constraint; **compile time is.**
+NEXT STEP (needs approval): the 2-energy-block variant halves I_total/block to 386880, which
+shrinks the compile graph as well as the memory -- plausibly fixing the ACTUAL cause, but that
+is now a hypothesis about compile scaling, not the memory claim.
+
+**Config/process bugs found and fixed tonight**
+1. `torch._dynamo.config.recompile_limit` defaults to 8; `_run_block` guards on the layer index,
+   so a 12-DISTINCT-layer model exceeds it at layer 7 and dynamo silently falls back to EAGER --
+   torch_compile becomes a no-op and any wall-clock number is meaningless. Patched in
+   `lm_engine/distributed.py` to scale with block count (8 -> 56 here). Recurrent arms were never
+   exposed, but the 134M hybrid at num_layers 7 sits ONE under the ceiling.
+2. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` now set INSIDE the job script in
+   `submit_train.sh`. An LSF requeue re-runs the ORIGINAL command, so submit-time env is silently
+   lost -- that is exactly how one arm lost the setting and re-OOMed.
+3. **A checkpoint saved with `sparse_start_step > 0` reloads with `_sparse_active = False`**
+   (the flag is `sparse_forward and sparse_start_step <= 0`). So evaluating a sparse-trained
+   checkpoint SILENTLY runs the dense path. Any sparse-inference measurement must set the flag
+   explicitly or use `sparse_start_step: 0` in the eval config.
+4. `register_model_classes()` is NOT invoked on importing `lm_engine.hf_models`. Without it,
+   `from_pretrained` on our checkpoints dies with `KeyError: 'energy'` / "Transformers does not
+   recognize this architecture", which reads like a corrupt checkpoint.
+5. `sinkhorn_mu_iters` must equal the energy block's own `layer_iterations` entry (rule 9). The
+   hybrid inherited 4 from its `[1,4,1]` sandwich parent against an entry of 6.
+6. **yaml.safe_load passing is NOT validation.** A hand-edit folded stray YAML aliases into
+   `distributed_args.stage` (`'0 - *gffn - *gffn...'`); yaml accepted it as a string and the job
+   died in 31 s with no traceback. Configs are now built programmatically (load -> modify ->
+   safe_dump) and validated with `TrainingArgs(**yaml.safe_load(...))` over the WHOLE document.
+7. HF causal LMs shift labels INTERNALLY. Passing pre-shifted labels double-shifts and drives
+   loss to ~ln(vocab)=11.52; the first sparse-inference run had to be discarded.
+
+**Also tonight:** the NVLS/Fabric-Manager fault that killed one arm is a CLUSTER fault, not our
+code (`Failed to bind NVLink SHARP (NVLS) Multicast memory: CUDA error 401`, host p3-r28-n3). It
+names its own mitigation, `NCCL_NVLS_ENABLE=0`, which would likely remove most of the ~50%
+multi-node startup flakiness at the cost of NVLS collective acceleration. NOT applied -- it
+changes every run and needs a decision.
+
+## 2026-09-17 (later) — MULTI-NODE: two distinct bugs separated; our code is CORRECT, the fabric is not
+
+**BUG 1 (OURS) — inductor `spmd_check` compile deadlock. FIXED.**
+`lm_engine/distributed.py:57` sets `torch._inductor.config.reorder_for_compute_comm_overlap = True`.
+That is OUR line: every related torch default is off. It makes `_needs_spmd_graph_preservation()`
+true (`post_grad.py:1061` = `enable_overlap_scheduling OR reorder_for_compute_comm_overlap`), which
+runs inductor's `spmd_check` pass. That pass calls **`dist.all_gather_object` DURING COMPILE** --
+twice: once for graph hashes, again for diagnostics on the mismatch path. Our two hosts compiled
+structurally DIFFERENT graphs for the same frame (`spmd_check` reported ranks 0-7 with **2**
+call_function nodes and ranks 8-15 with **27**, split exactly on the host boundary), so the ranks
+made different numbers of blocking collective calls and DEADLOCKED.
+Symptoms, both of which I initially misdiagnosed:
+  - with gloo's default 30-min timeout: `InductorError: Timed out waiting 1800000ms for send` at
+    1884 s / 1921 s, 0 steps, 0 OOM, 39 GB of a 200 GB host limit. I first read this as "cannot
+    compile a 773,760-wide block" -- WRONG.
+  - with `timeout_minutes: 180`: a 108-minute silent HANG, cpu_used flat 746 -> 748 s across 16
+    ranks. Raising the timeout did NOT fix anything, it only let the deadlock persist longer.
+FIX: in `distributed.py`, when `n_nodes > 1`, set `reorder_for_compute_comm_overlap = False` and
+`aten_distributed_optimizations.spmd_check = False`. Gated on topology so single-node keeps the
+comm/compute overlap optimisation. This is the CORRECT fix rather than silencing the detector:
+since our graphs genuinely differ across hosts, the reordering it guards would itself be unsafe.
+VERIFIED: `DIFFS = 0`, no `InductorError`, compile completes and reaches the first collective --
+which no prior 2-node attempt ever did.
+STILL UNEXPLAINED: why two hosts produce 2- vs 27-node graphs for the same frame. Worth chasing;
+it may indicate real non-determinism in the sparse path.
+
+**BUG 2 (THE CLUSTER'S) — InfiniBand `IBV_WC_RETRY_EXC_ERR`. NOT OUR CODE.**
+```
+NET/IB: Got completion from peer 100.126.x.y<port> with status=IBV_WC_RETRY_EXC_ERR(12)
+        opcode=IBV_WC_RECV_RDMA_WITH_IMM(129) vendor_err=129  hca mlx5_N
+-> ncclRemoteError: remote process exited or there was a network error
+```
+An RDMA write exhausted its retries without an ACK from the peer HCA, on the FIRST inter-node
+allreduce (`SeqNum=1`, `last completed work: -1` -- the documented startup-fault signature).
+**This is the `ncclRemoteError` that has been open as a question for days. It is the fabric.**
+NOT one bad port: **6+ HCAs** (mlx5_1/3/4/6/7/9) across **7+ peers** (100.126.12.28/.58/.60/.85/.99,
+100.126.20.105/.109) and **4 different host pairs**.
+Mitigations tried and their outcomes:
+  - `NCCL_NVLS_ENABLE=0` -- NO EFFECT, and it was the WRONG LAYER: NVLS is intra-node NVLink SHARP;
+    this fault is inter-node IB. (A genuine NVLS binding fault WAS also observed separately, on
+    p3-r28-n3, so the flag is kept as cheap insurance for that.)
+  - `NCCL_IB_TIMEOUT=22` + `NCCL_IB_RETRY_CNT=13` -- NO EFFECT. So it is not simple congestion.
+  - `NCCL_DEBUG=WARN` -- kept: it is what surfaced the HCA and peer identifiers at all.
+TIMELINE EVIDENCE FOR AN ADMIN REPORT: job 1719544 ran 120 steps on this exact path ~5 h earlier;
+3/3 attempts failed afterwards. The fabric DEGRADED during the session, so it may clear on its own.
+
+**THE DECIDING CONTROL — `NCCL_IB_DISABLE=1` (TCP transport): PASSED.**
+`cmix1B_2node_tcptest`, 2 nodes (p2-r27-n4 + p3-r28-n1), 40/40 steps, STAT=DONE, **0 IB errors,
+0 ncclRemoteError**, loss 9.5779 -> 7.6935 monotone, and it CROSSED the dense->sparse switch at
+step 20 (3.5428 s -> ~1.30 s).
+=> **Our code is multi-node-correct. The sole blocker is InfiniBand.**
+Indicative throughput: 262144 tok/step / 1.30 s ~ 202k tok/s vs ~303k tok/s for the 8-GPU
+single-node IB run, i.e. roughly 2/3 of IB -- FAR better than TCP usually costs. **DO NOT QUOTE
+THIS**: the sparse-phase median rests on TWO points (steps 30, 40), and 2x4 carries less
+inter-node traffic than the 2x8 shape we actually want. A few-hundred-step 2x8 measurement with a
+proper windowed median is the outstanding question.
+
+**FSDP tensor layout (asked: is the huge collective our fused expert tensor?) -- NO.**
+The experts are ALREADY separate parameters: `I_e x d = 2846 x 1024 = 2,914,304` each (5.6 MiB
+bf16), 64 of them per block. `_fused_W()` builds the `(K*I_e, hidden)` view at FORWARD time; there
+is no stored fused parameter, so `fused_experts` costs nothing in layout.
+The 191,267,969-element collective is FSDP's FlatParameter for ONE wrapped block, and the
+arithmetic matches to the element: 186,515,456 (64 experts) + 4,752,513 (attn+norms+proxy).
+`distributed.py:368` wraps with `transformer_auto_wrap_policy(transformer_layer_cls=block_classes)`
+-- whole blocks. So the lever is FSDP WRAPPING GRANULARITY, not expert layout.
+Note: finer wrapping would be LESS bandwidth-efficient, not more -- FSDP flattens precisely to
+avoid many small latency-bound messages. It buys lower peak memory and better overlap. And size is
+probably not the trigger anyway: 365 MiB is a routine allreduce, and the NVLS fault failed binding
+2 MiB. Untested; needs sign-off since it changes every run.

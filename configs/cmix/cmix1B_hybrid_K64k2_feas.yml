@@ -1,0 +1,194 @@
+# 1B HYBRID -- 6 dense-GPT layers (softmax attn + plain swiglu 4096, NO MoE) then ONE energy
+# block recurred x6. The only MoE is our Boltzmann energy MoE, so gains are ATTRIBUTABLE.
+# d=1024, K=64, top-2, I_e=12090, psd_anti, sparse (dense warmup to step 200). ~1.00B params.
+# lr 1e-3 not 2e-3: psd_anti + recurrence pushes median grad_norm to 1.24-1.34 vs a 1.0 clip.
+# repulsion_space output + subsample 64: MANDATORY multi-node (weight-space WEDGES).
+# sinkhorn_mu_iters 6 == layer_iterations[6] (rule 9).
+# Written programmatically and validated through pydantic -- an earlier hand-edited version
+# folded stray YAML aliases into distributed_args.stage and died in 31s.
+# FEASIBILITY: 400 steps to cross the sparse switch and prove the 5.90 GiB dense warmup fits.
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 6
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 773760
+      n_experts: 64
+      top_k: 2
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      repulsion_space: output
+      cos_probe_interval: 100
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 6
+      repulsion_tensor_idx: true
+      renormalize_topk: true
+      fused_experts: true
+      sparse_start_step: 200
+      sparse_forward: true
+      sparse_candidates: 2
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      activation_function: gelu
+      add_bias: false
+      repulsion_subsample: 64
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix1B_hybrid_K64k2_feas
+  save_interval: 100
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: cmix1B_hybrid_K64k2_feas
+training_parameters:
+  num_training_steps: 400
+  eval_interval: 5000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 8
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 0.001
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 80
+  num_constant_steps: 0
+  num_decay_steps: 320
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0

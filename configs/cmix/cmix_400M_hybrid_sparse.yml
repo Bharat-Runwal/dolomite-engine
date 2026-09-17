@@ -1,0 +1,198 @@
+# cmix_400M_hybrid_sparse -- PRIORITY 3. 400M hybrid: 6 dense-GPT layers (I=4096) then ONE energy block recurred x6.
+# The 400M analogue of cmix_134M_hybrid's [1,1,1,1,1,1,6] shape. K=16, I_e=11742, sparse.
+# ISO-PARAM with cmix_400M_baseline_switch: hopfield stores 1 matrix/expert, swiglu MoE stores 3,
+# so energy I_total 187,872 == 3 x MoE I_total 62,624. Same rule the 134M pair uses.
+# 61035 steps x 524,288 tok/step (8 GPU x mbs 2 x ga 8 x 4096) = 32.0B -- LAUNCH AT 8 GPUs.
+# mbs 2 (not the sandwich's 1): tokens/call 8192 is the WINNING column for sparse_forward.
+# sinkhorn_mu_iters 6 == layer_iterations[6]. repulsion output+subsample (multi-node safe).
+# proxy_init: svd -- refit the proxy from the rank-r SVD of each expert weight at the
+# dense->sparse switch. MEASURED on a trained 1B ckpt: top-2 agreement with the exact
+# energies 0.0893 (distilled) vs 0.5541 (SVD) vs 0.0378 (random). Distillation continues
+# after the refit; SVD is a warm start, not a replacement.
+
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 6
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 187872
+      n_experts: 16
+      top_k: 2
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      repulsion_space: output
+      cos_probe_interval: 100
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 6
+      repulsion_tensor_idx: true
+      renormalize_topk: true
+      fused_experts: true
+      sparse_start_step: 300
+      sparse_forward: true
+      sparse_candidates: 2
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      activation_function: gelu
+      add_bias: false
+      repulsion_subsample: 64
+      proxy_init: svd
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix_400M_hybrid_sparse
+  save_interval: 200
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: cmix_400M_hybrid_sparse
+training_parameters:
+  num_training_steps: 61035
+  eval_interval: 5000
+  micro_batch_size: 2
+  gradient_accumulation_steps: 8
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 53000
+  num_decay_steps: 6035
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0
