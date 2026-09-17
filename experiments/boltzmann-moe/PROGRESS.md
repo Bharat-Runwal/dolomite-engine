@@ -1169,3 +1169,58 @@ that `compute_avg11.py` globbed the newest results file in the tree. §12.16c re
 `resolve_results_path` globs only under the directory it is handed and exits 1. The real cause was
 the OOM plus a monitor filter that grepped `Avg11 =` globally across a stdout in which the dense
 arm had been evaluated twice.
+
+### 2026-09-17: `sec/appendix.tex` reconciled to the corrected grid (paper repo, committed local only)
+
+`sec/experiments.tex` had been migrated to the corrected routing sign + chemical-potential
+balancing; `sec/appendix.tex` had not, so the two disagreed on nine numbers and on four
+derived readings. All appendix figures now come from `compute_avg11.py` over the stored
+`results/iclr_sink/*/unsharded*` harness JSONs. Commits `b41811d` (appendix) and `6472acb`
+(intro + `sec:cost`) in `~/Code/overleaf/boltzmann-moe-ICLR-2026`. **Not pushed** — user reviews.
+
+`app:frontier` table, all four columns per energy row:
+
+| row | published | corrected |
+|---|---|---|
+| top-2 of 32 | 44.38 / 40.59 / 25.17 / 1.82 | **44.58 / 40.65 / 25.29 / 1.82** |
+| dense soft | 44.78 / 40.73 / 24.64 / 2.20 | **44.40 / 40.79 / 26.28 / 2.20** |
+| top-1 of 32 | 44.12 / 40.77 / 24.33 / 2.20 | **44.19 / 40.83 / 24.47 / 2.20** |
+| top-2 of 16 | 43.91 / 40.49 / 26.55 / 2.43 | **43.50 / 40.71 / 25.21 / 2.05** |
+| no fixes | 43.53 / 42.32 / 25.09 / 1.59 | **43.40 / 41.79 / 23.92 / 2.12** |
+
+**FOUR readings changed direction**, all restated rather than patched:
+1. `app:findings` item 5: "44.43 against 44.38 ... which is parity" -> energy **nominally ahead
+   by 0.15pp** (44.58 vs 44.43). Kept as parity (0.15pp is inside single-seed resolution), not
+   as a win. Same wording `sec:pure` already uses.
+2. Hopfield vs W1W2 at matched K,k **FLIPS**: was Hopfield +0.08pp (43.91 vs 43.83); is now
+   Hopfield **-0.33pp** (43.50 vs 43.83) and also behind on PPL (40.71 vs 40.00). The case for
+   Hopfield is now purely structural (one matrix -> 2x the experts -> raise K).
+3. The router x sparsity 2x2 **no longer changes sign with the sparsity**: learned - energy was
+   +0.05 dense / -0.08 top-2, is now **+0.43 / +0.33** — learned ahead in both cells. That
+   reading is explicitly withdrawn in the text.
+4. "the energy formulation only reaches comparable quality by routing densely, which forfeits
+   the sparsity that motivates it" is **false** now that the best energy arm is the sparsest at
+   k=2. Retracted.
+
+Recomputed deltas: Switch-over-energy at k/K=0.125 0.92 -> **1.33pp**; cost of sparsity 0.87 ->
+**0.90pp**; K16->K32 gain 0.47 -> **1.08pp**; top-1-of-32 vs dense 0.66 -> **0.21pp**; energy over
+the unbalanced gate 0.79 -> **0.38pp** at matched sparsity (**1.46pp** at its best); price of
+arithmetic parity 0.45 -> **0.25pp** (this one was wrong in `sec:cost` too, and that file
+contradicted itself — line 88 already said 0.25pp).
+
+`app:abl-sign`'s "against the as-published values in Table~\ref{tab:frontier}" was dangling once
+`tab:frontier` held the corrected values. Replaced with the pre-correction values inline
+(44.38, 43.74, 44.78, 44.12, 43.91) plus a note that they are no longer tabulated anywhere.
+
+**Two stale things deliberately LEFT and flagged** (no traceable corrected source):
+* `sec/appendix.tex:40` and `:524` still carry `effective expert counts 12.3-12.8 of 16, max
+  share 0.17-0.18` — pre-sign-correction training-log numbers. `sec:balance` has the corrected
+  15.2-16.0 of 16 / 0.063-0.130, but those come from no JSON and no ground-truth table, and
+  `app:collapse`'s own table (effK 7.65-18.03 offline) matches neither. Needs one owner.
+* `sec/experiments.tex:278` (`tab:threeway`, "routing collapse: none (eff. 12.3-12.8 of 16)")
+  contradicts `sec:balance:173` in the same file. Same root cause.
+
+Also noted: `iclr_decide/w1w2_K32_top2` — the arm the paper twice says "is training"/"in
+progress" — has an interim eval at **step 10000 of 30000** reading Avg11 41.63 / 56.00 wppl.
+That is one third of the budget, so it is NOT the answer to the Hopfield-vs-W1W2 question and
+must not be quoted; the paper's "in progress" wording is still correct.

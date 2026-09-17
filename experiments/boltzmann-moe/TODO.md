@@ -316,7 +316,12 @@ Driver: `experiments/eval_scripts/eval_sharded_iclr_avg11_20260915.sh`
       `FusedMoEContainer` that the builder returns, so a probe reading the container gets
       `None` for everything and will happily report whatever its fallback branch says.
 
-- [ ] **The `nofix` negative control is no longer the published ablation.** Setting
+- [x] **The `nofix` negative control is no longer the published ablation.** *(appendix side
+      DONE 2026-09-17, commit `b41811d` in the paper repo: the "diversity regulariser" paragraph
+      now names the row instead of an ordinal, quotes the matched-tau margin 0.10pp / 1.08 PPL
+      from `iclr_hop_K16_top2_nofix_sink`, and states that the published 0.38pp / 1.83 PPL
+      bundled tau as a fourth reverted knob so the two magnitudes are not comparable. A
+      like-for-like rerun at tau 0.35 is still not run.)*  Setting
       `temperature: 1.0` on every rerun arm silently removed one of the FOUR knobs that
       the published "top-2 of 16, no fixes" row reverted (`sec/appendix.tex` `app:frontier`,
       Avg11 **43.53**): nofix used tau 1.0 and its baseline used 0.35, so tau was itself one
