@@ -2651,3 +2651,53 @@ columns) to confirm it is contention before blaming the code.
 **Gap found while diagnosing this:** `sparse_overflow` is NOT appearing in either arm's logged
 metrics, so capacity overflow could not be ruled out as a contributor by measurement -- only by the
 17-vs-1 slot difference. Worth wiring into the metrics if this recurs.
+
+#### 12.27b RETRACTION x2: `expert_cos_abs_mean` OSCILLATES. And the proxy, not diversity, is the worry.
+
+I have now misread this metric twice in opposite directions, both times by treating one phase of an
+oscillation as a trend. Recording the actual shape so nobody repeats it.
+
+`t32B_sandwich_sparse`, every 100 steps (switch at 300):
+
+```
+ 400 cos 0.8147 <- local MAX     1300 cos 0.6207 <- local MIN     2000 cos 0.7178 <- rising again
+ 500 0.7764   700 0.7148   1000 0.6490   1200 0.6369   1400 0.6426   1700 0.6743   1900 0.7109
+```
+
+* **First error (12.23a):** at step 400 I read the rise 0.68 -> 0.815 as "weight-space repulsion is
+  failing" and recommended reverting both arms. Retracted when it fell.
+* **Second error:** at step 1000 (cos 0.6490) I said weight-space was "clearly ahead on diversity"
+  against the 134M reference's 0.7350. **Also wrong.** That was a downswing, and the reference arm
+  oscillates in the SAME band at comparable age -- 0.6367 / 0.6615 / 0.6934 / 0.6586 across steps
+  2700-3000. Neither setting is converging toward 12.13's 0.43-0.44 target.
+
+**Rule: `expert_cos_abs_mean` swings ~0.06-0.10 on a few-hundred-step timescale. Quote a WINDOWED
+median over >=500 steps, never a single reading, and never compare two arms at single points.**
+
+#### What the data does support, and it points at the PROXY
+
+Both arms use p=4, so the sparse-path chance floor is k/p = 0.50 for both, making this comparable:
+
+| | proxy_topk_agree |
+|---|---|
+| `t32B_*` arms (weight-space repulsion) | **0.47-0.54** -- sitting ON the chance floor |
+| `s90k_pure_T12_sparse` (output-space + subsample) | **0.66-0.68** -- clearly above |
+
+**Our proxy is no better than random at proposing candidates; the reference arm's is.** Loss is
+unaffected so far (3.9329 at step 2000 = 1.05B tokens, dropping normally) -- expected, because
+`_forward_sparse` computes EXACT energies for the p=4 candidates and re-ranks, and `sparse_explore: 2`
+supplies half the candidates from a deterministic rotation, so a useless proxy costs candidate
+QUALITY rather than selection correctness.
+
+**Hypothesis, untested: the two choices are COUPLED.** Weight-space repulsion pushes expert WEIGHTS
+apart, and the subspace proxy is built from weight subspaces (`B_k = W_k V_k`). So the regulariser
+may be actively degrading the structure the proxy learns to rank -- which would mean
+`repulsion_space` and `proxy_kind` cannot be chosen independently, and that 12.13's ranking of
+repulsion substitutes (measured WITHOUT a trained proxy in the loop) does not transfer to a
+proxy-routed arm. Cheap test: one short arm, weight-space repulsion + `proxy_kind: quad` or a
+higher `proxy_rank`, and see whether agreement lifts off the floor.
+
+**Watch `proxy_topk_agree`, not `cos`, from here.** If it is still ~0.50 at step 5000 while the
+reference sits at 0.68, the proxy is contributing nothing and the sparse arms are effectively running
+`sparse_explore`'s deterministic rotation as their router -- which works, but is not the method the
+paper describes.
