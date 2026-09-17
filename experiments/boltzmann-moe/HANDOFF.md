@@ -2322,3 +2322,66 @@ loses outright (0.41-0.49x).** If peak throughput matters more than job count, k
 pair and use mbs 4 in phase 2.
 
 Configs: `configs/wsd90k/wsd90k_{pure_it4,sandwich}_1job.yml`, `sparse_start_step: 500`.
+
+### 12.23 VALIDATED ON HARDWARE: the in-job dense->sparse switch, at 1.996x
+
+`t32B_sandwich_sparse` (job 1718594, 8 GPUs, single node, `sparse_start_step: 300`):
+
+| step | s/step | phase | proxy_topk_agree | expert_cos_abs_mean |
+|---:|---:|---|---:|---:|
+| 100 | 6.3308 | dense | 0.4702 | 0.5244 |
+| 200 | 6.2853 | dense | 0.7275 | 0.7100 |
+| 290 | 6.3032 | dense | **0.7858** | 0.6855 |
+| 300 | 6.0345 | switching | 0.7718 | 0.6830 |
+| **310** | **3.1588** | **sparse** | 0.6054 | 0.6855 |
+
+**6.3032 -> 3.1588 s/step = 1.996x**, and the torch.compile re-trace at the switch did NOT wedge.
+That was the one part of `sparse_start_step` the CPU tests could not reach (12.22), so the feature is
+now validated end-to-end -- at 8 GPUs / ONE node. **Multi-node is still unverified** (the 2-node
+probe 1718609 could not be scheduled: "requirements for reserving resource (ngpus_physical) not
+satisfied: 229 hosts" -- two hosts with 8 free GPUs each is far harder to place than one).
+
+The measured 1.996x lands on 12.13's placement-controlled **2.02x** rather than on the 1.85x that
+12.20 projected from the sandwich's mbs-1 figure, so the earlier estimate was conservative. At
+3.16 s/step the arm finishes 61035 steps in **~54 h = 2.2 days**.
+
+**The dense phase did exactly what it exists for:** proxy agreement 0.125 (chance) -> **0.7858** by
+step 290, clearing the 0.75 threshold, and it got there at step ~200 (0.7275) which is why
+`sparse_start_step` was cut from 500 to 300.
+
+**The hand-off dip is real but mild.** Agreement fell 0.7858 -> 0.6054 across the switch. 12.13 saw
+0.703 -> 0.46 in the two-job setting, so this is roughly half the damage. Note the FLOOR CHANGES at
+the switch and this trips people up: dense agreement is against top-2-of-16 (chance **0.125**),
+sparse agreement is measured within the p=4 candidate set (chance **0.50**). 0.6054 against 0.50 is
+a much weaker margin than 0.7858 against 0.125, so do not read the dip as "still fine".
+
+**Watch `expert_cos_abs_mean`.** It sits at 0.68, against the 0.43-0.44 that 12.13 says weight-space
+repulsion reaches from scratch. Too early to call at step 310 (experts have barely differentiated),
+but if it is still ~0.68 at step 3000-5000 then the weight-space choice has NOT delivered and 12.13
+is repeating. That is the single most likely way these arms disappoint.
+
+### 12.24 scale32B_boltz_sinkhorn benchmarked: Avg11 49.91 at 30.4B tokens
+
+Job 1718621. Unsharded step **58000** (the arm was stopped at 58130 of 61035 = 95.0% to free its 16
+GPUs), then mu-recalibrated, then evaluated. Verified: the number is read from
+`unsharded_mucal/harness_results_2026-09-17T00-28-39.json` and `compute_avg11.py` cites that path.
+
+| | value |
+|---|---|
+| **Avg11** | **49.91** |
+| WikiText | 25.23 word-PPL |
+| tokens | 58000 x 524288 = **30.41B** |
+| shape | 400M HYBRID, d=1536, K=32, top-2, `layer_iterations [1,1,1,1,1,1,6]` |
+
+**This is the best Avg11 in the ICLR record**, against 44.58 for the 134M hybrid and 43.36 for the
+400M sandwich -- but it is a DIFFERENT TIER (3x the parameters and ~8x the tokens of the 3.9B grid),
+so it is not a like-for-like win over either. Quote it with its token count, always.
+
+**Two caveats that must travel with the number.**
+1. It stopped at 95% of its schedule, so the cosine decay never reached its 2e-4 floor. By 12.4
+   floor steps buy 0.015-0.019 nats per 45k steps, so the finished run would be marginally BETTER:
+   49.91 is a slight underestimate, not an overstatement.
+2. mu recalibration was REQUIRED (the config has `sinkhorn_iters: 3` but no `sinkhorn_persist_mu`,
+   with a 6x block -- the 12.1 bug). The raw `unsharded` eval is queued in the same job and will
+   give the delta at this scale; the sandwich's was +0.12pp and this block runs 6x, so it may be
+   larger.
