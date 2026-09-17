@@ -47,6 +47,15 @@ model_args:
     mlp_blocks:
       - mlp_type: EnergyFF_BoltzmannMoE
         expert_kind: w1w2
+        # REQUIRED on a COMPOSABLE w1w2 mixture, and absent here until 2026-09-17.
+        # _W1W2Expert stores E_k = -overlap, and build_boltzmann_moe's kind-based default is
+        # e_sign="pos" -> logits = +E_k = -overlap -> it routes to the WORST-matching experts.
+        # Both kind defaults are inverted (hopfield's "neg" on a stored +overlap does the same);
+        # see experiments/boltzmann-moe/SIGN_CONVENTION_UNIFICATION.md. A blanket "pos" is a
+        # silent no-op here. This arm is dormant (no checkpoints, not watchdog-registered, not in
+        # the paper), so nothing published is affected -- the flag is added so it cannot be
+        # launched wrong later.
+        e_sign_override: "neg"
         intermediate_size: 1302528
         n_experts: 64
         top_k: 8

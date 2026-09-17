@@ -65,3 +65,8 @@ experiments/boltzmann-moe/scripts/*.log
 
 # Runtime logs from the watchdog / babysitter drivers (watchdog.log is listed above).
 experiments/boltzmann-moe/scripts/*.log
+
+# Internal engineering log -- keep LOCAL. Contains cluster topology, quota detail and
+# unpublished results. Removed from the tree 2026-09-17; note it was public 2026-09-12..17,
+# so history still holds it (see SIGN_CONVENTION_UNIFICATION.md / the sanitize report).
+experiments/boltzmann-moe/HANDOFF.md
