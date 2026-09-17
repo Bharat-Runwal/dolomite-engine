@@ -8,9 +8,15 @@
 #   * submitting to normal/grp_ebm while grp_ebm was 32/32, which PENDs indefinitely.
 #     `blimits`, NOT `bjobs`, is the authoritative quota check.
 #
-#   bash scripts/bsub/submit_train.sh <name> <config.yml> <gpus> [queue] [wall] [mem]
+#   bash scripts/bsub/submit_train.sh <name> <config.yml> <gpus> [queue] [wall] [mem] [gpus_per_node]
 #
-#     queue: "preemptable" (default) or "ebm" -> normal/grp_ebm
+#     queue:         "preemptable" (default) or "ebm" -> normal/grp_ebm
+#     gpus_per_node: force the node shape. Default picks 8/node when gpus divides by 8.
+#                    Use it when 8/node will not SCHEDULE: two hosts with 8 free GPUs each is far
+#                    harder to place than one (a 2x8 probe sat PEND 1.5 h with "requirements for
+#                    reserving resource (ngpus_physical) not satisfied: 236 hosts"), so `... 8
+#                    preemptable 01:00 192G 4` gives 2 nodes x 4 and still exercises the
+#                    multi-node collective + compile path.
 #
 # Examples:
 #   bash scripts/bsub/submit_train.sh t32B_sandwich_sparse configs/tok32B/t32B_sandwich_sparse.yml 8 ebm
@@ -43,6 +49,7 @@ GPUS=${3:?gpu count}
 QUEUE_IN=${4:-preemptable}
 WALL=${5:-24:00}
 MEM=${6:-160G}
+GPN_FORCE=${7:-}
 REPO=/proj/dmfexp/nima/Code/dolomite-engine
 [ -f "$CFG" ] || CFG="$REPO/$CFG"
 [ -f "$CFG" ] || { echo "config not found: $CFG" >&2; exit 1; }
@@ -60,11 +67,23 @@ if [ "$GPUS" -ge 8 ] && [ $((GPUS % 8)) -eq 0 ]; then
 elif [ "$GPUS" -gt 4 ]; then
     gpn=4; nnodes=$(( (GPUS + 3) / 4 )); span="span[ptile=1]"; launcher="blaunch"
 fi
+if [ -n "$GPN_FORCE" ]; then
+    [ $((GPUS % GPN_FORCE)) -eq 0 ] || { echo "gpus ($GPUS) must divide by gpus_per_node ($GPN_FORCE)" >&2; exit 1; }
+    gpn=$GPN_FORCE; nnodes=$((GPUS / GPN_FORCE))
+    if [ "$nnodes" -gt 1 ]; then span="span[ptile=1]"; launcher="blaunch"; else span=""; launcher=""; fi
+fi
 [ "$gpn" -eq 8 ] && load_sel="ut<0.5"
 
 BAD_HOSTS="p4-r10-n4"
+# Suspected, ONE failure each so far -- not yet proven bad, kept here so a retry isolates the
+# variable rather than re-drawing them. p1-r15-n4 / p2-r22-n1: job 1719508 died with an NCCL
+# ncclRemoteError on the FIRST collective (SeqNum=1 ALLREDUCE, last completed work -1 on every
+# rank) while an otherwise-identical job on p1-r18-n3 / p2-r16-n1 ran clean. Remove them once
+# either is seen healthy, and promote to BAD_HOSTS on a second failure (that is the bar
+# ACCEL_FINDINGS used for p4-r10-n4: two runs, 10 fabric errors each).
+SUSPECT_HOSTS="${SUSPECT_HOSTS-p1-r15-n4 p2-r22-n1}"
 sel=""
-for h in $BAD_HOSTS; do sel="$sel && hname!='$h'"; done
+for h in $BAD_HOSTS ${SUSPECT_HOSTS:-}; do sel="$sel && hname!='$h'"; done
 sel="${sel# && }"
 [ -n "$load_sel" ] && sel="${sel:+$sel && }$load_sel"
 

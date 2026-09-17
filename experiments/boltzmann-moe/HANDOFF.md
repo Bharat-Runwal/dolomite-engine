@@ -2560,3 +2560,66 @@ That is a real trade to decide deliberately, not by default:
 * weight-space + 8 GPUs: better diversity, matched to the 400M arms, 1B ~4.9 d (does not fit Sep 24).
 * output-space + 16 GPUs: weaker diversity, unmatched, 1B ~2.4 d (fits) -- IF 2x8 can be scheduled,
   which tonight it could not (1.5 h PEND; 2x4 placed instantly).
+
+### 12.27 THE 2-NODE WEDGE IS FULLY LOCALISED: it is WEIGHT-SPACE repulsion, and nothing else
+
+Three probes at 2 nodes x 4 GPUs, identical but for the repulsion setting. This closes a bug that had
+been open and undiagnosed since 2026-09-15.
+
+| probe | repulsion | result |
+|---|---|---|
+| 1719429 | **weight**, coef 2.0 | **WEDGES** -- 790 s, 0 step lines, 0 inductor cache writes, frozen on a dynamo warning |
+| 1719489 | **off**, coef 0.0 | RUNS -- 120 steps, 1.38 s/step, 0 NCCL errors, crossed the sparse switch |
+| 1719544 | **output** + subsample 64 | RUNS -- step 10/20/30 at 3.77/3.10/3.03 s/step, 0 NCCL errors |
+
+**What is therefore NOT the problem, contrary to ACCEL_FINDINGS' suspects:**
+* the single large fused GEMM shape (suspect 1) -- present and running in both healthy probes;
+* `fused_experts` as such -- the doc's "validated single-node only" is now **too pessimistic**;
+* `sparse_forward`, the capacity dispatch, and the `sparse_start_step` recompile -- all fine at 2 nodes;
+* the Python-`random` pair indices (suspect 2) -- 1719429 had `repulsion_tensor_idx: true`.
+
+**What it is.** `energy_ff.py:1177` branches to `_add_repulsion_loss_weight()` for
+`repulsion_space: weight`, and that path reaches the expert weights through the closure built at
+`energy_ff.py:2411`, `"weight_fn": (lambda: holder.W.weight)` -- whose own comment says it is a
+closure "so FSDP re-gathers are picked up". So weight-space repulsion **reads an FSDP-sharded
+parameter from inside the compiled region**, which requires an all-gather; across nodes that is an
+inter-node collective issued from within a dynamo graph, and it deadlocks. Output-space repulsion
+instead consumes `expert_grads` (activations, already local) and does not touch the closure. That
+also explains the asymmetry the project memory recorded -- *"the inductor `spmd_check` all_gather
+hang that data-dependent MoE routing triggers"* -- as the same class of fault.
+
+#### One methodological trap, and it nearly produced a wrong conclusion
+
+The FIRST output-space attempt (1719508) failed with `ncclRemoteError` on the **first** collective
+(SeqNum=1 ALLREDUCE, `last completed work: -1` on every rank) on hosts `p1-r15-n4` / `p2-r22-n1`,
+while the repulsion-off probe had run clean on `p1-r18-n3` / `p2-r16-n1`. Read carelessly that is
+"output-space also fails". **It is a DIFFERENT failure**: the wedge is a silent hang with zero NCCL
+errors and zero inductor writes; this was NCCL erroring loudly before training began -- the
+node-fault signature ACCEL_FINDINGS documented for `p4-r10-n4`. Retrying on other hosts
+(`p4-r25-n4` / `p3-r03-n1`) ran clean. **Always separate "hung" from "NCCL-errored": they have
+different causes and only the first is ours.** `submit_train.sh` now carries a `SUSPECT_HOSTS` list
+(distinct from `BAD_HOSTS`) holding those two, with the promotion bar written in -- one failure
+isolates a variable, two earns a blacklist.
+
+#### The fix, and the choice it forces
+
+**Real fix (not yet implemented):** hoist the sharded read out of the graph -- materialise
+`holder.W.weight` before entering the compiled region and pass it in as a plain tensor, or compute
+the weight-space repulsion under `torch.compiler.disable()`. Either removes the in-graph all-gather.
+That is a contained change but it touches the hot path of two live 61035-step arms, so it must be
+validated on a 2-node probe BEFORE it goes anywhere near them.
+
+**Until then, the operational rule:** weight-space repulsion => single node, 8 GPUs max.
+Output-space repulsion => multi-node available.
+
+The two running 400M arms (1718594, 1718598) use weight-space, so they are 8-GPU-bound for their
+whole life. 700M/1B are unlaunched and may pick either:
+
+| option | expert diversity | 1B at 90k-equivalent | matched to the 400M arms? |
+|---|---|---|---|
+| weight-space, 8 GPUs | better (sandwich cos 0.6490 @1000 vs the subsampled arm's 0.7350) | ~4.9 d -- **misses Sep 24** | yes |
+| output-space, 16 GPUs | weaker | ~2.4 d -- fits | **no** |
+| fix the closure, then weight-space at 16 GPUs | better | ~2.4 d | yes |
+
+The third row is the only one that is both fast and matched, which is the argument for spending an
+hour on the fix rather than accepting the trade.
