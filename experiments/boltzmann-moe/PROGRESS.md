@@ -1093,3 +1093,79 @@ found the dense one. **A stage that produces a number must fail loudly or verify
 
 Genuine byproduct: the harness is **deterministic to 4 decimal places** across independent runs of
 the same checkpoint, so a real 0.1pp Avg11 delta is signal, not variance.
+
+---
+
+## 2026-09-17 — ICLR appendix: new ABLATION STUDY section (`app:ablations`)
+
+Written into `/u/ndehmamy/Code/overleaf/boltzmann-moe-ICLR-2026/sec/appendix.tex`, committed
+locally as `0718b7c` (**not pushed** — Overleaf push needs explicit confirmation). Sits between
+`app:threeway` and `app:setup`; a one-paragraph pointer was added to the `app:findings` overview.
+Six labelled groups: `app:abl-sign`, `app:abl-balance`, `app:abl-mu`, `app:abl-depthwidth`,
+`app:abl-lr`, `app:abl-proxycost`. All accuracies `Avg11`. Compiles clean at ICLR text width
+(5.5 in): no errors, no overfull boxes.
+
+### The one genuinely new result the section reports: the balancer head-to-head at full budget
+
+`iclr_pure_hop_isoP_sink` vs `pure_hop_isoP_bal_corr` — identical except the balancing mechanism
+(corrected sign, tau 1.0, d=768, one block x **8**, K=16 hopfield I_e=4480, top-2, 30000 steps).
+Token-matched empirically from the logs: 22.006 and 21.991 Gtok/day at 1.029 s/step, i.e.
+262144 tok/step each = 7.86B tokens, 4 GPUs each.
+
+| balancing | effK/16 | max_share | min_share | final lm_loss | Avg11 | WikiPPL | bpb |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| clamped proportional control (`balance_rate: 0.003`) | 14.12 | 0.1046 | 0.0227 | **3.4665** | **41.49** | **61.65** | **1.1119** |
+| Sinkhorn dual (`sinkhorn_iters: 3`) | **15.93** | **0.0739** | **0.0541** | 3.4857 | 40.42 | 63.55 | 1.1201 |
+
+**The exact dual is the better balancer and the worse model here** — behind by 1.07pp Avg11,
+1.90 WikiPPL, 0.0082 bpb. The lm_loss gap (0.019) is inside the 0.038 noise floor and is not
+claimed. This is the **opposite ordering** to the 134M K=32 / 2000-step comparison in
+`app:sinkhorn` (§11.5), which the section states as an unresolved tension rather than resolving.
+Two caveats recorded: the winning arm finished `load_bias_absmax = 1.0000`, i.e. **pinned at the
+clamp** that §11.5 gives as the reason to prefer the dual; and with `sinkhorn_iters: 0` there is
+no `mu`, so the §12.1 train/eval discontinuity **cannot arise** — 41.49 is read off plain
+`unsharded/` and never needed a `_mucal`, unlike every Sinkhorn pure arm.
+
+`bal_corr` is also the best pure arm on Avg11 (41.49 > T12's 40.96) at **half the depth**, while
+T12 keeps the better perplexity (58.90 vs 61.65). Both metrics reported.
+
+### Numbers re-derived this session (compute_avg11.py against stored harness output)
+
+The mu-recovery progression, which quantifies why one shared buffer is not enough:
+
+| arm | as trained | single shared mu | per-iteration mu |
+|---|---|---|---|
+| pure 8 it. I_e=2048 | 38.76 / 1.3966 | 38.95 / 1.3937 | **40.43 / 1.1525** |
+| pure 8 it. I_e=4480 | 36.16 / 1.5530 | 37.21 / 1.4320 | **40.42 / 1.1201** |
+| pure 12 it. I_e=4480 | 36.30 / 1.6034 | — | **40.96 / 1.0996** |
+
+Shared buffer recovers 28% of the bpb gap on one arm and 1.2% on the other. Sandwich proxy-sel
+verified independently: 42.96 / 47.49 wppl / 1.04156 bpb, i.e. **-0.40pp** and **+0.0169 bpb**
+against the dense 43.36 / 44.62 / 1.024705.
+
+### Four contradictions found in the record, flagged as `\CC` rather than resolved
+
+1. **`app:routing`'s sign convention IS the bug.** It says "$s_k=+E_k$ for W1W2, $s_k=-E_k$ for
+   Hopfield (lower is better)". With the energies as written in `app:expert-forms` the correct
+   rule is the *opposite* in both cases. Needs fixing in the method section.
+2. **`app:degenerate` attributes the dead FF branch to the gradient scale `c`**; §11.2 attributes
+   it to the sign. Not separated — the two measurements differ in K *and* in `c`. A
+   {sign} x {c} 2x2 on one shape would settle it and has not been run.
+3. **`app:collapse` and the collapse audit disagree on which arm has effK 2.52** — the table says
+   2.52 is the "no fixes" hybrid and 5.18 the single block; the audit in
+   `iclr_pure_hop_isoP_bal`'s config header says 1.38 for pure isoP and 2.52 for pure 1blk.
+   One is mislabelled.
+4. **§12.14's cross-scale claim is inadmissible.** "134M T12 beat the 400M 4-iteration arm" uses
+   `iclr_big_hop_pure_sink`, the arm §12.3 strikes for running at half tokens (1.97B vs 3.93B).
+   7.86B vs 1.97B is not a depth comparison.
+
+Also: the "20-100x FF-branch revival" multiplier is not reproducible from any single matched-step
+pair (§11.4's own table gives 0.582 -> 12.44 = 21x; the step-20-30 A/B gives 0.0294 -> 3.6562 =
+124x; §11.4's parenthetical "121x" implies a baseline of 0.103 that appears nowhere). The section
+quotes the matched pair and says the ratio is step- and tau-dependent instead of giving one number.
+
+And **PROGRESS.md's own 2026-09-16 entry above is stale**: it still carries §12.16b's diagnosis
+that `compute_avg11.py` globbed the newest results file in the tree. §12.16c retracts that —
+`resolve_results_path` globs only under the directory it is handed and exits 1. The real cause was
+the OOM plus a monitor filter that grepped `Avg11 =` globally across a stdout in which the dense
+arm had been evaluated twice.
