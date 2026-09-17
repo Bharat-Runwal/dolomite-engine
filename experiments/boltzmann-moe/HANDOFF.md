@@ -2420,3 +2420,33 @@ ranked WORST) is still the right yardstick, but quote it at a fair age: at step 
 at cos 0.7764 against that arm's 0.7412, a gap of 0.035 and closing, not the 0.073 it appeared to be
 at step 400. That arm went on to reach cos 0.5628 / proxy 0.7632 by step 27800, so recovery over
 thousands of steps is the documented expectation for either setting.
+
+#### 12.24a The mu delta at 400M/30.4B is +0.05pp -- and it scales with GPT BYPASS, not iteration count
+
+Both legs of job 1718621, each with its results path verified:
+
+| | Avg11 | bits/byte | word-PPL | path |
+|---|---:|---:|---:|---|
+| **`unsharded_mucal`** | **49.91** | 0.8709 | 25.23 | `harness_results_2026-09-17T00-28-39` |
+| `unsharded` (mu dropped) | 49.86 | 0.8720 | 25.34 | `harness_results_2026-09-17T00-57-39` |
+| delta | **+0.05pp** | +0.0011 | -0.11 | |
+
+**12.15 and I both guessed wrong.** The prediction was that this delta might EXCEED the sandwich's
++0.12pp because the energy block runs 6x here against the sandwich's 4x, so more iterations should
+compound the tilt. It is smaller. Iteration count is the wrong variable:
+
+| arm | GPT layers (bypass) | energy-block iters | mu cost |
+|---|---:|---:|---|
+| `scale32B_boltz_sinkhorn` (hybrid) | 6 | 6 | **+0.05pp** |
+| `iclr_big_hop_sandwich_sink` | 2 | 4 | +0.12pp |
+| pure 8-12 iteration arms | **0** | 8-12 | **1.6-1.8 nats** |
+
+Monotone in the number of GPT layers, NOT in iterations. Same ordering as 12.15's FLOP-share /
+robustness dissociation: a non-energy path around the mixture makes the model tolerant to a
+corrupted router, and the pure stacks have none. **So predict mu sensitivity (and, by 12.19,
+proxy-selection sensitivity) from the bypass, not from depth.**
+
+Practical consequence: for hybrids the mu recalibration is nearly optional (+0.05pp is real -- the
+harness is deterministic to 4 dp -- but small). For pure arms it is worth 1.6-1.8 nats and is
+mandatory. The sandwich sits in between, which is consistent with it also sitting between hybrid
+(-0.03pp) and pure (-0.68pp) on proxy-selection cost.
