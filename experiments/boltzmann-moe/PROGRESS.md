@@ -1429,3 +1429,161 @@ Note: finer wrapping would be LESS bandwidth-efficient, not more -- FSDP flatten
 avoid many small latency-bound messages. It buys lower peak memory and better overlap. And size is
 probably not the trigger anyway: 365 MiB is a routine allreduce, and the NVLS fault failed binding
 2 MiB. Untested; needs sign-off since it changes every run.
+
+## 2026-09-17 (late) — the paper arm set made UNIFORM: sparse, SVD, 32B, math datamix
+
+**DEFECT FOUND AND CORRECTED: the entire 134M tier was DENSE.** `cmix_134M_{hybrid,sandwich,pure}`
+inherited `sparse_forward: false` from `iclr_hop_K16_top2_sink`, because they were built by swapping
+ONLY the datamix (which was the instruction at the time). The consequence was never surfaced: the
+paper is about SPARSE energy routing, and its two headline arms exercised neither sparsity nor the
+proxy. Replaced by `cmix_134M_*_32B_sparse` with the full sparse knob-set and `proxy_init: svd`.
+Cost of the correction: hybrid was killed at 4.4% and sandwich at 4.1% of 122070 steps.
+
+**THE UNIFORMITY RULE, now audited mechanically.** Every paper arm except the two baselines must be:
+math datamix (== `REFERENCE_s8e4`), 32.0B tokens, `sparse_forward: true`, `proxy_init: svd`.
+Audited state (2026-09-17):
+
+| arm | mix | tokens | sparse | svd | sss | K/k/p | repulsion | mu |
+|---|---|---|---|---|---|---|---|---|
+| cmix_134M_hybrid_32B_sparse   | OK | 32.00B | yes | svd | 300 | 16/2/4 | output/0.1 | 6 |
+| cmix_134M_sandwich_32B_sparse | OK | 32.00B | yes | svd | 300 | 16/2/4 | output/0.1 | 6 |
+| cmix_134M_pure_32B_sparse     | OK | 32.00B | yes | svd | 300 | 16/2/4 | output/0.1 | 12 |
+| cmix_134M_gptswitch_32B       | OK | 32.00B | BASELINE (standard Switch MoE, by design) |
+| cmix_400M_hybrid_sparse       | OK | 32.00B | yes | svd | 300 | 16/2/4 | output/0.1 | 6 |
+| cmix_400M_sandwich_sparse     | OK | 32.00B | yes | svd | 300 | 16/2/4 | output/0.1 | 4 |
+| cmix_400M_baseline_switch     | OK | 32.00B | BASELINE (standard Switch MoE, by design) |
+| cmix1B_12L_gptDense_32B       | OK | 32.00B | yes | **random** | **2000** | 64/2/4 | output/0.1 | 1 |
+
+The differing `sinkhorn_mu_iters` (6/12/4/1) are CORRECT, not deviations -- rule 9 requires each to
+equal its own block's `layer_iterations` entry, which differs by architecture.
+
+**THE ONE SANCTIONED EXCEPTION: the 1B** (`proxy_init: random`, `sparse_start_step: 2000`). It was
+10 h into a ~34 h run when the SVD result landed; the user decided explicitly to leave it. Do NOT
+"fix" it silently -- and do not compare its proxy behaviour with the SVD arms as if the router
+initialisation were held constant.
+
+**4-GPU FALLBACK CONFIGS, pre-built rather than edited live.** `configs/cmix/*_4gpu.yml` for every
+paper arm. They differ from their 8-GPU sibling in `gradient_accumulation_steps` ONLY (doubled), so
+tokens/step, effective batch, LR schedule and the 32.0B total are byte-identical and only wall-clock
+doubles. **Doubling `num_training_steps` instead would be WRONG** -- it halves tokens/step and
+changes the batch size and schedule shape, making the arm non-comparable. The 4-GPU configs share
+their sibling's `save_path`, so switching to one RESUMES rather than restarts. The intended GPU
+count is in the filename and stated in the header, because world size is not in a config.
+
+**OPEN RISK for the 134M sparse tier: `I_e = 1024` is small.** The sparse saving is
+`O(T*(K-p)*I_e)` while dispatch overhead is `O(T*p)`; the 400M arm has I_e=11742 and the 1B 2846.
+Sparsity may not pay at this expert width and could be slower than dense. Read the dense-vs-sparse
+step_time across `sparse_start_step: 300` before quoting any speedup for this tier. **A result below
+1x is REPORTABLE (a statement about expert width), not a bug** -- but it would mean the 134M tier
+shows sparse quality without sparse savings.
+
+## 2026-09-17 (late) — MEASURED: the sparse payoff scales with EXPERT WIDTH, not architecture
+
+Windowed medians across `sparse_start_step` (n>=15 each side, dense = steps 30..sss, sparse = sss+150 on):
+
+| arm | I_e | K/k -> p | dense s/step | sparse s/step | ratio | p/K ceiling |
+|---|---|---|---|---|---|---|
+| cmix_134M_hybrid_32B_sparse   | 1024 | 16/2 -> 4 | 0.3282 | 0.2092 | **1.569x** | 4.0x |
+| cmix_134M_sandwich_32B_sparse | 1024 | 16/2 -> 4 | 0.2916 | 0.1895 | **1.539x** | 4.0x |
+| cmix_134M_pure_32B_sparse     | 1024 | 16/2 -> 4 | 0.8751 | 0.5957 | **1.469x** | 4.0x |
+| cmix1B_12L_gptDense_32B       | 2846 | 64/2 -> 4 | 4.5213 | 1.6843 | **2.684x** | 16.0x |
+
+**The risk flagged when the 134M tier was rebuilt sparse did NOT materialise** -- no arm is below
+1x, so sparsity pays even at I_e=1024. But the width dependence is real and matches the cost model:
+the saving is O(T*(K-p)*I_e) while dispatch overhead is O(T*p) and does NOT shrink with I_e, so
+narrow experts leave more of the p/K ceiling unclaimed. At I_e=1024 we realise 1.5x of a 4x ceiling
+(39%); at I_e=2846, 2.68x of 16x (17% -- but 1.8x more absolute speedup).
+
+**The three 134M ratios cluster at 1.47-1.57 despite recurrence depths of 6, 4 and 12** iterations
+and three different architectures. That is evidence the ratio is set by expert width and p/K, NOT by
+architecture -- which is what makes it a reportable scaling statement rather than an arm-specific
+number. The 400M arms (I_e=11742, the widest) have not accumulated 15 post-switch points yet; their
+ratio is the one that should be highest, and it will also be the first to exercise `proxy_init: svd`
+on a real run.
+
+**ETA for the full paper set** (from measured sparse step times; the two 400M arms projected from
+their dense rate and the width trend, since they only just crossed the switch):
+
+| arm | ETA (UTC) |
+|---|---|
+| cmix_134M_gptswitch_32B (baseline) | Sep 18 03:32 |
+| cmix_134M_sandwich_32B_sparse | Sep 18 04:01 |
+| cmix_134M_hybrid_32B_sparse | Sep 18 04:41 |
+| cmix_400M_baseline_switch | Sep 18 09:03 |
+| cmix_134M_pure_32B_sparse | Sep 18 17:42 |
+| cmix1B_12L_gptDense_32B | Sep 18 21:23 |
+| cmix_400M_sandwich_sparse | ~Sep 19 18:00 (projected) |
+| cmix_400M_hybrid_sparse | ~Sep 19 21:00 (projected) |
+
+Everything lands ~Sep 19 21:00 UTC, i.e. **~99 h before the Sep 24 deadline**. The 400M pair is the
+critical path and the only projected pair; if their sparse ratio comes in below ~2x they slip toward
+Sep 22 and become tight.
+
+### CORRECTION to the entry above — the width claim was WRONG, retracted
+
+The table above records `cmix_134M_pure_32B_sparse` at I_e=1024. **Its actual configuration is
+I_e=4480** (I_total 71,680 / K=16), and its recurrence depth is 12, not 6. So:
+
+| arm | I_e | iters | K | ratio |
+|---|---|---|---|---|
+| 134M hybrid   | 1,024 |  6 | 16 | 1.569 |
+| 134M sandwich | 1,024 |  6 | 16 | 1.539 |
+| 134M pure     | **4,480** | **12** | 16 | 1.469 |
+| 1B stacked    | 2,846 |  **1** | **64** | 2.684 |
+
+With the correct widths the claim inverts: **pure has the WIDEST experts of its tier and the LOWEST
+ratio.** And the "three architectures agree at fixed I_e" statement was false -- only two share a
+width. `I_e`, `K` and recurrence depth all differ across the four arms and are confounded: the best
+ratio is the only NON-recurrent arm, which also has the largest K (K/p ceiling 16x vs 4x); the worst
+is the deepest-recurrence arm. Any of the three could carry the effect.
+
+**What survives:** sparsity pays at every configuration tested (nothing slower than dense), and ONE
+causal comparison -- hybrid vs sandwich share I_e, K, recurrence and budget and differ only in where
+the energy block sits: 1.569 vs 1.539, so block PLACEMENT does not matter.
+
+Separating width from K from recurrence needs arms that vary one at a time; not run.
+Paper: claim published in overleaf fdb199c, retracted in 2a330a5. `tab:armspec` (generated from the
+configs, not hand-written) now records every arm's exact d / layer_iterations / K x I_e / k / p /
+tokens / steps, plus the datamix ratios and the 32.0B budget.
+
+**LESSON: generate spec tables from the configs.** This error came from carrying "the 134M tier is
+I_e=1024" forward from the hybrid/sandwich configs onto pure without reading pure's own config --
+the same class of mistake as the earlier prefix-collision and hand-aligned-table errors. The
+`tab:armspec` generator reads every value from the yaml.
+
+## 2026-09-18 — preemption wave, and two monitoring defects fixed
+
+**Preemption wave on `preemptable` at 01:23–01:39 UTC.** Both 400M arms (the critical
+path) and the `cmix_134M_pure` eval were preempted. LSF **requeues on the same jobid**,
+so both arms went back to PEND while still appearing "live" to `bjobs`.
+- `cmix_400M_hybrid_sparse` 1761564: preempted 01:23:34, restarted 01:25:22 and
+  **correctly resumed from `global_step2600`** (run-time `load_args` resolution works),
+  preempted again 01:39:04. ~200 steps re-done.
+- `cmix_400M_sandwich_sparse` 1761565: preempted 01:27:34, not yet rescheduled. Last
+  step 3900, checkpoint 3800, so ~100 steps to re-do.
+- The eval died 60% through GSM8K (792/1319 generate_until at 3.91 s/it). The
+  `KeyboardInterrupt` in `energy_ff.py:_log_metrics` is the preemption SIGINT, not a bug.
+  **A 14-task eval is a >1 h job at this scale, so preemption is likely, not unlucky.**
+
+**Do NOT move a PEND arm to `grp_ebm` on a spot capacity reading.** `blimits` showed
+grp_ebm 24/32 (8 free); by the time `bmod` returned — it spends >2 min in "LSF is
+processing your request" — it was 32/32 and the arm was blocked with *"requirements for
+reserving resource (ngpus_physical) not satisfied"*. Reverted to `preemptable`.
+Colleague `bsaha3`'s `s8e4_f5kl_distill` holds 16 of the 32 and is **46 h into its run**,
+so there is nothing to wait for. The capacity window is shorter than the tool call.
+
+**Monitoring defect 1 — PEND after requeue read as healthy.** The inline health check
+alerted only on "no live job", so it printed `__QUIET__` while both critical-path arms
+sat PEND. Logic moved to **`scripts/health_check_arms.py`** (durable, so the blind spot
+cannot be reintroduced by retyping the check): RUN is the only healthy state, non-RUN is
+reported with its duration, recovery to RUN is reported, and a **frozen step counter is
+reported even while RUN** (a wedged job also holds RUN).
+
+**Monitoring defect 2 — milestone links drifted.** `milestone_ckpt_backup.sh` deduped on
+the full dir name (`tok8B_step32000_actual8.39B`). Once `max_to_keep: 2` pruned the
+original `global_step32000`, `min(cand)` drifted up and each sweep re-linked the same
+milestone at a later step — `cmix_134M_gptswitch_32B` acquired both `tok8B_step32000`
+(8.39B) and `tok8B_step36000` (9.44B). An eval globbing `tok8B_*` would silently have
+picked a 12.5%-over-budget checkpoint as the 8B anchor. Guard now matches the milestone
+**prefix**, so a captured milestone is frozen. Drift artifact removed; the real anchor
+holds all 37 files / 1.6 GB and is now the ONLY copy (its `global_step32000` is pruned).

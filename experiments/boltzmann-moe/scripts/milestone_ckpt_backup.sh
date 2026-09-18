@@ -57,14 +57,23 @@ for f in sorted(glob.glob('configs/cmix/cmix*.yml')):
     if not have: continue
     mdir = f'{sp}/milestones'
     for tgt in targets:
-        want = tgt / tps                                  # step at which the milestone is crossed
-        # the newest checkpoint at or after the milestone that we actually have
+        # FLOOR, not exact: the final milestone is unreachable otherwise. 32e9/262144 =
+        # 122070.3125 but the 134M arms END at step 122070, so `s >= 122070.3125` never matched
+        # and the 32B anchor was silently never linked (found 2026-09-18). Tolerate being within
+        # one save_interval-free step of the target: the run cannot produce a later checkpoint.
+        want = int(tgt / tps)                             # step at which the milestone is crossed
+        # Dedup on the MILESTONE PREFIX, not the full name. max_to_keep prunes the
+        # earliest qualifying checkpoint, so min(cand) DRIFTS UPWARD on later sweeps and a
+        # full-name check re-links the same milestone at a later step every cycle
+        # (observed 2026-09-17: gptswitch got both tok8B_step32000 and tok8B_step36000).
+        # Once a milestone is captured it is frozen.
+        if glob.glob(f'{mdir}/tok{tgt/1e9:.0f}B_*'): continue
+        # earliest checkpoint at or after the milestone that is STILL on disk
         cand = [s for s in have if s >= want]
         if not cand: continue
         s = min(cand)
         tok = s * tps
         dst = f'{mdir}/tok{tgt/1e9:.0f}B_step{s}_actual{tok/1e9:.2f}B'
-        if os.path.exists(dst): continue
         os.makedirs(mdir, exist_ok=True)
         r = subprocess.run(['cp','-al',f'{sp}/global_step{s}',dst], capture_output=True, text=True)
         if r.returncode == 0:

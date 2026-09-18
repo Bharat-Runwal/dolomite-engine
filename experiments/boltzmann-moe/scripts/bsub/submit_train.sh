@@ -142,6 +142,15 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_IB_TIMEOUT=22
 export NCCL_IB_RETRY_CNT=13
 export NCCL_DEBUG=WARN
+# TCP transport for MULTI-NODE. The cluster's InfiniBand fails the FIRST inter-node RDMA with
+#   NET/IB: completion ... status=IBV_WC_RETRY_EXC_ERR(12)  -> ncclRemoteError
+# across 6+ HCAs, 7+ peers and 4 host pairs, and NCCL_IB_TIMEOUT/RETRY_CNT do not fix it. With
+# NCCL_IB_DISABLE=1 the same models train fine (40/40 steps on a 2-node control, and every arm
+# submitted with it is stepping while every arm submitted without it stalled at step 0).
+# SET FROM $nnodes, NOT BY HAND: this was added temporarily, reverted, and then three multi-node
+# arms were launched without it and sat dead at step 0. Encoding it removes that failure mode.
+# Single node needs no inter-node transport, so leaving it off there costs nothing.
+if [ "${nnodes:-1}" -gt 1 ]; then export NCCL_IB_DISABLE=1; fi
 CFG="${CFG}"
 SP="${SP}"
 if [ -n "\$SP" ] && [ -f "\$SP/latest_checkpointed_iteration.json" ]; then

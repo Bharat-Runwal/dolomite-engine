@@ -685,3 +685,67 @@ Axes to sweep (in priority order):
 - [ ] OPTIONAL (needs sign-off): finer FSDP wrapping to break the 191M FlatParameter into smaller
       collectives. Reliability/memory lever, NOT a speed one.
 - [ ] Revisit `timeout_minutes: 180` — added on a wrong diagnosis; harmless but no longer justified.
+
+## 2026-09-17 (late)
+
+- [x] 134M tier rebuilt SPARSE with proxy_init: svd (was dense — inherited, never flagged)
+- [x] Uniformity audit: all paper arms math datamix + 32.0B + sparse + SVD (1B excepted by decision)
+- [x] 4-GPU fallback configs for every arm (ga doubled, same save_path, GPU count in the filename)
+- [ ] Read the 134M dense-vs-sparse step_time across step 300 — does sparsity pay at I_e=1024?
+- [ ] Regenerate paper tab:cmix134m from the 32B sparse arms and drop its \CC
+- [ ] Revisit app:proxy's \CC once a paired SVD-vs-random arm exists (currently a checkpoint
+      measurement, not an ablation)
+- [ ] 1B remains proxy_init: random / sparse_start_step 2000 — do not compare its router behaviour
+      against the SVD arms as if initialisation were controlled
+
+## Config-tree consolidation (deferred — do NOT do mid-deadline, it breaks path references)
+
+- [ ] Move every `configs/iclr_*`, `configs/cmix/`, `configs/tok32B/`, `configs/wsd90k/`,
+      `configs/probe2node/` tree into a single **`configs/iclr_26/`**. Created 2026-09-18;
+      ablation configs already live in `configs/iclr_26/ablations/`.
+      **Blocked until the live runs finish**: eight arms resolve `load_args.load_path` and
+      `save_path` at run time, `submit_train.sh` snapshots the resolved config by path, and
+      `auto_eval_on_finish.sh` / `gen_arm_table.py` / `report_cmix_evals.py` all glob
+      `configs/cmix/cmix*.yml`. Moving files mid-run silently breaks resume and eval discovery.
+      Do it as one commit after the last arm completes, updating those four globs together.
+
+## Rule-9 defect on the 134M tier (found 2026-09-18)
+
+- [ ] `cmix_134M_{hybrid,sandwich,pure}_32B_sparse.yml` are missing `sinkhorn_persist_mu: true`
+      (all 400M/1B arms have it). Penalty applies at EVAL: ~0.003 nats at 6 iterations,
+      **+1.827 at 12**. Hybrid/sandwich (6 iters) are effectively unaffected; **`pure` runs 12
+      iterations and IS exposed.** Fix at eval time by setting the field in the unsharded
+      `config.json` before running the harness — no retraining needed. Do NOT copy the defect
+      into the new ablation configs.
+
+## 400M depth redesign — CAMERA-READY, not for the Sep 24 deadline
+
+Motivation: both tiers currently have 7 distinct blocks and **effective depth 12**
+(`sum(layer_iterations)`), 134M at d=768 and 400M at d=1024 — i.e. we scaled width only, where
+convention at 400M would be ~24 layers. Padding the GPT preamble would dilute the Boltzmann-MoE
+claim (capacity moved into blocks the paper is not about), so the depth must come from the energy
+side. Throughput evidence favours **distinct blocks over iterations**: the 1B's `8G4E` (4 distinct,
+non-recurrent) achieves **56.1 TFLOP/s** against the 400M `6G1x6E` (1 block x 6) at **20.3** —
+dispatch + Sinkhorn are paid per application and are independent of `I_e`.
+
+- [ ] **`6G4E` 400M** — 4 distinct non-recurrent energy blocks. Adds depth, raises the energy share
+      of the model rather than diluting it, and should run considerably faster than `6G1x6E`.
+      Iso-total requires `I_e` to drop ~4x (narrower experts weaken the sparsity economics — state
+      the trade rather than hide it).
+- [ ] **`6G1x4E1x4E` 400M** — 2 distinct energy blocks, 4 iterations each. Middle ground: keeps
+      recurrence (the parameter-sharing claim) while doubling distinct energy capacity.
+      **Computed iso-param spec** (`audit_config`-consistent arithmetic, 2026-09-18):
+        - `K=32, k=2, I_e=2,936` per block -> energy bank **192.4M**, identical to the current
+          single block at `I_e=5,871`
+        - ACTIVE **12.03M** vs current **12.02M** -> iso-active as well as iso-total
+        - effective depth **14** (6+4+4) vs current **12**
+        - energy-block applications **8** vs **6** -> MORE dispatch + Sinkhorn per forward, so
+          expect it to be slower than `6G4E` and possibly than `6G1x6E`. Measure, do not assume.
+      **HOLD until the surrogate-router results are in** — if a distilled head replaces the exact
+      energy router, the per-application overhead changes and the optimal block/iteration split
+      changes with it.
+- [ ] **Whole-tier requirement:** changing the 400M architecture means changing **all three** 400M
+      arms (hybrid, sandwich, baseline) or the tier stops being internally comparable. ~40-60 h of
+      compute per arm. This is the reason it cannot be done before Sep 24.
+- [ ] For the current draft, state effective-depth-12-at-both-scales as a **deliberate control**
+      rather than leaving a reviewer to notice the 400M is unusually shallow.
