@@ -2040,8 +2040,21 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         indices out of the dynamo graph as constants. See the __init__ note."""
         k = min(self.n_repulsion_pairs, len(self._all_pairs))
         if self.repulsion_tensor_idx:
-            sel = torch.randint(self._pairs_t.shape[0], (k,), device=self._pairs_t.device)
-            ij = self._pairs_t.index_select(0, sel)
+            # `_pairs_t` is a NON-PERSISTENT buffer, so a model materialised on meta
+            # and then moved (or sharded by FSDP) can leave it on CPU while the
+            # activations it indexes are on CUDA. Under torch.compile that surfaces as
+            #   index_select(FakeTensor(cuda:N), 1, FakeTensor(cpu))
+            #   -> Unhandled FakeTensor Device Propagation ... two different devices
+            # and kills the run at the first repulsion call. Pin the indices to the
+            # buffer's own device but keep them co-located with whatever consumes them
+            # by deriving the device from a live parameter instead.
+            dev = self._pairs_t.device
+            for _p in self.parameters():
+                dev = _p.device
+                break
+            pairs = self._pairs_t.to(dev) if self._pairs_t.device != dev else self._pairs_t
+            sel = torch.randint(pairs.shape[0], (k,), device=dev)
+            ij = pairs.index_select(0, sel)
             return ij[:, 0], ij[:, 1]
         sampled = random.sample(self._all_pairs, k)
         return [p[0] for p in sampled], [p[1] for p in sampled]
