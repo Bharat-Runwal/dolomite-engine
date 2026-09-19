@@ -1,0 +1,205 @@
+# ===========================================================================================
+# TEMPLATE -- NOT LAUNCHED.  cmix_134M_hybrid_32B_sparse with the KL-DISTILLED SURROGATE HEAD
+# as the SPARSE SELECTOR instead of the rank-r subspace proxy.  Written 2026-09-19.
+#
+# It is a byte-for-byte copy of cmix_134M_hybrid_32B_sparse.yml EXCEPT for the lines listed
+# here, so it is a clean A/B for the selector alone (pre-flight rule 10):
+#
+#   mlp_type            EnergyFF_BoltzmannMoE -> EnergyFF_SurrogateBoltzmannMoE
+#   + surrogate_replaces_proxy: true   the head IS the cheap all-K router (_proxy_energies):
+#                                      it NOMINATES sparse_candidates experts and the EXACT
+#                                      energies of those re-rank to top_k and set the weights.
+#   + surrogate_kind / surrogate_hidden / surrogate_init_std / surrogate_detach_input /
+#     surrogate_track_agree / surrogate_free_proxy      the head itself
+#   proxy_mu_convention  legacy -> pre_mu      REQUIRED (asserted): otherwise the dense phase
+#                                      distils POST-mu and the sparse phase PRE-mu, so the head
+#                                      is re-targeted at the handover and mu (3.44 logit units)
+#                                      is double-counted on the dense selection path.
+#   proxy_rank          16 -> 0        the head replaces the rank-r proxy. The module forces it
+#                                      to 1 to satisfy the frozen base's assert and then frees
+#                                      the tensors from model.parameters().
+#   - proxy_kind / proxy_out_dim / proxy_init       meaningless once the proxy is gone
+#                                      (proxy_init: svd is NEUTRALISED and warned about)
+#   proxy_loss_coef     0.01 (kept)    THIS is what trains the head, in BOTH phases.
+#                                      surrogate_coef is a NO-OP in the sparse phase because
+#                                      _forward_sparse never calls _route.
+#   sparse_candidates   2 -> 4         p > k is where "nominate then re-rank" actually bites.
+#                                      Cost ceiling 2K/((p+k)*cf) = 4.3x at p=4 (6.16x at p=2).
+#   sparse_start_step   300 -> 3000    a dense warm-up is REQUIRED IN PRACTICE, and 280-500 was
+#                                      calibrated for a SUBSPACE proxy that already has the
+#                                      right functional form. A d->h->K head has to learn a
+#                                      quadratic from scratch. SET THIS FROM THE MEASURED
+#                                      proxy_topk_agree PLATEAU -- 3000 is a guess.
+#   + sinkhorn_persist_mu: true        MISSING from the parent config although it sets
+#                                      sinkhorn_iters: 3 and sinkhorn_mu_iters: 6. That is
+#                                      CLAUDE.md pre-flight rule 9 (+1.587 nats at 8 iters when
+#                                      trained tilted and evaluated untilted) and it is now
+#                                      ASSERTED for any surrogate arm. Raise it against the
+#                                      parent arm too.
+#   save_path / wandb name             per-arm unique (pre-flight rule 6)
+#
+# UNCHANGED and load-bearing: renormalize_topk: true (the proxy-completed denominator is worth
+# -1.52 nats AND is the only lm_loss gradient path into the head), sparse_explore: 2 (without
+# it the candidate-restricted KL is self-reinforcing), fused_experts: true, e_sign_override: pos.
+# LAUNCH AT EXACTLY 8 GPUs (mbs 4 x ga 2 x 8 x 4096 = 262144 tok/step x 122070 = 32.0B).
+# ===========================================================================================
+
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 6
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - &id001
+      sequence_mixer_type: softmax_attention
+      num_attention_heads: 12
+      num_key_value_heads: 12
+      add_bias: false
+      attention_multiplier: 0.125
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 12
+      num_key_value_heads: 12
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - &id002
+      mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2048
+      add_bias: false
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - mlp_type: EnergyFF_SurrogateBoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 16384
+      n_experts: 16
+      top_k: 2
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      repulsion_tensor_idx: true
+      activation_function: gelu
+      add_bias: false
+      sparse_forward: true
+      sparse_candidates: 4
+      sparse_explore: 2
+      sparse_start_step: 3000
+      renormalize_topk: true
+      fused_experts: true
+      proxy_rank: 0
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      proxy_mu_convention: pre_mu
+      surrogate_replaces_proxy: true
+      surrogate_kind: mlp
+      surrogate_hidden: 256
+      surrogate_init_std: 0.01
+      surrogate_detach_input: true
+      surrogate_track_agree: true
+      surrogate_free_proxy: true
+      surrogate_coef: 0.0
+      use_surrogate: false
+      repulsion_space: output
+      repulsion_subsample: 64
+      cos_probe_interval: 100
+      sinkhorn_mu_iters: 6
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix32B/cmix_134M_hybrid_32B_sparse_surr
+  save_interval: 2000
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: cmix_134M_hybrid_32B_sparse_surr
+training_parameters:
+  num_training_steps: 122070
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 2
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 120070
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0

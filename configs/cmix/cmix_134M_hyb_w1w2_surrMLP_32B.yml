@@ -26,14 +26,20 @@ model_args:
     num_pre_layers: 0
     num_post_layers: 0
     layer_iterations:
-    - 4
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 6
     initializer_range: 0.02
     layer_norm_epsilon: 1.0e-05
     normalization_function: rmsnorm
     position_embedding_type: rope
     rope_dim: 64
-    hidden_size: 1024
-    num_layers: 1
+    hidden_size: 768
+    num_layers: 7
     init_method: normal
     tie_word_embeddings: true
     energy_proj_type: psd_anti
@@ -43,61 +49,82 @@ model_args:
     vocab_size: 100352
     max_position_embeddings: 4096
     sequence_mixer_blocks:
+    - &id001
+      sequence_mixer_type: softmax_attention
+      num_attention_heads: 12
+      num_key_value_heads: 12
+      add_bias: false
+      attention_multiplier: 0.125
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
     - sequence_mixer_type: energy_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     mlp_blocks:
-    - mlp_type: EnergyFF_BoltzmannMoE
-      expert_kind: hopfield
-      intermediate_size: 286720
+    - &id002
+      mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2048
+      add_bias: false
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - mlp_type: EnergyFF_SurrogateBoltzmannMoE
+      expert_kind: w1w2
+      intermediate_size: 8192
       n_experts: 16
       top_k: 2
       hopfield_grad_scale: sqrt_consistent
       routing_norm: zscore
       temperature: 1.0
       repulsion_form: abs
-      repulsion_coef: 2.0
-      repulsion_space: weight
-      cos_probe_interval: 100
+      repulsion_coef: 0.1
       n_repulsion_pairs: 4
       gelu_grad_method: sigmoid
-      e_sign_override: pos
+      e_sign_override: neg
       sinkhorn_iters: 3
-      sinkhorn_persist_mu: true
-      sinkhorn_mu_iters: 4
       repulsion_tensor_idx: true
-      renormalize_topk: true
-      fused_experts: true
-      sparse_start_step: 300
-      sparse_forward: true
-      sparse_candidates: 4
-      sparse_explore: 2
-      proxy_rank: 16
-      proxy_kind: subspace
-      proxy_out_dim: 512
-      proxy_iters: 1
-      proxy_loss_coef: 0.01
       activation_function: gelu
       add_bias: false
+      sparse_forward: false
+      renormalize_topk: true
+      fused_experts: false
+      proxy_rank: 0
+      proxy_loss_coef: 0.0
+      repulsion_space: output
+      repulsion_subsample: 64
+      sinkhorn_persist_mu: true
+      use_surrogate: true
+      surrogate_coef: 1.0
+      surrogate_kind: mlp
+      surrogate_detach_input: true
+      surrogate_track_agree: true
+      sinkhorn_mu_iters: 6
+      surrogate_hidden: 256
 tuning_args:
   tuning_method: pretraining
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok32B/cmix_400M_pure_it4_sparse
-  save_interval: 200
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix32B/cmix_134M_hyb_w1w2_surrMLP_32B
+  save_interval: 2000
   max_to_keep: 2
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: cmix_400M_pure_it4_sparse
+    name: cmix_134M_hyb_w1w2_surrMLP_32B
 training_parameters:
-  num_training_steps: 61035
+  num_training_steps: 122070
   eval_interval: 5000
-  micro_batch_size: 1
-  gradient_accumulation_steps: 16
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
   eval_during_training: false
   gradient_clipping: 1
 optimizer_args:
@@ -113,12 +140,11 @@ lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
   num_warmup_steps: 2000
-  num_constant_steps: 53000
-  num_decay_steps: 6035
+  num_constant_steps: 0
+  num_decay_steps: 120070
 mixed_precision_args:
   dtype: bf16
 distributed_args:
   fsdp_algorithm: 2
-  gradient_checkpointing_method: block
   torch_compile: true
   stage: 0

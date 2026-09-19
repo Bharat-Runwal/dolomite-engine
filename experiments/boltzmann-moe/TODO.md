@@ -1,5 +1,61 @@
 # Boltzmann MoE — TODO
 
+## 2026-09-19: SURROGATE HEAD AS THE SPARSE SELECTOR — landed, and two defects it exposed
+
+Code + measurements in `PROGRESS.md` (2026-09-19 entry) and
+`scripts/test_surrogate_sparse_20260919.py`. `surrogate_replaces_proxy: true` is default-off.
+
+### 🔴 DEFECTS FOUND WHILE DOING THIS — fix before the affected arms matter
+- [ ] **ALL SIX `configs/cmix/cmix_134M_*_32B_sparse*.yml` set `sinkhorn_iters: 3` and
+      `sinkhorn_mu_iters: 6` but are MISSING `sinkhorn_persist_mu: true`** — CLAUDE.md pre-flight
+      rule 9. Every 400M and 1B sparse config HAS it, so this is a 134M-tier-only omission.
+      `cmix_134M_pure_32B_sparse` is PEND as job 1773524 right now, and for a SPARSE arm the
+      consequence is worse than for a dense one: `_forward_sparse` solves the dual on the cheap
+      router's logits, so at eval without a persisted mu the SELECTION itself is untilted, i.e.
+      different experts run. Affected: `cmix_134M_{hybrid,pure,sandwich}_32B_sparse.yml` and
+      their three `_4gpu` twins. (NOT edited here — changing a PEND job's config changes what it
+      trains; that is the user's call.)
+- [ ] **`surrogate_kind: linear` on the live `cmix_134M_hyb_w1w2_surr_32B` (job 1775379) is the
+      wrong head class for a SELECTOR.** Measured: 0.472 top-2 / 0.570 top-1 nomination recall
+      against an h=256 MLP head's 0.898 / 0.983 and the rank-r proxy's 0.928 / 0.990 on
+      structured input — and it is at its ceiling (an OLS fit does no better), because the
+      Hopfield/w1w2 energy is ~quadratic in x while a linear head's top-p region is the
+      antipodal cone of its bottom-p. Read that arm's `surrogate_topk_agree` as a LOWER BOUND on
+      head capability, not as the head's verdict. Re-run with `surrogate_kind: mlp`,
+      `surrogate_hidden: 256` (+200,976 params/block at d=768, K=16).
+- [ ] **`energy_ff_paramcount.py` does not know about `surrogate_free_proxy`**: a config with
+      `proxy_rank > 0` AND `surrogate_replaces_proxy: true` will be over-counted by the static
+      auditor by the (freed) rank-r tensors. Harmless in the shipped template, which sets
+      `proxy_rank: 0`.
+
+### NEXT, in order of leverage
+- [ ] **Measure nomination recall on a TRAINED checkpoint (needs a GPU).** Everything above is on
+      RANDOM expert weights, which is a lower bound for every selector — the proxy's published
+      0.94 top-1 / 0.90 top-2 depends on trained W being near low-rank, a mechanism the head does
+      NOT have. Parity on random weights does NOT extrapolate. Fit both on cached (x, E_k) pairs
+      the way `scripts/calibrate_proxy_router_20260916.py` already does, and report recall at
+      p ∈ {k, 4, 6} for linear / mlp-256 / rank-16 proxy side by side.
+- [ ] **Raise `sparse_candidates` above `top_k` on the sparse arms.** Over-selection buys more
+      than head capacity: mlp h=256 goes 0.898 -> 0.992 top-2 recall from p=2 to p=4, i.e. p=4
+      with an imperfect head beats p=2 with a PERFECT cheap router. Every live sparse arm runs
+      `sparse_candidates: 2` (= top_k, no over-selection). Cost ceiling moves 6.16x -> ~4.3x.
+- [ ] **Launch `configs/cmix/cmix_134M_hybrid_32B_sparse_surr.yml` (TEMPLATE, not launched).**
+      AT EXACTLY 8 GPUs (mbs 4 x ga 2 x 8 x 4096 = 262144 tok/step x 122070 = 32.0B, iso-token).
+      Set `sparse_start_step` from the MEASURED `proxy_topk_agree` plateau of the dense phase —
+      3000 in the template is a guess, and the 280-500 reference was calibrated for a subspace
+      proxy that already has the right functional form.
+- [ ] **Register `BoltzmannMoEW1W2Sparse` / `SurrogateBoltzmannMoEW1W2` in `get_mlp_block`.** The
+      w1w2 sparse path is exact with the head today (4.0-4.8e-16, TEST 9) and this is where the
+      head's cost advantage is real (13x on the selector, because the proxy is forced to m=I_e) —
+      but no `mlp_type` reaches either class, so no config can run it.
+- [ ] **GPU-only checks that could not be done here:** torch.compile / FSDP-2 behaviour of the
+      `_surr_E` stash (a tensor held on the module between `forward` and `_proxy_energies`; the
+      base already does this for `_last_energy_per_token`, so the pattern is not new but the
+      extra read site is); whether the freed proxy buffers interact with FSDP-2 sharding; whether
+      `surrogate_init_std: 0.01` leaves the head's pre-zscore output too small in bf16; and the
+      end-to-end s/step of a head-selected sparse arm vs a proxy-selected one (PLACEMENT-
+      CONTROLLED — same hosts for both arms).
+
 ## 2026-09-16: TRUE SPARSITY — ⭐ TOP PRIORITY IF THE PROXY BENCHMARK LANDS WELL
 
 ### ⭐ THE DECISION THAT MATTERS: train the long pure T12 with sparsity ON

@@ -1,75 +1,23 @@
-# cmix_1B_sb_K64k2_16gpu -- 1B SINGLE-BLOCK SPEC, 500 steps. d=2048, K=64, I_e=5549 (I_total 355136),
-# recurrence x8, over-complete attention 64 heads x head_dim 128 (inner 8192 = 4x d).
-# ~1.00B params: embed 205M (tied) + attn 67M + MoE 727M.
-# top-2 at 16 GPUs (2x8), ga halved so tokens/step matches
-# tokens/step = 16 GPU x mbs 2 x ga 4 x 4096 = 524,288 -- MATCHED across arms
-# so step_time is directly comparable. tokens/call = 8192 (the winning column, 12.9.2).
-# repulsion_space: output +subsample 64 on EVERY arm -- weight-space WEDGES multi-node and
-# using output everywhere keeps the 8-vs-16-GPU comparison unconfounded.
-# cmix_1B_sb_K64k2_16gpu -- IDENTICAL to t32B_pure_it4_sparse.yml EXCEPT the datamix (70/30 web/math,
-# from the colleagues' s8e4_stdmoe_fh2_boltz_topk2.yml). Architecture, recurrence,
-# hopfield experts, Sinkhorn, sparsity and schedule are UNCHANGED, so this is a
-# clean datamix-controlled A/B against t32B_pure_it4_sparse.
-# ============================================================================================
-# 32B-TOKEN SPARSE ARM -- PURE 400M (1 recurrent energy block x4)
-# Single job: DENSE until step 500 (teaches the proxy), SPARSE thereafter. See HANDOFF 12.22.
-#
-# TOKEN BUDGET IS THE POINT. 61035 steps x 524288 tok/step = 32.00B tokens, which is EXACTLY
-# scale32B_boltz_sinkhorn's budget (61035 x 16x1x8x4096). Steps, tokens and the LR schedule all
-# align, so the comparison against it is like-for-like on every axis.
-# Matching STEPS alone at our old 262144 would have given 16.0B -- half -- and that is precisely
-# the failure that made iclr_big_hop_pure_sink's -0.99pp delta unreadable (pre-flight check 2).
-#
-# WHY 61035 AND NOT 90000. 90k was inherited from the slope90k_* lineage, whose schedules were
-# BROKEN (warmup 2000 + decay 28000 against num_training_steps 90000, so 60000 steps ran pinned at
-# the 2e-4 floor and bought 0.015-0.019 nats -- HANDOFF 12.4). It was never a validated budget.
-# 61035 is a budget a real, correctly-scheduled baseline actually ran.
-#
-# WHY sparse_start_step 500 AND NOT 0. Measured 2026-09-16: sw2k_sparse_c10x ran sparse from step 0
-# with an untrained proxy and matched sw2k_dense to within 0.002 nats at steps 100-150, and the
-# clean at-peak pair (sw2k_sparse vs sw2k_dense) put sparse only +0.009..+0.060 nats behind through
-# step 1250. So a dense phase is NOT required -- because _forward_sparse computes EXACT energies for
-# the p=4 candidates and re-ranks, the proxy only chooses WHICH 4 of 16 to consider and half of
-# those come from a deterministic rotation, so a poor proxy costs candidate quality rather than
-# selection correctness. 500 dense steps is 0.8% of the run and buys the head start for almost
-# nothing, so it is kept as cheap insurance, not as a dependency.
-#
-# WALL CLOCK at 8 GPUs: dense mbs 1 measured 6.69-7.09 s/step at 65536 tok/GPU/step, and sparse is
-# ~1.85x on this shape at mbs 1 (12.15), so ~3.6 s/step -> ~61 h ~= 2.5 DAYS. At 16 GPUs ~1.3 days.
-# Sep 24 deadline with ~7 days left: comfortable at 8 GPUs, and WSD means an early stop is still
-# harvestable via a branched decay (12.20).
-#
-# LAUNCH (8 GPUs, NOT 4):
-#   bash experiments/boltzmann-moe/scripts/bsub/submit_selfresuming.sh \
-#        cmix_1B_sb_K64k2_16gpu configs/tok32B/cmix_1B_sb_K64k2_16gpu.yml 8 24:00 128G
-# ============================================================================================
 datasets:
-  # ===== COLLEAGUE DATAMIX (bsaha/boltzmoe-iclr27 s8e4_stdmoe_fh2_boltz_topk2.yml) =====
-  # 70% web / 30% MATH. Our historical mix is 100% web / 0% math -- this is THE difference
-  # that makes our numbers non-comparable to the colleagues' on every task, MMLU/GSM8K most.
-  # Separate data_cache_path: the Megatron blend index is keyed on the mix, so reusing the
-  # 100%-web cache dir would either collide or silently force a rebuild.
-  - class_name: MegatronDataset
-    data_name: Megatron
-    data_sampling_ratio: 1
-    class_args:
-      eval_steps: 2
-      data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
-      data_path:
-        - 0.35
-        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
-        - 0.35
-        - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
-        - 0.15
-        - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
-        - 0.15
-        - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
-      split: 99,0.5,0.5
-      sequence_length: 4096
-
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
 tokenizer_args:
   tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
-
 model_args:
   model_class: AutoModelForCausalLM
   pretrained_config:
@@ -77,7 +25,8 @@ model_args:
     num_iterations: 1
     num_pre_layers: 0
     num_post_layers: 0
-    layer_iterations: [8]
+    layer_iterations:
+    - 8
     initializer_range: 0.02
     layer_norm_epsilon: 1.0e-05
     normalization_function: rmsnorm
@@ -87,14 +36,6 @@ model_args:
     num_layers: 1
     init_method: normal
     tie_word_embeddings: true
-      # PSD-antisymmetric: Pi = SS^T + (A-A^T). SS^T is PSD by construction and the
-      # update is h := h - Pi(grad_E), so Edot = -||S^T grad_E||^2 <= 0 -- the block
-      # cannot ascend, and the antisymmetric part rotates at constant energy.
-      # Chosen 2026-09-17: computationally free (step times matched dual to 0.3%) and
-      # measurably indistinguishable in loss (all three arms inside a +-0.010 CI).
-      # WATCH: PSDA had a documented 5k-10k step instability at d=1280 / lr 2e-3 before
-      # the 0.5/sqrt(d) S-init rescale; our A/B only ran 2500 steps, so that window is
-      # NOT covered by evidence. Monitor grad_norm and loss through 10k.
     energy_proj_type: psd_anti
     bos_token_id: 100257
     eos_token_id: 100257
@@ -102,165 +43,84 @@ model_args:
     vocab_size: 100352
     max_position_embeddings: 4096
     sequence_mixer_blocks:
-      - sequence_mixer_type: energy_attention
-        num_attention_heads: 64
-        num_key_value_heads: 64
-        head_dim: 128
-        add_bias: false
-        attention_multiplier: 0.088388
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 64
+      num_key_value_heads: 64
+      head_dim: 128
+      add_bias: false
+      attention_multiplier: 0.088388
     mlp_blocks:
-      - mlp_type: EnergyFF_BoltzmannMoE
-        expert_kind: hopfield
-        intermediate_size: 355136      # I_e = 355136 / 64 = 5549
-        n_experts: 64
-        top_k: 2
-        hopfield_grad_scale: sqrt_consistent
-        routing_norm: zscore
-        temperature: 1.0               # 0.35 was calibrated under the INVERTED sign
-        repulsion_form: abs
-        repulsion_coef: 0.1
-        repulsion_space: output
-        repulsion_subsample: 64
-                                     # path never computes. 12.13 ranks the substitutes by the
-                                     # output alignment they reach from scratch: weight-block
-                                     # cosines 0.43-0.44, subsampled output estimator 0.53->0.74
-                                     # (WORST -- unbiased in value, but high variance, and Adam
-                                     # damps a high-variance term relative to its mean).
-                                     # THIS IS THE EXPERIMENT 12.13 SAYS WAS NEVER RUN.
-        cos_probe_interval: 50
-                                     # alignment in a sparse arm. Watch it: if it climbs toward
-                                     # 0.7+ the diversity control has failed and 12.13 repeats.            # output-space value; a sparse arm needs weight-space 2.0
-        n_repulsion_pairs: 4
-        gelu_grad_method: sigmoid
-        # ---- corrected-sign variant (ROUTING_SIGN_BUG_20260915.md) ----
-        e_sign_override: "pos"         # pre-flight 8: hopfield anti-routes without this
-        sinkhorn_iters: 3              # exact chemical potential, no clamp
-        sinkhorn_persist_mu: true      # pre-flight 9: absent => trained tilted, evaluated
-        sinkhorn_mu_iters: 8   # == layer_iterations[0]
-        repulsion_tensor_idx: true     # tensor indices: 1 graph, 0 breaks. NOT optional.
-        # ---- SPARSITY (HANDOFF 12.9-12.13) ----
-        renormalize_topk: true       # MANDATORY, not a tuning knob. With it FALSE, top-2 of 16
-                                     # carries only ~55% of the softmax mass and top-k is a
-                                     # SCALING rather than a sparsification (12.12). No sparse
-                                     # path can estimate the all-K denominator; this deletes it.
-                                     # Free when TRAINED (44.54 vs 44.58); +0.483 bpb retrofitted.
-        fused_experts: true
-        sparse_start_step: 200   # 200 dense then 300 sparse, one job
-                                     # 300, not 500: MEASURED 2026-09-17 on the dense phase-1 arms
-                                     # at 262144 tok/step, proxy_topk_agree hit 0.7712 (sandwich)
-                                     # and 0.6982 (pure) by step 200 -- the sandwich already past
-                                     # the 0.75 handoff threshold, and faster than the reference
-                                     # run (0.7906 at 280). These arms run 524288 tok/step, DOUBLE
-                                     # that, so the proxy sees 2x the tokens per step and should
-                                     # clear it sooner still. 300 keeps margin at 0.5% of the run.
-                                     # Steps 1-499 take _forward_fused, whose _proxy_step distils
-                                     # the proxy against the EXACT all-K routing distribution --
-                                     # the only regime in which it learns the ranking (reference:
-                                     # 0.1193 -> 0.7906 in 280 dense steps). From 500 the sparse
-                                     # path MAINTAINS it as the routing target drifts.
-                                     # Costs ONE torch.compile recompile at step 500; the flag is
-                                     # a Python bool derived from global_step, so every rank flips
-                                     # on the same step with no communication.
-        sparse_forward: true         # skips BOTH projections for unselected experts. EXACT given
-                                     # the selection (4e-16), and sparse_candidates=K reproduces
-                                     # dense bit-for-bit on a real checkpoint.
-        sparse_candidates: 2
-        sparse_explore: 2
-                                     # Without it the proxy is never trained in the sparse path
-                                     # (proxy_loss_coef is a no-op) and the arm trains with a FIXED
-                                     # RANDOM router -- that happened once and went unnoticed
-                                     # because no metric logged. Costs speed: p=4's ceiling is
-                                     # ~4.3x, not 6.2x. Inference uses top-2, no exploration.
-        proxy_rank: 16
-        proxy_kind: subspace         # "quad" FAILS (0.348 vs 0.125 chance)
-        proxy_out_dim: 512
-        proxy_iters: 1               # per-iteration heads are EVAL-ONLY: the call counter and
-                                     # activation checkpointing are incompatible.
-        proxy_loss_coef: 0.01        # online distillation against the exact energies that
-                                     # exploration makes available
-        activation_function: gelu
-        add_bias: false
-
+    - mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 355136
+      n_experts: 64
+      top_k: 2
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      repulsion_space: output
+      repulsion_subsample: 64
+      cos_probe_interval: 50
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 8
+      repulsion_tensor_idx: true
+      renormalize_topk: true
+      fused_experts: true
+      sparse_start_step: 200
+      sparse_forward: true
+      sparse_candidates: 4
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      activation_function: gelu
+      add_bias: false
 tuning_args:
   tuning_method: pretraining
-
 save_args:
   save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok32B/cmix_1B_sb_K64k2_16gpu
-  save_interval: 100000                  # ~53 min. At 5000 a preempted arm can make ZERO net
-  max_to_keep: 2                       # progress. max_to_keep must be an int, never null.
-
+  save_interval: 100000
+  max_to_keep: 2
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
     name: cmix_1B_sb_K64k2_16gpu
-
 training_parameters:
-  num_training_steps: 500            # x 524288 tok = 32.00B tokens -- IDENTICAL to scale32B
+  num_training_steps: 500
   eval_interval: 5000
-  micro_batch_size: 2                  # ONE micro_batch_size for BOTH phases, which is what makes
-                                       # a single job possible: mbs is a dataloader parameter, not a
-                                       # model attribute, so it cannot be flipped mid-run the way
-                                       # sparse_forward can. Dense needs mbs 1 (mbs 4 dense is
-                                       # 8.75 GiB and OOMs), so mbs 1 it is.
-                                       # COST: 4096 tok/call instead of 16384, so less than the peak
-                                       # sparse speedup. Acceptable HERE because both 400M shapes have
-                                       # wide experts (I_e 15872-17920) and 12.15 measured the sandwich
-                                       # at 1.83-1.91x even at mbs 1. Do NOT copy this to a hybrid
-                                       # shape with small I_e, where 4096 tok/call LOSES (0.41-0.49x).
-  gradient_accumulation_steps: 4       # 8 GPU x 1 x 16 x 4096 = 524288 tok/step -- IDENTICAL to
-                                       # scale32B (16 x 1 x 8), so steps AND tokens both match and
-                                       # the LR schedules line up point-for-point.
-                                       # NOTE 8 GPUs here, not 4: at 4 GPUs this is 262144 and the
-                                       # run silently trains on HALF the tokens. That exact error
-                                       # made iclr_big_hop_pure_sink's -0.99pp unreadable.
+  micro_batch_size: 2
+  gradient_accumulation_steps: 4
   eval_during_training: false
   gradient_clipping: 1
-
 optimizer_args:
   class_name: TorchAdamW
   class_args:
     lr: 2e-3
     weight_decay: 0.1
-    betas: [0.9, 0.95]
-    eps: 1.0e-8
-
-# ---- THE WSD SCHEDULE ----------------------------------------------------------------------
-# CosineScheduler already implements WSD when num_constant_steps > 0: warmup -> factor 1.0
-# (i.e. HELD AT PEAK) -> cosine down to lr * lr_decay_factor. Verified scheduler.py:90-106.
-# No new scheduler class, no code change.
-#   warmup   1000  ( 1.1%)  linear 0 -> 2e-3
-#   stable  80000  (88.9%)  HELD at 2e-3   <-- the exploration phase; loss looks worse here
-#   decay    9000  (10.0%)  cosine 2e-3 -> 2e-4
-# 9000 is already generous: 12.17 shows the bonus lands inside a 1.4x reduction. 74000/15000
-# (17% decay) is the more conservative literature default if you would rather over-provision.
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
 lr_scheduler_args:
   lr_decay_style: cosine
-  lr_decay_factor: 0.1                 # -> 2e-4. Floor is inert (12.5), so 0.1 not 0.01.
-  num_warmup_steps: 100               # matches scale32B, so the two align step-for-step
-  num_constant_steps: 0            # 86.8% HELD AT PEAK
-  num_decay_steps: 400                # 9.9%; 2000+53000+6035 = 61035  <- PRE-FLIGHT 1
-
+  lr_decay_factor: 0.1
+  num_warmup_steps: 100
+  num_constant_steps: 0
+  num_decay_steps: 400
 mixed_precision_args:
   dtype: bf16
-
 distributed_args:
   fsdp_algorithm: 2
   gradient_checkpointing_method: block
   torch_compile: true
   stage: 0
-
-# ---- HOW TO BRANCH A DECAY OFF THE STABLE TRUNK --------------------------------------------
-# Legal: arguments.py:151-157 only forbids load_lr_scheduler true WITH load_optimizer false.
-# Copy this file, then:
-#   num_training_steps: 4000
-#   num_warmup_steps: 0 / num_constant_steps: 0 / num_decay_steps: 4000   (lr stays 2e-3)
-#   a NEW save_path and wandb name
-#   load_args:
-#     load_path: <this trunk's save_path>
-#     load_optimizer: true          # keep the Adam moments -- do not restart them
-#     load_lr_scheduler: false      # fresh decay-only schedule
-#     load_starting_iteration: false
-# NOT yet run end-to-end: check the load_dataloader_state interaction before trusting it, and
-# on a first attempt confirm the logged lr actually starts at 2e-3 and decays.

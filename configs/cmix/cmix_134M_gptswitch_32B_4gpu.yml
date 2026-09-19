@@ -1,3 +1,19 @@
+# cmix_134M_gptswitch_32B_4gpu -- FALLBACK CONFIG. IDENTICAL to cmix_134M_gptswitch_32B EXCEPT
+# gradient_accumulation_steps 2 -> 4.
+#
+# *** INTENDED GPU COUNT: 4 ***  (the sibling cmix_134M_gptswitch_32B.yml is for 8)
+# World size is NOT in a config, so this is the only place it is written down. Launch with
+#   bash experiments/boltzmann-moe/scripts/bsub/submit_train.sh cmix_134M_gptswitch_32B_4gpu configs/cmix/cmix_134M_gptswitch_32B_4gpu.yml 4 preemptable ...
+# and confirm the launch ledger row reads tokens_per_step=262144.
+#
+# WHY ga AND NOT steps: 4 GPU x mbs 4 x ga 4 x 4096 = 262,144 tok/step, the SAME as
+# 8 GPU x mbs 4 x ga 2 x 4096. num_training_steps stays 122070, so the
+# effective batch, the LR schedule and the 32.00B total are byte-identical to the 8-GPU arm --
+# only wall-clock doubles. Doubling num_training_steps instead would HALVE tokens/step and
+# change the batch size and schedule shape, making the arm non-comparable.
+#
+# save_path and the wandb name are UNCHANGED on purpose: switching to this config RESUMES
+# the 8-GPU run from its last checkpoint instead of starting a divergent second copy.
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -22,13 +38,6 @@ model_args:
   model_class: AutoModelForCausalLM
   pretrained_config:
     model_type: energy
-    initializer_range: 0.02
-    layer_norm_epsilon: 1.0e-05
-    normalization_function: rmsnorm
-    position_embedding_type: rope
-    rope_dim: 64
-    hidden_size: 1024
-    num_layers: 12
     num_iterations: 1
     num_pre_layers: 0
     num_post_layers: 0
@@ -40,11 +49,13 @@ model_args:
     - 1
     - 1
     - 1
-    - 1
-    - 1
-    - 1
-    - 1
-    - 1
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 7
     init_method: normal
     tie_word_embeddings: true
     energy_proj_type: psd_anti
@@ -56,8 +67,8 @@ model_args:
     sequence_mixer_blocks:
     - &id001
       sequence_mixer_type: softmax_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     - *id001
@@ -66,83 +77,41 @@ model_args:
     - *id001
     - *id001
     - *id001
-    - *id001
-    - &id002
-      sequence_mixer_type: energy_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
-      add_bias: false
-      attention_multiplier: 0.125
-    - *id002
-    - *id002
-    - *id002
     mlp_blocks:
-    - &id003
+    - &id002
       mlp_type: MLP
       activation_function: swiglu
-      intermediate_size: 4096
+      intermediate_size: 2048
       add_bias: false
-    - *id003
-    - *id003
-    - *id003
-    - *id003
-    - *id003
-    - *id003
-    - *id003
-    - &id004
-      mlp_type: EnergyFF_BoltzmannMoE
-      expert_kind: hopfield
-      intermediate_size: 182144
-      n_experts: 64
-      top_k: 2
-      e_sign_override: pos
-      hopfield_grad_scale: sqrt_consistent
-      routing_norm: zscore
-      temperature: 1.0
-      sinkhorn_iters: 3
-      sinkhorn_persist_mu: true
-      sinkhorn_mu_iters: 1
-      repulsion_tensor_idx: true
-      repulsion_form: abs
-      repulsion_space: output
-      repulsion_coef: 0.1
-      repulsion_subsample: 64
-      n_repulsion_pairs: 4
-      cos_probe_interval: 100
-      renormalize_topk: true
-      fused_experts: true
-      sparse_forward: true
-      sparse_start_step: 200
-      sparse_candidates: 4
-      sparse_explore: 2
-      proxy_rank: 16
-      proxy_kind: subspace
-      proxy_out_dim: 512
-      proxy_iters: 1
-      proxy_loss_coef: 0.01
-      gelu_grad_method: sigmoid
-      activation_function: gelu
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - mlp_type: MoE
+      activation_function: swiglu
+      intermediate_size: 341
+      num_experts: 16
+      num_experts_per_tok: 2
+      normalized_topk: true
       add_bias: false
-    - *id004
-    - *id004
-    - *id004
 tuning_args:
   tuning_method: pretraining
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix1B_12layers_K64k2_gptDense
-  save_interval: 100
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix32B/cmix_134M_gptswitch_32B
+  save_interval: 2000
   max_to_keep: 2
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: cmix1B_12layers_K64k2_gptDense
+    name: cmix_134M_gptswitch_32B
 training_parameters:
-  num_training_steps: 500
-  eval_interval: 2000
-  micro_batch_size: 2
-  gradient_accumulation_steps: 8
+  num_training_steps: 122070
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
   eval_during_training: false
   gradient_clipping: 1
 optimizer_args:
@@ -153,17 +122,16 @@ optimizer_args:
     betas:
     - 0.9
     - 0.95
-    eps: 1e-8
+    eps: 1.0e-08
 lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
-  num_warmup_steps: 100
+  num_warmup_steps: 2000
   num_constant_steps: 0
-  num_decay_steps: 400
+  num_decay_steps: 120070
 mixed_precision_args:
   dtype: bf16
 distributed_args:
   fsdp_algorithm: 2
-  torch_compile: true
+  torch_compile: false
   stage: 0
-  gradient_checkpointing_method: block

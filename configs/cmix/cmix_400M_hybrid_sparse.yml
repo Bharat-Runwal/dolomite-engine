@@ -9,6 +9,14 @@
 # dense->sparse switch. MEASURED on a trained 1B ckpt: top-2 agreement with the exact
 # energies 0.0893 (distilled) vs 0.5541 (SVD) vs 0.0378 (random). Distillation continues
 # after the refit; SVD is a warm start, not a replacement.
+# K 16 -> 32 (2026-09-17), ISO-PARAM: I_total stays 187,872, so I_e halves to 5,871
+# and total params are unchanged at 400M. p stays 4 (top-2 + 2 explore), so
+# p/K falls 0.250 -> 0.125 and the sparse CEILING doubles 4.0x -> 8.0x.
+# Rationale: (a) doubles the achievable saving at no parameter cost; (b) I_e=5,871 is
+# still inside the proven 4480-15872 band; (c) our best historical arm was K=32/top-2
+# (iclr_hop_K32_top2_sink, Avg11 44.58, against 40.96 for a K=16 pure); (d) it gives the
+# paper a K axis that varies while recurrence is held, which the K=16/K=64 set could not.
+# Switched at step ~500 of 61035 (0.8%), so the restart cost ~5 minutes.
 
 datasets:
 - class_name: MegatronDataset
@@ -124,7 +132,7 @@ model_args:
     - mlp_type: EnergyFF_BoltzmannMoE
       expert_kind: hopfield
       intermediate_size: 187872
-      n_experts: 16
+      n_experts: 32
       top_k: 2
       hopfield_grad_scale: sqrt_consistent
       routing_norm: zscore

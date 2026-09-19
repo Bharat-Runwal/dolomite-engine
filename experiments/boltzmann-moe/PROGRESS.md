@@ -24,6 +24,120 @@
 >
 > Legacy avg9→avg10: `restate_avg9_to_avg10_20260912.py --md` / `AVG10_RESTATED.md`.
 
+## 2026-09-19 — the KL-distilled surrogate head now drives SPARSE selection
+
+`surrogate_replaces_proxy: true` on `mlp_type: EnergyFF_SurrogateBoltzmannMoE`. Until today the
+head was wired to the DENSE path only — the one configuration where it cannot save a FLOP, since
+the Hopfield energy is a free by-product of a forward projection that runs for all K anyway.
+
+**How it is wired: ONE override, `_proxy_energies`.** `_forward_sparse` never calls `_route`, so
+the head reaches it by BEING the module's cheap all-K router. `_forward_sparse` is then inherited
+verbatim — nomination (`topk_p`), zscore moments, the Sinkhorn dual, the exact-energy RE-RANK to
+k, the weights, the denominator and the in-path distillation all come from the frozen tested code.
+No copied block, so there is no drift guard to maintain (contrast the ~40 lines
+`energy_ff_w1w2_sparse.py` had to copy).
+
+**It is a SELECTOR, not a gate.** The head's output never becomes a routing weight: the EXACT
+energies of the p nominated experts pick the final top-k and set every weight. `use_surrogate`
+(head → `_route` → head sets the weights) is now REFUSED in combination with the flag, because
+that IS the Switch gate the design exists not to be.
+
+**REPLACES, not ADDS — a correctness argument.** The non-renormalised denominator completes the
+softmax with `Zrest = sum_allK exp(ref) - sum_cand exp(ref[sel_idx])`, which only means anything
+if `ref` is THE SAME vector whose top-p produced `sel_idx`. Two disagreeing cheap routers make it
+the difference of two unrelated estimates, and `.clamp_min(0)` hides the sign error. Same for the
+zscore moments. One cheap router, or none.
+
+**Distillation target in the sparse regime (the crux): CANDIDATE-RESTRICTED KL**, i.e. step 5b of
+the base `_forward_sparse`, reused as-is and gated by `proxy_loss_coef`. The full-K Boltzmann
+target does not exist there. It is still a PRE-mu correspondence (`mu[sel_idx]` is a
+per-(token,slot) shift present identically on both sides, so it cancels from the KL gradient), so
+DENSE and SPARSE phases teach the SAME function and the head is never re-targeted at the
+handover — which is exactly the defect the rank-r proxy has (`legacy` = post-mu dense, pre-mu
+sparse). Hence `proxy_mu_convention: pre_mu` is ASSERTED under the flag.
+
+**Is a dense warm-up REQUIRED? Not by construction; yes in practice.** With `sparse_explore > 0`
+the restricted KL has a corrective signal on every expert from step 0, so the head IS trainable
+from scratch. But at step 0 the head is random, so the model trains against arbitrary routing —
+the regime already measured at expert-output alignment 0.698 vs 0.24-0.46 dense. `sparse_explore:
+0` is the genuinely fatal setting (self-reinforcing distillation: the head never sees an exact
+energy for an expert it ranked out) and is now warned about at construction.
+`surrogate_coef` is a SILENT NO-OP for the whole sparse phase — `proxy_loss_coef` is what trains
+the head in both phases.
+
+### Measured (CPU float64, `scripts/test_surrogate_sparse_20260919.py`, all 9 tests pass)
+
+**The dispatch is still exact and the head is the only approximation.** With an ORACLE head and
+FREE selection, sparse == dense to **4.2-4.8e-16** in all 12 combinations of
+p ∈ {k, 4, K} x routing_norm ∈ {none, zscore} x renormalize_topk ∈ {T, F}, zero capacity
+overflow; **4.16e-16** with the Sinkhorn dual on; **4.0-4.8e-16** on the W1W2 expert kind through
+`SurrogateBoltzmannMoEW1W2` with zero additional code.
+
+**NOMINATION RECALL — the number that decides the idea.** K=16, k=2, d=64, I_e=128, RANDOM expert
+weights (a LOWER BOUND for every selector: the proxy's published 0.94/0.90 needs TRAINED weights
+to be near low-rank). Fraction of the true top-2 landing in the selector's top-p:
+
+| selector | p=2 | p=3 | p=4 | p=6 | p=8 |
+|---|---|---|---|---|---|
+| **x on a rank-8 subspace** (structured, realistic) | | | | | |
+| random head | 0.121 | 0.181 | 0.246 | 0.376 | 0.497 |
+| **linear head, KL-distilled** | **0.472** | 0.611 | 0.715 | 0.842 | 0.919 |
+| mlp head h=64 | 0.827 | 0.932 | 0.972 | 0.994 | 0.999 |
+| **mlp head h=256** | **0.898** | 0.976 | 0.992 | 0.999 | 1.000 |
+| **rank-8 subspace proxy** (incumbent) | **0.928** | 0.990 | 0.997 | 1.000 | 1.000 |
+| chance = p/K | 0.125 | 0.188 | 0.250 | 0.375 | 0.500 |
+| **isotropic x** (unstructured, worst case) | | | | | |
+| linear head, KL-distilled | 0.384 | 0.500 | 0.600 | 0.742 | 0.836 |
+| mlp head h=256 | 0.421 | 0.543 | 0.647 | 0.785 | 0.880 |
+| rank-8 subspace proxy | 0.423 | 0.554 | 0.650 | 0.785 | 0.871 |
+
+Top-1 recall (the damaging miss), structured x at p=2: linear **0.570**, mlp h=64 0.947,
+mlp h=256 **0.983**, proxy **0.990**.
+
+**THREE CONCLUSIONS, one of them negative.**
+1. `surrogate_kind: linear` IS NOT A USABLE SELECTOR. 0.472 top-2 / 0.570 top-1 against the
+   proxy's 0.928 / 0.990 on structured input, and it is trained to its ceiling (an OLS fit does
+   no better — 0.387). Structural, not an optimisation failure: the Hopfield energy is
+   ~quadratic in x, so its top-k region is (nearly) symmetric under x -> -x while a linear
+   head's top-p region maps to the antipodal cone. **The LIVE dense surrogate arm
+   `cmix_134M_hyb_w1w2_surr_32B` uses `surrogate_kind: linear`, so its `surrogate_topk_agree`
+   should be read as a lower bound on what a head can do, not as the head's verdict.**
+2. `surrogate_kind: mlp` with h=256 is at PARITY with the rank-r proxy — 0.898 vs 0.928 at p=k,
+   0.992 vs 0.997 at p=4, 0.983 vs 0.990 top-1 — on structured input, and INDISTINGUISHABLE from
+   it on isotropic input (0.421 vs 0.423). The proxy is somewhat flattered here: x lives in an
+   8-dim subspace, which a rank-8 truncation captures exactly.
+3. OVER-SELECTION IS WORTH MORE THAN HEAD CAPACITY. mlp h=256 goes 0.898 -> 0.992 from p=2 to
+   p=4, i.e. p=4 with an h=256 head beats p=2 with a PERFECT rank-r proxy. The live sparse arms
+   all run `sparse_candidates: 2` (= top_k, no over-selection).
+
+**Per-token MAC cost of SELECTION.** The head's cost has no `I_e` in it; the proxy's does.
+
+| selector | 134M hybrid (d=768,K=16,I_e=1024,r=16) | % of the sparse mixture | 400M hybrid (d=1024,K=32,I_e=5871,r=16) | % |
+|---|---|---|---|---|
+| exact all-K router | 12,582,912 | 320% | 192,380,928 | 640% |
+| subspace proxy m=512 | 327,680 | 8.33% | 786,432 | 2.62% |
+| subspace proxy m=I_e | 458,752 | 11.67% | 3,530,240 | 11.74% |
+| head, linear | 12,288 | 0.31% | 32,768 | 0.11% |
+| head, mlp h=256 | 200,704 | 5.10% | 270,336 | 0.90% |
+
+BE HONEST ABOUT THE SIZE OF THE WIN. Against the proxy AS CONFIGURED (m=512) an h=256 head saves
+only **3.2 pp** of block FLOPs at 134M and **1.7 pp** at 400M; the 26x cheaper linear head does
+not rank well enough to use. The head's real case is W1W2, where the m-row subsample is invalid
+(rel err ~sqrt(I_e/m)) and the proxy is FORCED to m=I_e: **11.74% of the mixture against the
+head's 0.90%**, a 13x selector saving — and the w1w2 sparse path is exact with the head today.
+
+### Files
+- `lm_engine/.../mlp_blocks/energy_ff_surrogate.py` — section (d) of the docstring is the design
+  record; `_proxy_energies` / `_svd_refit_proxy` / `_free_proxy_parameters` are the new methods.
+- `lm_engine/hf_models/config/mlp.py`, `lm_engine/.../mlp_blocks/__init__.py` — 3 new fields,
+  parsed AND forwarded (pre-flight rule 7 verified by resolving `moe.surrogate_replaces_proxy`).
+- `configs/cmix/cmix_134M_hybrid_32B_sparse_surr.yml` — TEMPLATE, NOT LAUNCHED.
+- `experiments/boltzmann-moe/scripts/test_surrogate_sparse_20260919.py` — the 9 tests.
+
+Every new field defaults OFF and the module is BITWISE identical to its pre-change self on the
+live dense surrogate arm's settings (verified in both train and eval, with identical state_dict
+keys, parameter list and metric dict).
+
 ## 2026-09-16 — TRUE SPARSITY: 4.69x measured, and the proxy router diagnosed
 
 Full detail in `HANDOFF.md` §12.9-12.11.
@@ -1587,3 +1701,77 @@ milestone at a later step — `cmix_134M_gptswitch_32B` acquired both `tok8B_ste
 picked a 12.5%-over-budget checkpoint as the 8B anchor. Guard now matches the milestone
 **prefix**, so a captured milestone is frozen. Drift artifact removed; the real anchor
 holds all 37 files / 1.6 GB and is now the ONLY copy (its `global_step32000` is pruned).
+
+## 2026-09-19 — 134M tier complete; the baseline was under-provisioned; linear surrogate refuted
+
+**134M tier, all three arms at full 32.0B, iso-parameter (134.253M total / 123.243M active):**
+
+| structure | Avg11 | wiki-ppl | MMLU | GSM-flex |
+|---|---|---|---|---|
+| `6G1x6E` hopfield sparse (hybrid) | **44.82** | 41.06 | 25.57 | 1.59 |
+| `5G1x6E1G` hopfield sparse | 43.45 | 40.98 | 25.20 | 1.67 |
+| `6G1S` Switch baseline | **44.87** | 40.19 | 25.28 | 1.36 |
+
+Hybrid is 0.05pp from the baseline — a tie. **Block PLACEMENT costs more than the routing mechanism
+does**: 1.37pp between `6G1x6E` and `5G1x6E1G` against 0.05pp between `6G1x6E` and Switch.
+Earlier in the day the 1.42pp `5G1x6E1G` deficit was reported as if it characterised energy routing;
+it does not. It characterises moving the energy block one position earlier.
+
+**THE BASELINE IS UNDER-PROVISIONED BY 12.9% OF FLOPs.** `6G1S` runs its MoE block ONCE where the
+energy block runs six times: FLOP-weight 123.492M vs `6G1x6E`'s 141.720M. So the 44.87 was achieved
+with 12.9% less compute. `abl_B_134M_6G1x6S` (recurrent Switch, FLOP-weight 143.214M = +1.1%) is the
+properly matched comparator and is now training. **No parity claim at 134M is admissible against
+`6G1S`.** Same argument applies to the 400M baseline; `abl_B_400M_6G1x6S` also training.
+
+**EARLY, 2 arms only: the recurrence tax is not specific to the energy machinery.**
+`abl_B_134M_6G1x6S` runs 0.345 s/step against the hybrid's 0.195 -- 1.8x slower while FLOP-matched to
++1.1%. A recurrent SWITCH block pays the same per-application overhead a recurrent energy block does.
+If this holds with more points, the throughput penalty we have been attributing to Boltzmann routing
+is substantially just RECURRENCE. Needs >=15 windowed points before it goes in the paper.
+
+**NEGATIVE RESULT: a linear surrogate head cannot select experts.** Nomination recall (fraction of the
+true top-2 in the nominated p), random weights, K=16:
+
+| selector | p=2 | p=4 | top-1 @ p=2 |
+|---|---|---|---|
+| linear head | 0.472 | 0.715 | 0.570 |
+| mlp h=64 | 0.827 | 0.972 | 0.947 |
+| mlp h=256 | 0.898 | 0.992 | 0.983 |
+| rank-8 subspace proxy | 0.928 | 0.997 | 0.990 |
+| chance | 0.125 | 0.250 | — |
+
+At its ceiling -- an OLS fit scores 0.387. STRUCTURAL: the energy is ~quadratic in x, so its top-k
+region is near-symmetric under x -> -x, while a linear head's top-p region is the antipodal cone of
+its bottom-p. `mlp h=256` reaches parity with the proxy. The first w1w2 surrogate arm was launched
+with `linear` and restarted with `mlp h=256`.
+
+**Over-selection beats head capacity**: recall 0.898 -> 0.992 from p=2 to p=4, i.e. p=4 with an
+imperfect head beats p=2 with a PERFECT cheap router. Every live sparse arm runs
+`sparse_candidates == top_k == 2`, i.e. no over-selection. Set to 4 on 19 unlaunched sparse configs;
+live arms left alone (editing a running arm's config changes what it trains on requeue).
+
+**Honest sizing of the surrogate.** Against the proxy as configured it saves 3.2pp of block FLOPs at
+134M and 1.7pp at 400M -- not worth it for hopfield. Its real case is **w1w2**, where the m-row
+subsample is mathematically invalid (signed cancellation, `|sum|/sum|term|` 0.0254 vs 1.000) and the
+proxy is forced to m=I_e: **11.74% -> 0.90% of the mixture, a 13x selector saving**.
+
+## Two infrastructure fixes
+
+**`spmd_check` guard widened from `n_nodes > 1` to `world > 1`** (`lm_engine/distributed.py`). The
+comment's claim that "single node is unaffected (all ranks on one host agree)" is DISPROVEN:
+`abl_B_134M_6G1x6S` at 1 node x 4 GPUs died with `InductorError` from
+`post_grad_passes -> spmd_check -> dist.all_gather_object` plus a NCCL collective timeout. Its 400M
+twin survived only because the old guard already applied at 2 nodes. Graph divergence is a property
+of the MODEL, not of the host boundary. `spmd_check` is a DIAGNOSTIC -- it detects divergence, it does
+not prevent it -- so disabling it costs only the comm/compute overlap reordering.
+
+**`sinkhorn_persist_mu` appears UNSAFE on multi-node.** Its `int(self._mu_call.item())` inside the
+compiled region hung the first w1w2 surrogate arm at 2 nodes (log dead 29 min, LSF still RUN, no NCCL
+error -- the fused-repulsion wedge signature). Rescued by going single-node at unchanged budget
+(4 GPUs x mbs4 x ga4 = 262,144). **Three live multi-node arms carry persist_mu** (400M hybrid, 400M
+sandwich, 1B); they are fine, so the trigger is not universal, but the failure mode is silent.
+
+**Rule-9 defect is WORSE for sparse arms than recorded.** All six `cmix_134M_*_32B_sparse*` configs
+omit `sinkhorn_persist_mu`. For a DENSE arm the penalty is ~0.003 nats at 6 iterations. For a SPARSE
+arm the dual is solved on the cheap router's logits, so untilted eval changes **which experts run**,
+not merely how they are weighted. `cmix_134M_pure_32B_sparse` is live with 12 iterations.

@@ -1,26 +1,3 @@
-# 1B HYBRID -- 6 dense-GPT layers (softmax attn + plain swiglu 4096, NO MoE) then ONE energy
-# block recurred x6. The only MoE is our Boltzmann energy MoE, so gains are ATTRIBUTABLE.
-# d=1024, K=64, top-2, I_e=12090, psd_anti, sparse (dense warmup to step 200). ~1.00B params.
-# lr 1e-3 not 2e-3: psd_anti + recurrence pushes median grad_norm to 1.24-1.34 vs a 1.0 clip.
-# repulsion_space output + subsample 64: MANDATORY multi-node (weight-space WEDGES).
-# sinkhorn_mu_iters 6 == layer_iterations[6] (rule 9).
-# Written programmatically and validated through pydantic -- an earlier hand-edited version
-# folded stray YAML aliases into distributed_args.stage and died in 31s.
-# THE 32B TARGET: 61035 steps x 524288 tok/step (16 GPU x mbs1 x ga8 x 4096) = 32.0B tokens.
-# sparse_start_step 200 -> 2000 (2026-09-17, MEASURED): proxy_topk_agree on the 1B K=64
-# arm sits at 0.3093 median / 0.3502 last after only 200 dense steps, against 0.59-0.69 on
-# our K=16 arms and 0.79 on the K=16 reference -- which itself needed 280 DENSE steps to get
-# there. Ranking top-2 of 64 is much harder than top-2 of 16 (chance is 3.1% vs 12.5%), so
-# the distillation phase has to be LONGER at high K, not the same. 2000 dense steps costs
-# ~2.3 h extra on a ~30 h run -- cheap insurance against training on a bad router.
-# timeout_minutes: 180 (2026-09-17, MEASURED ROOT CAUSE). Inductor coordinates compilation
-# across ranks over the GLOO backend, whose default timeout is 30 min. Two 1B arms died at
-# 1884 s and 1921 s with InductorError: 'Timed out waiting 1800000ms for send/recv' -- i.e.
-# they hit the 30-minute gloo wall DURING COMPILE, with 0 steps, 0 OOM and only 39 GB of a
-# 200 GB host limit. Not memory, not graph size per se: a compile that needs longer than
-# 30 min is simply killed. The same model compiles fine at 8 GPU / 1 node; 2 nodes pushed
-# it past the wall. 180 min gives ample headroom.
-
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -155,7 +132,7 @@ model_args:
       fused_experts: true
       sparse_start_step: 2000
       sparse_forward: true
-      sparse_candidates: 2
+      sparse_candidates: 4
       sparse_explore: 2
       proxy_rank: 16
       proxy_kind: subspace

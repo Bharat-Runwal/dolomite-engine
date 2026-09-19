@@ -82,20 +82,20 @@ I_total=187872 so I_e=5871, r=16):
 
 and the head's parameter count equals its MAC count in both cases (no weight reuse).
 
-BE HONEST ABOUT WHAT THAT BUYS TODAY. In the FUSED DENSE Hopfield path the exact energy is a
-by-product: ``E_k = (gelu_Wx**2).mean(-1)`` is a T*K*I_e ELEMENTWISE reduction over an
+BE HONEST ABOUT WHERE THAT BUYS ANYTHING. In the FUSED DENSE Hopfield path the exact energy is
+a by-product: ``E_k = (gelu_Wx**2).mean(-1)`` is a T*K*I_e ELEMENTWISE reduction over an
 activation the expert gradient already materialised, not a T*K*I_e*d GEMM. So switching a
-dense arm's eval onto the head saves that reduction and nothing else -- the forward projection
-still runs for all K because the expert OUTPUTS need it. The FLOP win requires skipping
-experts, which is ``sparse_forward``, which is refused here (see (d)). What the head is for
-right now:
+DENSE arm's eval onto the head saves that reduction and nothing else -- the forward projection
+still runs for all K because the expert OUTPUTS need it. **The FLOP win requires skipping
+experts, i.e. ``sparse_forward``, which section (d) now wires up** (``surrogate_replaces_proxy``).
+In the dense path the head remains:
   1. a DIAGNOSTIC: how much of the energy router's decision is decodable from h at what
      capacity -- measured by ``surrogate_topk_agree``, directly comparable to the proxy's
      ``proxy_topk_agree`` because both use the same set-overlap estimator;
   2. the TRAINING-TIME distillation that has to happen before a head can ever replace the
      proxy in the sparse path;
   3. a selector whose cost does not grow with I_e, which is the one property the subspace
-     proxy structurally cannot have.
+     proxy structurally cannot have -- and which is what it is FOR in the sparse path.
 
 ===============================================================================================
 (c) THE DESIGN DECISION: THE KL TARGET IS THE **PRE-mu** (PRE-SINKHORN) DISTRIBUTION
@@ -171,17 +171,169 @@ comparison of two full-K distributions. Distilling the post-mask distribution wo
 hard zeros in the target and make the loss blow up on any token the head ranks differently.
 
 ===============================================================================================
-(d) NO COMBINATION WITH sparse_forward YET
+(d) SPARSE SELECTION: THE HEAD **REPLACES** THE RANK-r PROXY  (2026-09-19)
 ===============================================================================================
 
-Refused at construction. ``_forward_sparse`` does not call ``_route``; it inlines
-``_logits_raw`` twice and solves the dual on the PROXY logits, because the proxy is the only
-all-K quantity it has. Substituting the head there means deciding whether the head REPLACES
-the proxy (then ``proxy_rank`` machinery, the SVD warm start and the re-rank denominator all
-need rethinking) or merely ADDS to it (then two cheap routers disagree and nothing says which
-wins). That is a separate change, and it has a hard prerequisite: a dense phase, because the
-head is distilled against the exact all-K routing distribution, which the sparse path never
-computes.
+``surrogate_replaces_proxy: true`` makes the head the module's ONE cheap all-K router, by
+overriding ``_proxy_energies``. Every consumer of a cheap all-K energy estimate then reads the
+head, with NO copied block and no new arithmetic -- ``_forward_sparse`` is inherited verbatim:
+
+    _forward_sparse  step 1   sel_idx = topk_p(_logits_raw(head) - mu)   <- NOMINATION
+    _forward_sparse  step 1   mom     = _zscore_moments(head)            <- zscore moments
+    _forward_sparse  step 4b  lg      = EXACT energies of the p          <- RE-RANK to k
+    _forward_sparse  step 4b  ref     = _logits_raw(head) - mu           <- denominator tail
+    _forward_sparse  step 5b  KL(softmax_p(lg) || softmax_p(head[sel]))  <- DISTILLATION
+    _forward_fused            proxy_E = head   (iff ``proxy_route``)     <- dense A/B
+    _proxy_step               KL over ALL K, PRE-mu                      <- dense distillation
+
+THE SEMANTICS ARE EXACTLY "CHEAP HEAD NOMINATES p, EXACT ENERGY RE-RANKS TO k", AND IT IS NOT
+A SWITCH GATE. The head's output never becomes a routing weight. ``lg`` -- the EXACT Hopfield /
+w1w2 energies of the p nominated experts, free because they are a by-product of the forward
+projection those p experts needed anyway -- picks the final top-k at step 4b AND sets every
+weight. Set ``sparse_candidates`` (= p) > ``top_k`` (= k) and the head's only job is to get the
+true top-k INSIDE its top-p, which is a far weaker requirement than getting it right.
+``use_surrogate`` (head supplies the WEIGHTS too) is therefore REFUSED under this mode -- that
+combination is the Switch gate this design exists to avoid. The dense analogue of "head
+selects, exact energies weight" is the base class's own ``proxy_route: true``, which now reads
+the head.
+
+WHY **REPLACES** AND NOT **ADDS** -- a correctness argument, not a preference. The
+non-renormalised denominator completes the softmax with
+
+    Zrest = sum_allK exp(ref) - sum_cand exp(ref[sel_idx])
+
+which removes exactly the candidates' terms from an all-K sum. That is meaningful ONLY if
+``ref`` is THE SAME vector whose top-p produced ``sel_idx``. Two disagreeing cheap routers make
+``Zrest`` the difference of two unrelated estimates -- and ``.clamp_min(0)`` hides the sign
+error, so it fails silently. The same argument applies to ``mom``: the z-score moments must be
+the moments of the vector that was ranked. One cheap router, or none.
+
+-----------------------------------------------------------------------------------------------
+(d.1) WHAT THE HEAD IS DISTILLED AGAINST IN THE SPARSE REGIME -- the crux
+-----------------------------------------------------------------------------------------------
+In the dense path the target is the full-K ``softmax(_logits_raw(E_k))`` (section (c): PRE-mu on
+both sides). ``_forward_sparse`` never computes the K-p unevaluated energies, so THAT TARGET
+DOES NOT EXIST THERE. DECISION: **candidate-restricted KL** -- step 5b of the base
+``_forward_sparse``, reused verbatim, gated by ``proxy_loss_coef``:
+
+    tgt  = softmax_p( lg.detach() )        lg     = _logits_raw(E_exact[sel]) - mu[sel]
+    pred = log_softmax_p( s_head[sel] )    s_head = _logits_raw(head)         - mu
+
+Three reasons this is the right target and not a compromise:
+
+ 1. **IT IS STILL A PRE-mu CORRESPONDENCE, so there is NO convention change at the
+    dense->sparse handover.** ``mu`` is per-expert and the candidate set is per-token, so
+    ``mu[sel_idx]`` is a per-(token, slot) shift that appears IDENTICALLY on both sides of the
+    restricted softmax; it cancels from the KL gradient. What the head learns is the pre-mu
+    ranking -- the same function section (c)'s dense KL teaches it. This is the one place the
+    head is strictly BETTER OFF than the rank-r proxy: the proxy's dense target is POST-mu
+    under ``proxy_mu_convention: "legacy"`` and pre-mu inside ``_forward_sparse``, so a
+    ``sparse_start_step`` run RE-TARGETS the proxy at exactly the moment it stops being
+    trainable from all-K energies (``energy_ff.py:1841``, and mu was measured at 3.44 logit
+    units, i.e. an e^3.44 ~ 31x tilt). Hence this mode ASSERTS
+    ``proxy_mu_convention: "pre_mu"``: with it, both phases teach the same function.
+ 2. **THE RESTRICTION IS TO THE SET THAT MATTERS.** A softmax denominator is dominated by its
+    largest terms and the p candidates are, by construction, the head's own largest. The
+    experts dropped from the KL are the ones whose routing weight would have been negligible.
+    (Note this is exactly why over-selecting fixes the denominator as well as the selection.)
+ 3. **THERE IS NO CHEAPER HONEST ALTERNATIVE.** Forming the all-K target inside the sparse path
+    means running the all-K forward projection -- the thing being skipped.
+
+THE FAILURE MODE OF (d.1) AND ITS FIX. Candidate-restricted distillation is SELF-REINFORCING:
+the head only ever sees exact energies for experts it nominated, so an expert it wrongly ranks
+last is never corrected. ``sparse_explore > 0`` is the fix and it is already in the base --
+token t additionally evaluates experts ``(t+1 .. t+n_exp) mod K``, so over a batch of T >> K
+tokens every expert is covered by 1/K of tokens every step, deterministically (no RNG in the
+graph). **A sparse surrogate arm with ``sparse_explore: 0`` trains a router that cannot
+discover its own mistakes.** Treat ``sparse_explore >= 1`` as part of this mode.
+
+-----------------------------------------------------------------------------------------------
+(d.2) IS A DENSE WARM-UP (``sparse_start_step > 0``) *REQUIRED*?
+-----------------------------------------------------------------------------------------------
+**Not by construction. YES in practice -- treat it as required for any arm whose number will be
+quoted.** The distinction matters, so state both halves:
+
+  * NOT logically required. With ``sparse_explore > 0`` the candidate-restricted KL has a
+    corrective signal on every expert from step 0, so the head IS trainable from scratch inside
+    the sparse path. ``sparse_start_step: 0`` will not deadlock and will not silently freeze the
+    head -- that is what happens with ``sparse_explore: 0``.
+  * Required in practice, for a reason about the MODEL rather than the head. At step 0 the head
+    is random (``surrogate_init_std: 0.01``), so the p experts whose projections are computed
+    are an arbitrary subset, and the model trains against arbitrary routing for as long as the
+    head takes to become useful. That regime is MEASURED, not hypothetical: the base class's
+    note records expert-output alignment 0.698 (against 0.24-0.46 for dense arms) for a sparse
+    arm whose proxy never trained -- the experts never specialise at all.
+  * The dense phase is also where the head gets its STRONGEST signal, and gets it for free:
+    ``_forward_fused`` computes all K exact energies as a by-product of a projection it needs
+    anyway, so ``_proxy_step``'s all-K KL costs only the head's own ``d*K`` MACs.
+  * The dense phase must run until ``proxy_topk_agree`` has PLATEAUED, not merely risen. A head
+    frozen at its phase-1 quality decays against a moving target (the dual drifts 3.44 -> 1.97
+    over training), which is why distillation continues in the sparse phase.
+
+RECOMMENDED RECIPE: dense until agreement plateaus (``sparse_start_step``), then sparse with
+``sparse_explore >= 1`` and ``proxy_loss_coef > 0`` throughout, ``renormalize_topk: true``.
+
+-----------------------------------------------------------------------------------------------
+(d.3) WHICH COEFFICIENT TRAINS THE HEAD IN WHICH PHASE -- A REAL TRAP
+-----------------------------------------------------------------------------------------------
+``_forward_sparse`` DOES NOT CALL ``_route``, so ``_add_surrogate_loss`` -- and therefore
+``surrogate_coef`` -- is a **silent no-op for the entire sparse phase**. Under this mode the
+head is trained by ``proxy_loss_coef`` in BOTH phases (dense: ``_proxy_step``, all K; sparse:
+step 5b, p candidates). That is also why ``proxy_rank`` is forced > 0 below: in the frozen base
+it is the gate on both of those blocks. ``surrogate_coef`` is redundant here -- in the dense
+phase it computes the identical KL a second time -- and is warned about at construction.
+
+Metric names follow the same split. ``proxy_topk_agree`` IS the head's agreement under this
+mode: all-K in the dense phase, candidate-restricted in the sparse phase, exactly as for the
+rank-r proxy -- so the published proxy numbers are the comparison baseline. It is re-exported
+as ``surrogate_sel_agree`` so a wandb panel cannot mistake one series for the other, and
+``surrogate_selects`` / ``surrogate_sparse_active`` record which regime produced it.
+
+-----------------------------------------------------------------------------------------------
+(d.4) ``renormalize_topk: true`` IS EFFECTIVELY MANDATORY, FOR TWO INDEPENDENT REASONS
+-----------------------------------------------------------------------------------------------
+ 1. QUALITY, measured (base ``__init__`` note): on pure_hop_T12_sink, wikitext bits/byte
+    1.0996 dense -> 1.1161 with proxy selection and exact weights -> 3.4346 with the
+    proxy-completed denominator. The denominator, not the selection, is where sparse arms lose.
+ 2. GRADIENT HYGIENE, structural. With ``renormalize_topk: true`` the head reaches the output
+    ONLY through the discrete ``topk``, so there is NO gradient path from ``lm_loss`` into the
+    head and "the head cannot change what the model computes except through its selection" is
+    literally true. With ``false``, ``ref`` enters ``Zall`` enters ``w``, so the LM loss trains
+    the head directly -- a second, unmeasured objective fighting the KL. (``x`` is detached
+    either way, so the BACKBONE is never reshaped by the head.)
+    ONE RESIDUAL PATH SURVIVES, INHERITED FROM THE PROXY AND NOT NEW HERE: with
+    ``routing_norm: "zscore"`` and p < K the per-token std in ``mom`` comes from the head and
+    does not cancel in the restricted softmax, so it acts as a per-token rescaling of tau that
+    the LM loss can push on. It is a single scalar per token. ``routing_norm: "none"`` or
+    ``"sqrt_width"`` removes it entirely.
+Asserted; ``surrogate_sparse_allow_proxy_denominator: true`` is the deliberate escape hatch
+(it is what the p = K exactness self-test needs).
+
+-----------------------------------------------------------------------------------------------
+(d.5) THE RANK-r PROXY'S PARAMETERS UNDER THIS MODE
+-----------------------------------------------------------------------------------------------
+The frozen base asserts ``proxy_rank > 0`` whenever ``sparse_forward`` is set, and gates both
+distillation blocks on it, so it is forced to 1 when a config does not give it. Its tensors are
+then NEVER READ (the override returns before touching them) and would otherwise sit in
+``model.parameters()`` receiving no gradient for the whole run -- decayed by AdamW, sharded by
+FSDP, and reported in the parameter count. ``surrogate_free_proxy: true`` (the default)
+converts them to non-persistent BUFFERS immediately after construction, so they leave the
+optimizer and FSDP's parameter groups entirely. ``proxy_init: "svd"`` is neutralised for the
+same reason -- the head is not a factorisation of W, so there is nothing to warm-start -- and
+is warned about rather than silently ignored.
+
+-----------------------------------------------------------------------------------------------
+(d.6) W1W2 SPARSE
+-----------------------------------------------------------------------------------------------
+``SurrogateBoltzmannMoEW1W2`` inherits ``BoltzmannMoEW1W2Sparse._forward_sparse``, whose step 1
+is line-for-line the Hopfield one and calls the same ``self._proxy_energies``. So the override
+lands there with ZERO additional code, and ``surrogate_replaces_proxy`` works on the w1w2 line
+as soon as that class is registered in ``get_mlp_block`` (it is not yet). Two things change,
+both in the head's FAVOUR: the w1w2 subspace proxy is forced to ``m = I_e`` (its m-row
+subsample has relative error ~sqrt(I_e/m), section (a)), at which point the proxy costs MORE
+per token than the sparse mixture it is meant to make cheap -- while the head's cost has no
+``I_e`` in it at all; and the head needs no common-row SVD heuristic. The sibling's
+``proxy_V2``/``proxy_B2`` are freed by the same code path.
 
 ===============================================================================================
 FIVE DIFFERENCES FROM THE LEGACY CLASS, ALL DELIBERATE
@@ -274,9 +426,29 @@ class _SurrogateRouterMixin:
         surrogate_detach_input: bool = True,
         surrogate_init_std: float = 0.01,
         surrogate_track_agree: bool = True,
+        surrogate_replaces_proxy: bool = False,
+        surrogate_free_proxy: bool = True,
+        surrogate_sparse_allow_proxy_denominator: bool = False,
         **kwargs,
     ) -> None:
+        # ---- (d.5) `proxy_rank` is a pure GATE once the head supplies the cheap energies ---- #
+        # The frozen base asserts `proxy_rank > 0` for `sparse_forward` and keys BOTH
+        # distillation blocks (`_forward_fused` -> `_proxy_step`, and `_forward_sparse` step 5b)
+        # on it, so it has to be truthy -- but nothing reads its VALUE once `_proxy_energies` is
+        # overridden. Forced to the minimum here so a config need not carry a number that no
+        # longer means a rank, and so the allocation it forces is as small as possible before
+        # `surrogate_free_proxy` releases it. MUST happen before `super().__init__`, which is
+        # where the assert lives.
+        _rank_autoset = False
+        if surrogate_replaces_proxy and int(kwargs.get("proxy_rank", 0) or 0) <= 0:
+            kwargs = dict(kwargs)
+            kwargs["proxy_rank"] = 1
+            _rank_autoset = True
         super().__init__(*args, **kwargs)
+        self._surr_proxy_rank_autoset = _rank_autoset
+        self.surrogate_replaces_proxy = bool(surrogate_replaces_proxy)
+        self.surrogate_sparse_allow_proxy_denominator = bool(
+            surrogate_sparse_allow_proxy_denominator)
 
         assert surrogate_kind in _SURROGATE_KINDS, surrogate_kind
         assert surrogate_kl_direction in _KL_DIRECTIONS, surrogate_kl_direction
@@ -284,28 +456,112 @@ class _SurrogateRouterMixin:
         if surrogate_kind == "mlp":
             assert surrogate_hidden > 0, "surrogate_kind='mlp' needs surrogate_hidden > 0"
 
-        # ---- (d) no sparse combination ------------------------------------------------ #
-        assert not self.sparse_forward, (
-            "the surrogate head is NOT wired into _forward_sparse. That path does not call "
-            "_route (it inlines _logits_raw twice and solves the Sinkhorn dual on the PROXY "
-            "logits, because the proxy is its only all-K quantity), so the head would be "
-            "computed and then ignored -- a silent no-op, not an error. Deciding whether the "
-            "head REPLACES the proxy there (proxy_rank / proxy_init: svd / the re-rank "
-            "denominator all change) or merely ADDS to it is a separate change. Train the "
-            "head on a DENSE arm first: it is distilled against the exact all-K routing "
-            "distribution, which the sparse path never computes."
+        # ---- (d) sparse selection -------------------------------------------------------- #
+        # `_forward_sparse` does NOT call `_route`: it inlines `_logits_raw` twice and solves the
+        # Sinkhorn dual on whatever all-K cheap energies it has. So the head reaches it ONLY by
+        # being that cheap router -- `surrogate_replaces_proxy` overrides `_proxy_energies`.
+        # Without the flag the old refusal stands, because the head would be computed and then
+        # ignored: a silent no-op, not an error.
+        assert self.surrogate_replaces_proxy or not self.sparse_forward, (
+            "sparse_forward with the surrogate head requires surrogate_replaces_proxy: true. "
+            "That path never calls _route, so without the flag the head is computed and then "
+            "IGNORED -- a silent no-op. With it, the head becomes the module's single cheap "
+            "all-K router (_proxy_energies) and supplies the NOMINATION, the zscore moments and "
+            "the denominator tail, while the exact energies of the nominated p still re-rank to "
+            "the final top-k and set every weight. See section (d) of this module's docstring."
         )
         assert not self.sparse_backproj, (
             "sparse_backproj is untested with the surrogate head; it is also redundant with "
             "sparse_forward (1.18-1.35x against 4.69x)."
         )
 
+        if self.surrogate_replaces_proxy:
+            # (d) the head supplies WEIGHTS nowhere. `use_surrogate` routes `_route` on the
+            # head's own pseudo-energies, i.e. the head would set the mixture weights -- which
+            # is precisely the Switch-style gate this design exists not to be. The dense
+            # analogue of "head selects, exact energies weight" is the base's `proxy_route`,
+            # which now reads the head.
+            assert not use_surrogate, (
+                "surrogate_replaces_proxy and use_surrogate are mutually exclusive. "
+                "use_surrogate hands the head's pseudo-energies to _route, so the head would "
+                "set the mixture WEIGHTS -- a Switch-style gate. For 'head selects, exact "
+                "energy weights' in the dense path set proxy_route: true (it reads the head "
+                "under this mode); in the sparse path that split is what _forward_sparse does "
+                "by construction."
+            )
+            # (d.1) ONE convention in both phases. With "legacy" the dense `_proxy_step` teaches
+            # the POST-mu logits while `_forward_sparse` step 5b and `_route`'s proxy selection
+            # are pre-mu, so the head would be RE-TARGETED at the dense->sparse handover and mu
+            # (measured 3.44 logit units) counted twice on the dense selection path.
+            assert self.proxy_mu_convention == "pre_mu", (
+                "surrogate_replaces_proxy requires proxy_mu_convention: pre_mu. With 'legacy' "
+                "the dense _proxy_step target is POST-mu while _forward_sparse step 5b and "
+                "_route's proxy selection are PRE-mu: the head gets re-targeted at the "
+                "dense->sparse handover and mu is counted twice on the dense selection path "
+                "(mu was measured at 3.44 in logit units, an e^3.44 ~ 31x tilt)."
+            )
+            # The head has no per-iteration variants; `proxy_iters > 1` indexes `proxy_V` by a
+            # call counter, which the override never reads -- it would be a silent no-op.
+            assert self.proxy_iters == 1, (
+                "proxy_iters > 1 has no meaning for the surrogate head (it indexes the rank-r "
+                "proxy's per-iteration tensors, which the override never reads). Use 1."
+            )
+            if self.sparse_forward:
+                p_cand = self.sparse_candidates or int(self.top_k)
+                # (d.4) the proxy-completed denominator is where sparse arms lose (-1.52 nats
+                # measured), and it is also the only thing that gives lm_loss a gradient path
+                # into the head.
+                assert (self.renormalize_topk or p_cand == self.n_experts
+                        or self.surrogate_sparse_allow_proxy_denominator), (
+                    "sparse_forward + surrogate_replaces_proxy with renormalize_topk: false "
+                    "completes the softmax denominator from the HEAD over the K-p experts it "
+                    "never evaluated. Measured cost of the proxy-completed denominator: "
+                    "wikitext bits/byte 1.1161 -> 3.4346. It also makes lm_loss train the head "
+                    "directly, fighting the KL. Set renormalize_topk: true, or "
+                    "surrogate_sparse_allow_proxy_denominator: true to accept it deliberately."
+                )
+                if self.sparse_explore <= 0 and self.sparse_candidates < self.n_experts:
+                    # (d.1) candidate-restricted distillation with no exploration is
+                    # self-reinforcing: the head never sees an exact energy for an expert it
+                    # ranked out, so it cannot discover the mistake.
+                    logger.warning(
+                        "layer %s: surrogate_replaces_proxy + sparse_forward with "
+                        "sparse_explore=0. The candidate-restricted KL then only ever sees "
+                        "experts the head already nominated, so it is SELF-REINFORCING and the "
+                        "head cannot discover an expert it wrongly ranked out. Set "
+                        "sparse_explore >= 1.", self.layer_idx)
+            if self.proxy_loss_coef <= 0.0:
+                # The head is trained by proxy_loss_coef in BOTH phases under this mode (d.3).
+                logger.warning(
+                    "layer %s: surrogate_replaces_proxy with proxy_loss_coef = 0. The head is "
+                    "distilled by proxy_loss_coef in BOTH phases under this mode "
+                    "(surrogate_coef is a NO-OP in the sparse phase because _forward_sparse "
+                    "never calls _route), so the head will stay at its random init and "
+                    "selection will be ARBITRARY. Fine for eval of an already-trained "
+                    "checkpoint; a bug for training.", self.layer_idx)
+            if surrogate_coef > 0.0:
+                logger.warning(
+                    "layer %s: surrogate_coef > 0 is REDUNDANT under "
+                    "surrogate_replaces_proxy: in the dense phase _proxy_step already applies "
+                    "the same pre-mu all-K KL to the same head, and in the sparse phase "
+                    "surrogate_coef is a no-op. The two simply add.", self.layer_idx)
+            if self.proxy_init == "svd":
+                logger.warning(
+                    "layer %s: proxy_init: svd is neutralised under surrogate_replaces_proxy -- "
+                    "the head is not a low-rank factorisation of W, so there is nothing to warm "
+                    "start. Distillation is the only way it learns.", self.layer_idx)
+
         # ---- (c) the Sinkhorn prerequisite -------------------------------------------- #
         # At eval the head cannot solve the dual -- that needs the all-K exact logits, which
         # is the thing it exists to avoid -- so it can only READ the persisted running mu.
-        if use_surrogate and self.sinkhorn_iters > 0:
+        # `surrogate_replaces_proxy` needs it for the SAME reason: at eval `_mu_for` is called on
+        # the HEAD's all-K logits and cannot solve the dual (training solves it fine -- the head
+        # gives all K), so it can only read the persisted running dual. This is CLAUDE.md
+        # pre-flight rule 9 for every sparse arm, restated for the head.
+        if (use_surrogate or surrogate_replaces_proxy) and self.sinkhorn_iters > 0:
             assert self.sinkhorn_persist_mu, (
-                "use_surrogate with sinkhorn_iters > 0 REQUIRES sinkhorn_persist_mu: true. "
+                "use_surrogate / surrogate_replaces_proxy with sinkhorn_iters > 0 REQUIRES "
+                "sinkhorn_persist_mu: true. "
                 "Without it _mu_for returns None at eval and the surrogate routes UNTILTED "
                 "while the model was trained tilted -- the measured cost of untilted eval is "
                 "+1.587 nats at 8 iterations and +1.827 at 12. Also run a calibration pass so "
@@ -361,6 +617,14 @@ class _SurrogateRouterMixin:
         self._surr_E: torch.Tensor | None = None
         self._surr_warned_mu = False
 
+        # ---- (d.5) release the now-unread rank-r proxy tensors -------------------------- #
+        # Built LAST, after the head, so nothing created here can shift another parameter's
+        # init. Converting to buffers rather than deleting keeps `_svd_refit_proxy` and any
+        # future base-class read from raising AttributeError on a None.
+        self._surr_proxy_freed = False
+        if self.surrogate_replaces_proxy and surrogate_free_proxy:
+            self._free_proxy_parameters()
+
     # ------------------------------------------------------------------------------- #
     # the head                                                                         #
     # ------------------------------------------------------------------------------- #
@@ -393,6 +657,66 @@ class _SurrogateRouterMixin:
         return surrogate_head_macs(self.hidden_size, self.n_experts, self.surrogate_kind,
                                    self.surrogate_hidden)
 
+    def _free_proxy_parameters(self) -> None:
+        """Turn the unread rank-r proxy tensors into non-persistent buffers. See (d.5).
+
+        They are forced into existence by the frozen base's `proxy_rank > 0` assert and are never
+        read once `_proxy_energies` is overridden, so as PARAMETERS they would be decayed by
+        AdamW, sharded by FSDP and counted in the model size while receiving no gradient for the
+        entire run. `persistent=False` also keeps them out of the state_dict, so a surrogate
+        sparse arm's checkpoint carries only `moe.surrogate_*` beyond its no-surrogate twin.
+        """
+        names = ("proxy_V", "proxy_B", "proxy_quad", "proxy_lin", "proxy_scale", "proxy_bias",
+                 # the w1w2 sibling's second basis, so SurrogateBoltzmannMoEW1W2 needs no
+                 # override of this method
+                 "proxy_V2", "proxy_B2")
+        freed = []
+        for name in names:
+            prm = self._parameters.pop(name, None)
+            if prm is None:
+                continue
+            # `register_buffer` refuses a name that still resolves as an attribute, and popping
+            # from `_parameters` is what makes it stop resolving.
+            self.register_buffer(name, prm.detach().clone(), persistent=False)
+            freed.append(name)
+        self._surr_proxy_freed = bool(freed)
+        if freed:
+            logger.info("layer %s: surrogate_replaces_proxy -- released unread rank-r proxy "
+                        "tensors %s from model.parameters()", self.layer_idx, freed)
+
+    # ------------------------------------------------------------------------------- #
+    # (d) THE SPARSE SEAM: the head IS the module's cheap all-K router                  #
+    # ------------------------------------------------------------------------------- #
+
+    def _proxy_energies(self, x: torch.Tensor) -> torch.Tensor:
+        """The head's pseudo-energies wherever the base wants cheap all-K energies.
+
+        THIS ONE OVERRIDE IS THE WHOLE SPARSE WIRING. `_forward_sparse` is inherited verbatim,
+        so the nomination (`topk_p`), the zscore moments, the Sinkhorn dual, the exact-energy
+        RE-RANK to k, the weights, the denominator and the candidate-restricted distillation all
+        come from the frozen, tested code -- there is no copied block here and no drift guard to
+        maintain. `_forward_fused` (`proxy_route`) and `_proxy_step` read it too, which is what
+        makes the dense warm-up train the SAME head the sparse phase then selects with.
+
+        Returns the STASH when `forward` made one, so the head runs exactly once per forward
+        even though two call sites want it; recomputes otherwise, which is what lets a test call
+        `_forward_sparse` directly.
+        """
+        if not self.surrogate_replaces_proxy:
+            return super()._proxy_energies(x)
+        E = self._surr_E
+        if E is None or E.shape[:-1] != x.shape[:-1]:
+            E = self.surrogate_energies(x)
+        return E
+
+    def _svd_refit_proxy(self) -> None:
+        """No-op under this mode: the head is not a low-rank factorisation of W, so an SVD of W
+        says nothing about its parameters. Marked done so the base never retries."""
+        if self.surrogate_replaces_proxy:
+            self._svd_done = True
+            return
+        super()._svd_refit_proxy()
+
     # ------------------------------------------------------------------------------- #
     # the two overrides                                                                #
     # ------------------------------------------------------------------------------- #
@@ -406,7 +730,8 @@ class _SurrogateRouterMixin:
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         need = self._surrogate_routes_now or (self.training and self.surrogate_coef > 0) \
-            or (self.surrogate_track_agree and self.training)
+            or (self.surrogate_track_agree and self.training) \
+            or self.surrogate_replaces_proxy
         if not need:
             # Nothing to add: fall straight through, so a `surrogate_coef: 0` /
             # `use_surrogate: false` instance is EXACTLY the base class (TEST 4).
@@ -520,6 +845,15 @@ class _SurrogateRouterMixin:
                 self._surr_agree_sum.zero_(); self._surr_agree_n.zero_()
             m["surrogate_macs_per_token"] = float(self.surrogate_macs_per_token())
             m["surrogate_active"] = float(self._surrogate_routes_now)
+            if self.surrogate_replaces_proxy:
+                # (d.3) `proxy_topk_agree` IS the head's agreement under this mode -- all-K in
+                # the dense phase, candidate-restricted in the sparse one, exactly as for the
+                # rank-r proxy. Re-exported so a panel cannot confuse the two, with the flag
+                # that says which regime produced it.
+                m["surrogate_selects"] = 1.0
+                m["surrogate_sparse_active"] = float(getattr(self, "_sparse_active", False))
+                if "proxy_topk_agree" in m:
+                    m["surrogate_sel_agree"] = m["proxy_topk_agree"]
         return m
 
     # ------------------------------------------------------------------------------- #

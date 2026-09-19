@@ -509,6 +509,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         proxy_init: str = "random",
         proxy_out_dim: int = 0,
         proxy_iters: int = 1,
+        proxy_mu_convention: str = "legacy",
         cos_probe_interval: int = 0,
         cos_probe_pairs: int = 8,
         repulsion_space: str = "output",
@@ -587,6 +588,18 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         self.register_buffer("_load_sum", torch.zeros(self.n_experts), persistent=False)
         self.register_buffer("_ent_sum", torch.zeros((), dtype=torch.float32), persistent=False)
         self.register_buffer("_tok_sum", torch.zeros((), dtype=torch.float32), persistent=False)
+        # DOMINANT-EXPERT COUNT, traced (2026-09-18). `n_dominant_experts` was already
+        # computed in _log_metrics, but that method is gated behind
+        # `if not torch.compiler.is_compiling()` in all three forward paths and every live
+        # config sets torch_compile: true -- so the number has NEVER reached wandb. It is the
+        # one routing statistic `load_effective_n_experts` cannot substitute for: effective_n
+        # is a PER-TOKEN entropy (1.0 = each token picks one expert), while this counts how
+        # many DISTINCT experts win the argmax anywhere in the batch (1 = true collapse).
+        # B4 in the 2026-04 series had effective_n ~ 1 with n_dominant = 14-16, i.e.
+        # specialisation, not collapse -- indistinguishable without this counter.
+        # persistent=False: a persistent buffer adds a state_dict key and breaks resume for
+        # every existing energy-MoE checkpoint (see the load_balance_bias note below).
+        self.register_buffer("_dom_sum", torch.zeros(self.n_experts), persistent=False)
         # REGISTER ONLY WHEN BALANCING IS ON. A persistent buffer adds a key to the
         # state_dict, and registering it unconditionally broke resume for EVERY existing
         # energy-MoE checkpoint:
@@ -1005,6 +1018,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # forward did, so the gradients would not match the function. Training with
         # per-iteration heads needs the block to be told its iteration index, which it is not.
         self.proxy_iters = max(1, int(proxy_iters))
+        # WHICH SIDE OF THE SINKHORN DUAL THE PROXY IS DISTILLED AGAINST (2026-09-18).
+        # "legacy" = exactly what every existing checkpoint trained with, double-count and
+        # all; "pre_mu" = self-consistent, and matches `_forward_sparse`. Full rationale at
+        # the branch in `_proxy_step`, which is the only place this is read.
+        assert proxy_mu_convention in ("legacy", "pre_mu")
+        self.proxy_mu_convention = proxy_mu_convention
         # The proxy is only exercised by the FUSED path -- `_forward_looped` never calls
         # `_proxy_step`. Without this assert, `proxy_rank: 16` + `proxy_loss_coef: 0.01` on a
         # config that leaves fused_experts at its default False is a SILENT NO-OP: the run trains,
@@ -1301,6 +1320,11 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 self._load_sum += pf.sum(0)
                 self._ent_sum += -(pf * (pf + 1e-9).log()).sum(-1).sum()
                 self._tok_sum += pf.shape[0]
+                # Which experts win the argmax, accumulated as COUNTS so the read in
+                # pop_load_metrics is `(_dom_sum > 0).sum()`. one_hot + sum is pure tensor
+                # arithmetic (no .item(), no bincount on a data-dependent size), so it traces
+                # in the same graph as the rest of this block.
+                self._dom_sum += F.one_hot(pf.argmax(-1), self.n_experts).sum(0).float()
                 if self.balance_rate > 0.0 and self.load_balance_bias is not None:
                     # BOUNDED, PROPORTIONAL update. The first version used
                     #     bias += rate * sign(target - share)
@@ -1802,6 +1826,35 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
         # that eval cycles through.
         logits_hat = self._logits_raw(E_hat, moments=self._zscore_moments(E_hat))
 
+        # ---- WHICH SIDE OF THE SINKHORN DUAL IS THE TARGET (2026-09-18) --------------- #
+        # `logits` arrives from `_route` with the dual ALREADY SUBTRACTED (`logits - mu`),
+        # while `logits_hat` above is PRE-mu -- `_logits_raw` does not apply it. So the proxy
+        # is taught to predict the POST-mu logits, and then `_route` subtracts mu from the
+        # proxy's own logits a SECOND time when it selects:
+        #     sel_logits = self._logits_raw(proxy_E, ...) - mu
+        # i.e. mu is counted twice on the selection path. It is not a small term: every live
+        # energy arm runs `sinkhorn_iters: 3`, and mu was measured at 3.44 in logit units
+        # against z-scored, tau=1 logits.
+        #
+        # `_forward_sparse` does NOT share this defect: both of its sides are post-mu
+        # (`lg = lg - mu[sel_idx]` and `s_prox = s_prox - mu`), so mu cancels and its proxy
+        # learns the PRE-mu correspondence. A `sparse_start_step` run therefore CHANGES
+        # CONVENTION at the dense -> sparse handover, which is the worst case: the proxy is
+        # re-targeted exactly when it stops being retrainable from all-K energies.
+        #
+        # "pre_mu" distils pre-mu against pre-mu, making the dense path self-consistent and
+        # equal to the sparse path's convention. `_route` needs NO change under it -- applying
+        # the dual to a proxy that predicts the pre-mu logits is then exactly right.
+        # `_logits_raw(E_k)` here reproduces the pre-mu logits `_route` computed, bit for bit
+        # (same default `moments`, same bias, same tau), rather than plumbing mu through three
+        # call sites.
+        #
+        # DEFAULT "legacy" REPRODUCES TODAY'S BEHAVIOUR EXACTLY: `tgt_logits is logits`, so
+        # the two expressions below are the same object they were before this branch existed.
+        tgt_logits = logits
+        if self.proxy_mu_convention == "pre_mu":
+            tgt_logits = self._logits_raw(E_k)
+
         if self.training and self.proxy_loss_coef > 0:
             # PER-TOKEN normalisation. F.kl_div(reduction="batchmean") divides by dim 0
             # ONLY, so on a (batch, seq, K) tensor it sums over seq*K and divides by
@@ -1817,7 +1870,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             # raises the global norm and scales the BACKBONE gradients down. Detaching
             # blocks the graph path; it does not decouple the optimizer.
             flat_hat = logits_hat.reshape(-1, self.n_experts)
-            flat_tgt = F.softmax(logits.detach().reshape(-1, self.n_experts), dim=-1)
+            flat_tgt = F.softmax(tgt_logits.detach().reshape(-1, self.n_experts), dim=-1)
             add_aux_loss(
                 self.proxy_loss_coef
                 * F.kl_div(F.log_softmax(flat_hat, dim=-1), flat_tgt, reduction="batchmean")
@@ -1827,7 +1880,12 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             with torch.no_grad():
                 k = self.top_k if self.top_k is not None else 1
                 k = min(k, self.n_experts)
-                a = logits.detach().reshape(-1, self.n_experts).topk(k, dim=-1).indices
+                # Measured on the SAME side of the dual as the distillation target, so the
+                # metric answers "is the head learning what it is being taught" in both
+                # conventions. mu is a per-expert shift applied to both sides at selection
+                # time, so this is not the post-mu selection agreement exactly -- it never
+                # was, which is part of the same defect.
+                a = tgt_logits.detach().reshape(-1, self.n_experts).topk(k, dim=-1).indices
                 b = logits_hat.detach().reshape(-1, self.n_experts).topk(k, dim=-1).indices
                 hit = (a.unsqueeze(-1) == b.unsqueeze(-2)).any(-1).float().sum(-1)
                 self._proxy_agree_sum += hit.sum() / k
@@ -2077,6 +2135,16 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 "load_min_share": share.min().item(),
                 "load_mean_token_entropy": (self._ent_sum / n).item(),
                 "load_tokens_seen": n.item(),
+                # How many DISTINCT experts won the argmax at least once this interval.
+                # 1 = genuine collapse; K with effective_n ~ 1 = per-token specialisation.
+                # This is the metric _log_metrics computed as `n_dominant_experts` and never
+                # emitted under torch.compile.
+                "load_n_dominant_experts": float((self._dom_sum > 0).sum()),
+                # ... and how many received ANY routing weight. Differs from the above only
+                # when top_k masks an expert to exactly zero, so on a dense arm it is K by
+                # construction and on a top-k arm it is the size of the union of the selected
+                # sets -- the cheap upper bound on _dom_sum.
+                "load_n_used_experts": float((share > 0).sum()),
             }
             if self.balance_rate > 0.0 and self.load_balance_bias is not None:
                 m["load_bias_absmax"] = self.load_balance_bias.abs().max().item()
@@ -2111,6 +2179,7 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
                 m["expert_cos_abs_mean"] = (self._cos_sum / self._cos_n.clamp_min(1.0)).item()
                 self._cos_sum.zero_(); self._cos_n.zero_()
             self._load_sum.zero_(); self._ent_sum.zero_(); self._tok_sum.zero_()
+            self._dom_sum.zero_()
         return m
 
     def _log_metrics(self, p: torch.Tensor, out: torch.Tensor) -> None:
@@ -2368,6 +2437,32 @@ class FusedMoEContainer(FFEnergyBase):
         # container too (train_utils skips the inner '.moe' to avoid double-logging).
         return self.moe.pop_load_metrics()
 
+    def get_num_active_parameters(self) -> int:
+        """Parameters that AFFECT a token's output, for `model_wrapper/base.py`'s recursion.
+
+        Purely observational: this method is read by `calculate_num_parameters()` (and thence
+        by the two numbers `pretrain.py` pushes into the wandb run config) and by nothing
+        else. It cannot touch training.
+
+        WHY IT WAS MISSING. `base.py:206` walks the module tree looking for exactly this
+        method and, finding it only on `mlp_blocks/moe.py`'s Switch MoE, fell through to
+        `parameter.numel()` on the fused expert stack -- counting all K experts. So every
+        energy arm logged `active_parameters == num_parameters` (the 1B: 1002.1M against a
+        true 279.3M, 3.6x), while the Switch BASELINE it is compared against was correct.
+        Every published active-parameter comparison between the two was wrong in the
+        direction that flatters the baseline.
+
+        The arithmetic lives in `energy_ff_paramcount.py` (three facts it encodes that the
+        Switch pattern does not cover: the router/proxy/surrogate parameters are ALWAYS
+        active; the discount must be applied at the HOLDER, because `make_experts()` hands
+        each expert a closure over a slice and the expert modules own nothing; and
+        `top_k=None` means dense, so nothing is skipped). Imported lazily so this module's
+        import graph is unchanged.
+        """
+        from .energy_ff_paramcount import container_active_parameters
+
+        return container_active_parameters(self)
+
     def energy_per_token(self, x: torch.Tensor) -> torch.Tensor:
         return self.moe.energy_per_token(x)
 
@@ -2397,6 +2492,7 @@ def build_boltzmann_moe(
     proxy_init: str = "random",
     proxy_out_dim: int = 0,
     proxy_iters: int = 1,
+    proxy_mu_convention: str = "legacy",
     cos_probe_interval: int = 0,
     cos_probe_pairs: int = 8,
     repulsion_space: str = "output",
@@ -2500,6 +2596,7 @@ def build_boltzmann_moe(
         proxy_init=proxy_init,
         proxy_out_dim=proxy_out_dim,
         proxy_iters=proxy_iters,
+        proxy_mu_convention=proxy_mu_convention,
         cos_probe_interval=cos_probe_interval,
         cos_probe_pairs=cos_probe_pairs,
         repulsion_space=repulsion_space,

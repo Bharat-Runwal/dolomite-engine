@@ -1,3 +1,28 @@
+# cmix_400M_sandwich_sparse_4gpu -- FALLBACK CONFIG. IDENTICAL to cmix_400M_sandwich_sparse EXCEPT
+# gradient_accumulation_steps 16 -> 32.
+#
+# *** INTENDED GPU COUNT: 4 ***  (the sibling cmix_400M_sandwich_sparse.yml is for 8)
+# World size is NOT in a config, so this is the only place it is written down. Launch with
+#   bash experiments/boltzmann-moe/scripts/bsub/submit_train.sh cmix_400M_sandwich_sparse_4gpu configs/cmix/cmix_400M_sandwich_sparse_4gpu.yml 4 preemptable ...
+# and confirm the launch ledger row reads tokens_per_step=524288.
+#
+# WHY ga AND NOT steps: 4 GPU x mbs 1 x ga 32 x 4096 = 524,288 tok/step, the SAME as
+# 8 GPU x mbs 1 x ga 16 x 4096. num_training_steps stays 61035, so the
+# effective batch, the LR schedule and the 32.00B total are byte-identical to the 8-GPU arm --
+# only wall-clock doubles. Doubling num_training_steps instead would HALVE tokens/step and
+# change the batch size and schedule shape, making the arm non-comparable.
+#
+# save_path and the wandb name are UNCHANGED on purpose: switching to this config RESUMES
+# the 8-GPU run from its last checkpoint instead of starting a divergent second copy.
+# K 16 -> 32 (2026-09-17), ISO-PARAM: I_total stays 253,952, so I_e halves to 7,936
+# and total params are unchanged at 401M. p stays 4 (top-2 + 2 explore), so
+# p/K falls 0.250 -> 0.125 and the sparse CEILING doubles 4.0x -> 8.0x.
+# Rationale: (a) doubles the achievable saving at no parameter cost; (b) I_e=7,936 is
+# still inside the proven 4480-15872 band; (c) our best historical arm was K=32/top-2
+# (iclr_hop_K32_top2_sink, Avg11 44.58, against 40.96 for a K=16 pure); (d) it gives the
+# paper a K axis that varies while recurrence is held, which the K=16/K=64 set could not.
+# Switched at step ~500 of 61035 (0.8%), so the restart cost ~5 minutes.
+
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -26,14 +51,16 @@ model_args:
     num_pre_layers: 0
     num_post_layers: 0
     layer_iterations:
+    - 1
     - 4
+    - 1
     initializer_range: 0.02
     layer_norm_epsilon: 1.0e-05
     normalization_function: rmsnorm
     position_embedding_type: rope
     rope_dim: 64
     hidden_size: 1024
-    num_layers: 1
+    num_layers: 3
     init_method: normal
     tie_word_embeddings: true
     energy_proj_type: psd_anti
@@ -43,23 +70,35 @@ model_args:
     vocab_size: 100352
     max_position_embeddings: 4096
     sequence_mixer_blocks:
+    - &id001
+      sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
     - sequence_mixer_type: energy_attention
       num_attention_heads: 16
       num_key_value_heads: 16
       add_bias: false
       attention_multiplier: 0.125
+    - *id001
     mlp_blocks:
+    - &id002
+      mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
     - mlp_type: EnergyFF_BoltzmannMoE
       expert_kind: hopfield
-      intermediate_size: 286720
-      n_experts: 16
+      intermediate_size: 253952
+      n_experts: 32
       top_k: 2
       hopfield_grad_scale: sqrt_consistent
       routing_norm: zscore
       temperature: 1.0
       repulsion_form: abs
-      repulsion_coef: 2.0
-      repulsion_space: weight
+      repulsion_coef: 0.1
+      repulsion_space: output
       cos_probe_interval: 100
       n_repulsion_pairs: 4
       gelu_grad_method: sigmoid
@@ -72,7 +111,7 @@ model_args:
       fused_experts: true
       sparse_start_step: 300
       sparse_forward: true
-      sparse_candidates: 4
+      sparse_candidates: 2
       sparse_explore: 2
       proxy_rank: 16
       proxy_kind: subspace
@@ -81,10 +120,13 @@ model_args:
       proxy_loss_coef: 0.01
       activation_function: gelu
       add_bias: false
+      proxy_init: svd
+      repulsion_subsample: 64
+    - *id002
 tuning_args:
   tuning_method: pretraining
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok32B/cmix_400M_pure_it4_sparse
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/tok32B/cmix_400M_sandwich_sparse
   save_interval: 200
   max_to_keep: 2
 logging_args:
@@ -92,12 +134,12 @@ logging_args:
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: cmix_400M_pure_it4_sparse
+    name: cmix_400M_sandwich_sparse
 training_parameters:
   num_training_steps: 61035
   eval_interval: 5000
   micro_batch_size: 1
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 32
   eval_during_training: false
   gradient_clipping: 1
 optimizer_args:

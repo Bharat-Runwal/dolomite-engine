@@ -337,6 +337,28 @@
 > at **94% full**. Keep 2, plus landmark checkpoints deliberately preserved for iso-token
 > re-evaluation.
 
+> ## 🔢 LABEL EVERY TABLE — STATE WHAT THE NUMBERS ARE, IMMEDIATELY BEFORE THE TABLE
+>
+> **THIS IS VERY IMPORTANT.** Never present a table of numbers without saying, in the sentence
+> directly above it, exactly what those numbers are. Column headers alone are NOT enough:
+> `44.82 | 41.06 | 25.57 | 1.59` is unreadable without being told that these are an 11-task
+> accuracy mean in percentage points, a word-level perplexity, an accuracy percentage and an
+> exact-match percentage — four different kinds of quantity, two of which improve by going DOWN.
+>
+> For every table state:
+> 1. **What quantity** each column is — loss (nats), perplexity, accuracy (%), Avg11 (pp),
+>    correlation, MACs/token, parameters (M), tokens/step, s/step, TFLOP/s, recall (fraction).
+> 2. **The units or scale** — is accuracy 0-1 or x100? are params M or raw? is loss `lm_loss`
+>    or `train-loss` (they differ: `train-loss` includes aux losses)?
+> 3. **Which direction is better**, whenever a column is not obviously higher-is-better.
+> 4. **What the rows are being held constant at** — token budget, GPU count, tokens/step.
+>    A table mixing budgets is a trap; say so explicitly or split the table.
+>
+> A number whose nature the reader has to infer is a number that will be misquoted. This has
+> already happened in this project: a wiki-perplexity of 40.58 was reported as a GSM8K score
+> because a row was misaligned, and `avg9`/`avg10`/`Avg11` figures differing by ~3pp were mixed
+> in one table because nobody said which convention each row used.
+
 > ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
 >
 > **CANONICAL (2026-09-14 onward): `Avg11`**, the paper `tab:scaling` recipe, the

@@ -425,13 +425,25 @@ def wrap_model_container_for_distributed_training(
             torch._inductor.config.aten_distributed_optimizations.spmd_check = True
             torch._inductor.config.aten_distributed_optimizations.spmd_mismatch = "error"
             log_rank_0(logging.INFO, "DOLOMITE_SPMD_DIAG=1: spmd_check ON, mismatch=error (fail fast)")
-        elif n_nodes > 1:
+        elif world > 1:
+            # WIDENED 2026-09-19 from `n_nodes > 1` to `world > 1`. The claim above that "single
+            # node is unaffected (all ranks on one host agree)" is DISPROVEN: abl_B_134M_6G1x6S
+            # (job 1775598, a recurrent Switch block, 1 node x 4 GPUs) died with exactly this
+            # signature -- InductorError from post_grad_passes -> spmd_check ->
+            # dist.all_gather_object, then a NCCL collective timeout on the other ranks. Its 400M
+            # twin at 2 nodes SURVIVED only because the old guard already applied there. So graph
+            # divergence is a property of the MODEL (data-dependent structure), not of the host
+            # boundary, and any world_size > 1 can hit it.
+            # spmd_check is a DIAGNOSTIC: it detects divergence, it does not prevent it. Turning it
+            # off costs the comm/compute overlap reordering (a performance optimisation we enable
+            # ourselves at :63) and nothing else. DOLOMITE_SPMD_DIAG=1 still restores it, failing
+            # fast rather than hanging, for bisects.
             torch._inductor.config.reorder_for_compute_comm_overlap = False
             torch._inductor.config.aten_distributed_optimizations.spmd_check = False
             log_rank_0(
                 logging.INFO,
-                f"multi-node ({n_nodes} nodes): disabled reorder_for_compute_comm_overlap and "
-                f"inductor spmd_check to avoid the compile-time all_gather deadlock",
+                f"world_size {world} ({n_nodes} node(s)): disabled reorder_for_compute_comm_overlap "
+                f"and inductor spmd_check to avoid the compile-time all_gather deadlock",
             )
 
         for i, model in enumerate(model_container):

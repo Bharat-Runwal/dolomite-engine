@@ -1,8 +1,3 @@
-# 2x8 SPMD DIAGNOSTIC -- the ONLY shape where per-host graph divergence was observed
-# (ranks 0-7 = 2 call_function nodes, ranks 8-15 = 27). At 2x4 it did NOT reproduce in
-# either the sparse or the dense arm, so 2x8 is required to isolate anything.
-# Run with DOLOMITE_SPMD_DIAG=1 (spmd_check ON, mismatch=error -> fail fast with a
-# diagnostic) and NCCL_IB_DISABLE=1 so the cluster's IBV_WC_RETRY_EXC_ERR cannot mask it.
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -118,7 +113,7 @@ model_args:
       fused_experts: true
       sparse_forward: true
       sparse_start_step: 5
-      sparse_candidates: 2
+      sparse_candidates: 4
       sparse_explore: 2
       proxy_rank: 16
       proxy_kind: subspace

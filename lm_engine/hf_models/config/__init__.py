@@ -16,7 +16,8 @@ from .mlp import (_MLPArgs, _MoEArgs, _EnergyMLPArgs, _HopfieldEnergyMLPArgs,
                   _MixedEnergyMLPArgs, _BoltzmannMoEEnergyMLPArgs,
                   _TopKEnergyMoEMLPArgs, _SurrogateBoltzmannMoEMLPArgs,
                   _EnergyFFW1W2Args, _EnergyFFHopfieldArgs,
-                  _EnergyFFBoltzmannMoEArgs)
+                  _EnergyFFBoltzmannMoEArgs,
+                  _EnergyFFSurrogateBoltzmannMoEArgs)
 from .sequence_mixer import (
     _CausalConvolution,
     _GatedDeltaNetArgs,
@@ -108,6 +109,10 @@ _MLP_CONFIG_CLASSES = {
     "EnergyFF_W1W2": _EnergyFFW1W2Args,
     "EnergyFF_Hopfield": _EnergyFFHopfieldArgs,
     "EnergyFF_BoltzmannMoE": _EnergyFFBoltzmannMoEArgs,
+    # 2026-09-18: the same MoE plus a KL-distilled d->K router head that replaces the energy
+    # router at eval (energy_ff_surrogate.py). Defaults are a no-op, so it is bitwise
+    # identical to EnergyFF_BoltzmannMoE until surrogate_coef / use_surrogate are set.
+    "EnergyFF_SurrogateBoltzmannMoE": _EnergyFFSurrogateBoltzmannMoEArgs,
 }
 
 

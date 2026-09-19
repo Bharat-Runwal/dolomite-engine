@@ -468,7 +468,11 @@ def _mlp_params(cfg: dict, blk: dict, d: int) -> tuple[int, int, dict]:
         n = 2 * (I * d + (I if bias else 0))
         return n, n, det
 
-    if t == "EnergyFF_BoltzmannMoE":
+    # EnergyFF_SurrogateBoltzmannMoE is a SUBCLASS of the Boltzmann MoE (same experts, same
+    # router, plus a distillation head) and its args class subclasses the parent's, so the expert
+    # and router accounting below is identical -- the surrogate_kind branch further down adds the
+    # head. Without this the auditor raises on a surrogate config rather than counting it.
+    if t in ("EnergyFF_BoltzmannMoE", "EnergyFF_SurrogateBoltzmannMoE"):
         I = int(blk["intermediate_size"])
         K = int(blk["n_experts"])
         kind = blk.get("expert_kind", "hopfield")

@@ -1,8 +1,3 @@
-# SPMD BISECT arm 'bisectA_sparse'. 2 nodes, 30 steps, DOLOMITE_SPMD_DIAG=1 so an FX-graph mismatch
-# RAISES with a diagnostic instead of deadlocking.
-# sparse_forward=True. Question: does the per-host graph divergence (ranks 0-7 = 2
-# call_function nodes vs 8-15 = 27) come from the SPARSE dispatch, whose control flow is
-# data-dependent (proxy top-k selection, _sparse_overflow), or is it present when dense too?
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -118,7 +113,7 @@ model_args:
       fused_experts: true
       sparse_forward: true
       sparse_start_step: 5
-      sparse_candidates: 2
+      sparse_candidates: 4
       sparse_explore: 2
       proxy_rank: 16
       proxy_kind: subspace

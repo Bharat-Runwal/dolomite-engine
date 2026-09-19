@@ -1,3 +1,19 @@
+# cmix_400M_baseline_switch_4gpu -- FALLBACK CONFIG. IDENTICAL to cmix_400M_baseline_switch EXCEPT
+# gradient_accumulation_steps 8 -> 16.
+#
+# *** INTENDED GPU COUNT: 4 ***  (the sibling cmix_400M_baseline_switch.yml is for 8)
+# World size is NOT in a config, so this is the only place it is written down. Launch with
+#   bash experiments/boltzmann-moe/scripts/bsub/submit_train.sh cmix_400M_baseline_switch_4gpu configs/cmix/cmix_400M_baseline_switch_4gpu.yml 4 preemptable ...
+# and confirm the launch ledger row reads tokens_per_step=524288.
+#
+# WHY ga AND NOT steps: 4 GPU x mbs 2 x ga 16 x 4096 = 524,288 tok/step, the SAME as
+# 8 GPU x mbs 2 x ga 8 x 4096. num_training_steps stays 61035, so the
+# effective batch, the LR schedule and the 32.00B total are byte-identical to the 8-GPU arm --
+# only wall-clock doubles. Doubling num_training_steps instead would HALVE tokens/step and
+# change the batch size and schedule shape, making the arm non-comparable.
+#
+# save_path and the wandb name are UNCHANGED on purpose: switching to this config RESUMES
+# the 8-GPU run from its last checkpoint instead of starting a divergent second copy.
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -32,7 +48,7 @@ model_args:
     - 1
     - 1
     - 1
-    - 6
+    - 1
     initializer_range: 0.02
     layer_norm_epsilon: 1.0e-05
     normalization_function: rmsnorm
@@ -79,7 +95,7 @@ model_args:
       num_key_value_heads: 16
       add_bias: false
       attention_multiplier: 0.125
-    - sequence_mixer_type: energy_attention
+    - sequence_mixer_type: softmax_attention
       num_attention_heads: 16
       num_key_value_heads: 16
       add_bias: false
@@ -109,62 +125,38 @@ model_args:
       activation_function: swiglu
       intermediate_size: 4096
       add_bias: false
-    - mlp_type: EnergyFF_BoltzmannMoE
-      expert_kind: hopfield
-      intermediate_size: 773760
-      n_experts: 64
-      top_k: 2
-      hopfield_grad_scale: sqrt_consistent
-      routing_norm: zscore
-      temperature: 1.0
-      repulsion_form: abs
-      repulsion_coef: 0.1
-      repulsion_space: output
-      cos_probe_interval: 100
-      n_repulsion_pairs: 4
-      gelu_grad_method: sigmoid
-      e_sign_override: pos
-      sinkhorn_iters: 3
-      sinkhorn_persist_mu: true
-      sinkhorn_mu_iters: 6
-      repulsion_tensor_idx: true
-      renormalize_topk: true
-      fused_experts: true
-      sparse_start_step: 200
-      sparse_forward: true
-      sparse_candidates: 4
-      sparse_explore: 2
-      proxy_rank: 16
-      proxy_kind: subspace
-      proxy_out_dim: 512
-      proxy_iters: 1
-      proxy_loss_coef: 0.01
-      activation_function: gelu
+    - mlp_type: MoE
+      activation_function: swiglu
+      intermediate_size: 3914
       add_bias: false
-      repulsion_subsample: 64
+      num_experts: 16
+      num_experts_per_tok: 2
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
 tuning_args:
   tuning_method: pretraining
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix1B_hybrid_K64k2_feas
-  save_interval: 100
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix_400M_baseline_switch
+  save_interval: 200
   max_to_keep: 2
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: cmix1B_hybrid_K64k2_feas
+    name: cmix_400M_baseline_switch
 training_parameters:
-  num_training_steps: 400
+  num_training_steps: 61035
   eval_interval: 5000
-  micro_batch_size: 1
-  gradient_accumulation_steps: 8
+  micro_batch_size: 2
+  gradient_accumulation_steps: 16
   eval_during_training: false
   gradient_clipping: 1
 optimizer_args:
   class_name: TorchAdamW
   class_args:
-    lr: 0.001
+    lr: 2e-3
     weight_decay: 0.1
     betas:
     - 0.9
@@ -173,9 +165,9 @@ optimizer_args:
 lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
-  num_warmup_steps: 80
-  num_constant_steps: 0
-  num_decay_steps: 320
+  num_warmup_steps: 2000
+  num_constant_steps: 53000
+  num_decay_steps: 6035
 mixed_precision_args:
   dtype: bf16
 distributed_args:

@@ -205,6 +205,7 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             proxy_init=getattr(block, "proxy_init", "random"),
             proxy_out_dim=getattr(block, "proxy_out_dim", 0),
             proxy_iters=getattr(block, "proxy_iters", 1),
+            proxy_mu_convention=getattr(block, "proxy_mu_convention", "legacy"),
             cos_probe_interval=getattr(block, "cos_probe_interval", 0),
             cos_probe_pairs=getattr(block, "cos_probe_pairs", 8),
             repulsion_space=getattr(block, "repulsion_space", "output"),
@@ -220,6 +221,85 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             sparse_start_step=getattr(block, "sparse_start_step", 0),
             repulsion_subsample=getattr(block, "repulsion_subsample", 0),
             sparse_capacity_factor=getattr(block, "sparse_capacity_factor", 1.25),
+            init_method=config.init_method,
+            initializer_range=config.initializer_range,
+            m_width=config.m_width,
+            add_bias=block.add_bias,
+            gelu_grad_method=getattr(block, "gelu_grad_method", "sigmoid"),
+            layer_idx=layer_idx,
+        )
+
+    elif mlp_type == "EnergyFF_SurrogateBoltzmannMoE":
+        # 2026-09-18: EnergyFF_BoltzmannMoE + a KL-distilled d->K router head that replaces
+        # the energy router at eval (energy_ff_surrogate.py). Defaults (surrogate_coef 0,
+        # use_surrogate false) are bitwise the base class.
+        #
+        # LAZY IMPORT, deliberately. Importing energy_ff_surrogate at module scope would add it
+        # to the import graph of every job -- including the four that were PEND while this was
+        # written. Imported here, a config that does not ask for the surrogate never loads it.
+        #
+        # EVERY FIELD IS LISTED EXPLICITLY (pre-flight rule 7): get_mlp_block forwards kwargs by
+        # name, so a field that parses onto the pydantic args object and is not named here is a
+        # SILENT no-op. The list is the union of the parent args class's fields (all of which the
+        # subclass inherits) and the head's own eight.
+        from .energy_ff_surrogate import build_surrogate_boltzmann_moe
+
+        mlp = build_surrogate_boltzmann_moe(
+            expert_kind=block.expert_kind,
+            hidden_size=config.hidden_size,
+            intermediate_size=block.intermediate_size,
+            n_experts=block.n_experts,
+            temperature=block.temperature,
+            repulsion_coef=block.repulsion_coef,
+            n_repulsion_pairs=block.n_repulsion_pairs,
+            repulsion_form=getattr(block, "repulsion_form", "squared"),
+            routing_norm=getattr(block, "routing_norm", "none"),
+            renormalize_topk=getattr(block, "renormalize_topk", False),
+            track_load=getattr(block, "track_load", True),
+            balance_rate=getattr(block, "balance_rate", 0.0),
+            hopfield_grad_scale=getattr(block, "hopfield_grad_scale", "mean"),
+            top_k=block.top_k,
+            repulsion_interval=getattr(block, "repulsion_interval", 1),
+            repulsion_scale_comp=getattr(block, "repulsion_scale_comp", True),
+            fused_experts=getattr(block, "fused_experts", False),
+            proxy_rank=getattr(block, "proxy_rank", 0),
+            proxy_loss_coef=getattr(block, "proxy_loss_coef", 0.0),
+            proxy_route=getattr(block, "proxy_route", False),
+            proxy_kind=getattr(block, "proxy_kind", "quad"),
+            proxy_init=getattr(block, "proxy_init", "random"),
+            proxy_out_dim=getattr(block, "proxy_out_dim", 0),
+            proxy_iters=getattr(block, "proxy_iters", 1),
+            proxy_mu_convention=getattr(block, "proxy_mu_convention", "legacy"),
+            cos_probe_interval=getattr(block, "cos_probe_interval", 0),
+            cos_probe_pairs=getattr(block, "cos_probe_pairs", 8),
+            repulsion_space=getattr(block, "repulsion_space", "output"),
+            e_sign_override=getattr(block, "e_sign_override", None),
+            sinkhorn_iters=getattr(block, "sinkhorn_iters", 0),
+            sinkhorn_persist_mu=getattr(block, "sinkhorn_persist_mu", False),
+            sinkhorn_mu_iters=getattr(block, "sinkhorn_mu_iters", 1),
+            repulsion_tensor_idx=getattr(block, "repulsion_tensor_idx", False),
+            sparse_backproj=getattr(block, "sparse_backproj", False),
+            sparse_forward=getattr(block, "sparse_forward", False),
+            sparse_candidates=getattr(block, "sparse_candidates", 0),
+            sparse_explore=getattr(block, "sparse_explore", 0),
+            sparse_start_step=getattr(block, "sparse_start_step", 0),
+            repulsion_subsample=getattr(block, "repulsion_subsample", 0),
+            sparse_capacity_factor=getattr(block, "sparse_capacity_factor", 1.25),
+            # --- the head ---
+            surrogate_coef=getattr(block, "surrogate_coef", 0.0),
+            use_surrogate=getattr(block, "use_surrogate", False),
+            surrogate_kind=getattr(block, "surrogate_kind", "linear"),
+            surrogate_hidden=getattr(block, "surrogate_hidden", 0),
+            surrogate_kl_direction=getattr(block, "surrogate_kl_direction", "forward"),
+            surrogate_detach_input=getattr(block, "surrogate_detach_input", True),
+            surrogate_init_std=getattr(block, "surrogate_init_std", 0.01),
+            surrogate_track_agree=getattr(block, "surrogate_track_agree", True),
+            # --- the head as the SPARSE selector (2026-09-19). Pre-flight rule 7: these three
+            # --- parse onto the args object and would be SILENT NO-OPS if not named here.
+            surrogate_replaces_proxy=getattr(block, "surrogate_replaces_proxy", False),
+            surrogate_free_proxy=getattr(block, "surrogate_free_proxy", True),
+            surrogate_sparse_allow_proxy_denominator=getattr(
+                block, "surrogate_sparse_allow_proxy_denominator", False),
             init_method=config.init_method,
             initializer_range=config.initializer_range,
             m_width=config.m_width,

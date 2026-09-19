@@ -54,7 +54,12 @@ Isolates the *energy block* as a whole: the recurrent block becomes a standard S
 mechanism is removed entirely.
 
 - [x] **134M** — structure `6G1x6S`, swiglu K=16 k=2, **I_s = 341** — config: **`abl_B_134M_6G1x6S.yml`**
-      verified: TOTAL 125M / ACTIVE 114M / FLOP-wt 134M == reference hybrid; schedule sums to 122,070; perGPU 32,768
+      **LAUNCHED 2026-09-19, job 1775570-series, 4 GPUs x mbs4 x ga4 = 262,144 tok/step = 32.0B.**
+      Re-audited with code (my earlier hand numbers were low by n*d*I): TOTAL 134.491M /
+      ACTIVE 123.492M / FLOPwt **143.214M**, i.e. **+1.1% of 6G1x6E's 141.720M** -- so this is the
+      FLOP-MATCHED baseline. The `6G1S` arm we actually ran is **-12.9%** FLOPs, so the published
+      44.87 is against an under-provisioned comparator. CPU build+forward verified before launch
+      (recurrence on a Switch block had never run in this codebase).
 - [x] **400M** — structure `6G1x6S`, swiglu K=32 k=2, **I_s = 1,957** — config: **`abl_B_400M_6G1x6S.yml`**
       verified: TOTAL 375M / ACTIVE 194M / FLOP-wt 276M == reference hybrid exactly; schedule sums to 61,035; perGPU 65,536
 
@@ -146,3 +151,43 @@ useless there. One mechanism would unblock ablation A **and** w1w2 sparsity.
 a distilled head the honest framing is that the *target* is parameter-free — KL to a **detached**
 Boltzmann distribution, no LM-loss gradient into the gate, no load-balancing loss — which is a
 real distinction from Switch, but it must be stated rather than glossed.
+
+---
+
+## 5. W1W2 + sparse + surrogate selection — QUEUED, blocked on two code dependencies
+
+Target once the surrogate drives sparse selection: run W1W2 Boltzmann-MoE **sparse** at both scales.
+Rationale: every h1-series win was w1w2, every current arm is hopfield, and the surrogate is the only
+selector that works for w1w2 (the rank-r subspace proxy fails there — w1w2's energy sums SIGNED terms
+that cancel, `|sum|/sum|term|` = 0.0254 vs 1.000 for hopfield, so an m-row subsample needs m = I_e).
+
+**Precomputed iso-param specs** (w1w2 stores TWO matrices per expert, so halving `I_total` matches the
+hopfield arm on total AND active simultaneously at the same K and k):
+
+| scale | reference hopfield | w1w2 substitute | active (hopfield → w1w2) |
+|---|---|---|---|
+| 134M | K=16 k=2 `I_total`=16,384 (`I_e`=1,024) | K=16 k=2 **`I_total`=8,192** (`I_e`=512) — exact | 1.57M → 1.57M |
+| 400M | K=32 k=2 `I_total`=187,872 (`I_e`=5,871) | K=32 k=2 **`I_total`=93,952** (`I_e`=2,936) — +0.017% bank | 12.02M → 12.03M |
+
+Budgets: 134M 122,070 steps @ 262,144 tok/step; 400M 61,035 steps @ 524,288 tok/step. Both 32.0B.
+
+**Dependency 1 — register the w1w2 sparse path.** `energy_ff_w1w2_sparse.py` exists and its dispatch is
+exact (oracle proxy 5.22e-16, gradients 6.02e-16) but is NOT in `get_mlp_block`. Registering it also
+needs `energy_ff.py:938`'s `assert fused_spec["kind"] == "hopfield"` relaxed to accept `"w1w2"`.
+
+**Dependency 2 — surrogate as sparse selector.** In progress. Gate: the **nomination-recall** curve
+(what fraction of the true top-k appears among the nominated p). If a realistic head cannot nominate
+the true winners, do not run these arms.
+
+**BLOCKER FOR THE 400M ARM — multi-node.** `use_surrogate` + `sinkhorn_iters > 0` REQUIRES
+`sinkhorn_persist_mu: true` (`energy_ff_surrogate.py:307`), and persist_mu's data-dependent
+`int(self._mu_call.item())` inside the compiled region **HUNG at 2 nodes** (job 1775117: log dead 29
+min, LSF still RUN, no NCCL error — same signature as the documented fused-repulsion 2-node wedge).
+The 134M arm was rescued by going single-node (4 GPUs x mbs4 x ga4 = 262,144, unchanged budget).
+400M needs 524,288 tok/step, so the options are:
+  (a) **1 node x 8 GPUs** — hosts have 8, but `submit_train.sh` maps 8 GPUs to 2 nodes x 4; needs a
+      `-n 1 -gpu num=8/task` shape. CLEANEST if a whole host is free.
+  (b) 4 GPUs x mbs2 x ga16 — single node, correct budget, roughly 2x the step time.
+  (c) Fix the persist_mu multi-node hang (make `_mu_call` rank-invariant or move the `.item()` out of
+      the compiled region). Best long-term; also de-risks the three live multi-node arms that carry
+      persist_mu today.

@@ -1,3 +1,28 @@
+# cmix_400M_hybrid_sparse_4gpu -- FALLBACK CONFIG. IDENTICAL to cmix_400M_hybrid_sparse EXCEPT
+# gradient_accumulation_steps 8 -> 16.
+#
+# *** INTENDED GPU COUNT: 4 ***  (the sibling cmix_400M_hybrid_sparse.yml is for 8)
+# World size is NOT in a config, so this is the only place it is written down. Launch with
+#   bash experiments/boltzmann-moe/scripts/bsub/submit_train.sh cmix_400M_hybrid_sparse_4gpu configs/cmix/cmix_400M_hybrid_sparse_4gpu.yml 4 preemptable ...
+# and confirm the launch ledger row reads tokens_per_step=524288.
+#
+# WHY ga AND NOT steps: 4 GPU x mbs 2 x ga 16 x 4096 = 524,288 tok/step, the SAME as
+# 8 GPU x mbs 2 x ga 8 x 4096. num_training_steps stays 61035, so the
+# effective batch, the LR schedule and the 32.00B total are byte-identical to the 8-GPU arm --
+# only wall-clock doubles. Doubling num_training_steps instead would HALVE tokens/step and
+# change the batch size and schedule shape, making the arm non-comparable.
+#
+# save_path and the wandb name are UNCHANGED on purpose: switching to this config RESUMES
+# the 8-GPU run from its last checkpoint instead of starting a divergent second copy.
+# K 16 -> 32 (2026-09-17), ISO-PARAM: I_total stays 187,872, so I_e halves to 5,871
+# and total params are unchanged at 400M. p stays 4 (top-2 + 2 explore), so
+# p/K falls 0.250 -> 0.125 and the sparse CEILING doubles 4.0x -> 8.0x.
+# Rationale: (a) doubles the achievable saving at no parameter cost; (b) I_e=5,871 is
+# still inside the proven 4480-15872 band; (c) our best historical arm was K=32/top-2
+# (iclr_hop_K32_top2_sink, Avg11 44.58, against 40.96 for a K=16 pure); (d) it gives the
+# paper a K axis that varies while recurrence is held, which the K=16/K=64 set could not.
+# Switched at step ~500 of 61035 (0.8%), so the restart cost ~5 minutes.
+
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -111,8 +136,8 @@ model_args:
       add_bias: false
     - mlp_type: EnergyFF_BoltzmannMoE
       expert_kind: hopfield
-      intermediate_size: 773760
-      n_experts: 64
+      intermediate_size: 187872
+      n_experts: 32
       top_k: 2
       hopfield_grad_scale: sqrt_consistent
       routing_norm: zscore
@@ -130,9 +155,9 @@ model_args:
       repulsion_tensor_idx: true
       renormalize_topk: true
       fused_experts: true
-      sparse_start_step: 200
+      sparse_start_step: 300
       sparse_forward: true
-      sparse_candidates: 4
+      sparse_candidates: 2
       sparse_explore: 2
       proxy_rank: 16
       proxy_kind: subspace
@@ -142,29 +167,30 @@ model_args:
       activation_function: gelu
       add_bias: false
       repulsion_subsample: 64
+      proxy_init: svd
 tuning_args:
   tuning_method: pretraining
 save_args:
-  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix1B_hybrid_K64k2_feas
-  save_interval: 100
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix_400M_hybrid_sparse
+  save_interval: 200
   max_to_keep: 2
 logging_args:
   log_interval: 10
   experiments_tracker_name: wandb
   wandb_args:
     project: energy-inference-large
-    name: cmix1B_hybrid_K64k2_feas
+    name: cmix_400M_hybrid_sparse
 training_parameters:
-  num_training_steps: 400
+  num_training_steps: 61035
   eval_interval: 5000
-  micro_batch_size: 1
-  gradient_accumulation_steps: 8
+  micro_batch_size: 2
+  gradient_accumulation_steps: 16
   eval_during_training: false
   gradient_clipping: 1
 optimizer_args:
   class_name: TorchAdamW
   class_args:
-    lr: 0.001
+    lr: 2e-3
     weight_decay: 0.1
     betas:
     - 0.9
@@ -173,9 +199,9 @@ optimizer_args:
 lr_scheduler_args:
   lr_decay_style: cosine
   lr_decay_factor: 0.1
-  num_warmup_steps: 80
-  num_constant_steps: 0
-  num_decay_steps: 320
+  num_warmup_steps: 2000
+  num_constant_steps: 53000
+  num_decay_steps: 6035
 mixed_precision_args:
   dtype: bf16
 distributed_args:

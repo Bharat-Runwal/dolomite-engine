@@ -1,7 +1,3 @@
-# TCP-TRANSPORT CONTROL. 40 steps only. Purpose: separate OUR multi-node correctness from the
-# cluster's InfiniBand fault. With NCCL_IB_DISABLE=1 NCCL falls back to sockets -- far slower,
-# but if this STEPS then our code is multi-node-correct and the sole blocker is the fabric
-# (IBV_WC_RETRY_EXC_ERR across 6+ HCAs and 7+ peers, unfixed by timeout/retry increases).
 datasets:
 - class_name: MegatronDataset
   data_name: Megatron
@@ -117,7 +113,7 @@ model_args:
       fused_experts: true
       sparse_forward: true
       sparse_start_step: 20
-      sparse_candidates: 2
+      sparse_candidates: 4
       sparse_explore: 2
       proxy_rank: 16
       proxy_kind: subspace

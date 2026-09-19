@@ -347,6 +347,17 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
     #   the 12 iterations of pure_hop_T12_sink. EVAL/CALIBRATION ONLY -- a call counter is
     #   unsound in training under activation checkpointing (asserted).
     proxy_iters: int = 1
+    # proxy_mu_convention: which side of the Sinkhorn dual the proxy is DISTILLED against.
+    #   "legacy" (default) reproduces every existing checkpoint exactly: `_proxy_step` targets
+    #     softmax(POST-mu logits) while predicting PRE-mu logits, and `_route` then subtracts
+    #     mu from the proxy's logits AGAIN -- mu counted twice on the selection path. Every
+    #     live energy arm runs sinkhorn_iters: 3, and mu was measured at 3.44 logit units.
+    #   "pre_mu" distils pre-mu against pre-mu, which is self-consistent AND is the convention
+    #     `_forward_sparse` already uses (both its sides are post-mu, so mu cancels). Without
+    #     it a sparse_start_step run silently changes convention at the dense->sparse handover.
+    #   Affects the proxy's aux loss and `proxy_topk_agree` only; the routing that the model
+    #   computes is untouched unless proxy_route is also on.
+    proxy_mu_convention: str = "legacy"
     # cos_probe_interval: measure mean|cos| between expert outputs under no_grad on
     #   1 call in N, INDEPENDENTLY of the repulsion loss, and log it as
     #   `expert_cos_abs_mean`. 0 = off. Needed because the repulsion aux loss is
@@ -474,6 +485,117 @@ class _EnergyFFBoltzmannMoEArgs(BaseArgs):
         assert self.routing_norm in ("none", "zscore", "sqrt_width")
         assert self.hopfield_grad_scale in ("mean", "inv_sqrt", "sqrt_consistent")
         assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
+        assert self.proxy_mu_convention in ("legacy", "pre_mu")
+
+
+class _EnergyFFSurrogateBoltzmannMoEArgs(_EnergyFFBoltzmannMoEArgs):
+    """Config for ``EnergyFF_SurrogateBoltzmannMoE`` -- the composable Boltzmann MoE with a
+    KL-DISTILLED d->K head that REPLACES the energy router at eval
+    (``energy_ff_surrogate.py``).
+
+    A SUBCLASS of ``_EnergyFFBoltzmannMoEArgs`` so a surrogate arm keeps every expert /
+    routing / Sinkhorn / sparsity knob of its no-surrogate twin, and so a new knob added there
+    is automatically available here. It does NOT modify the parent: the ``mlp_type`` default is
+    overridden and ``model_post_init`` re-states the parent's assertions (which pydantic does
+    not inherit once overridden) plus the head's own.
+
+    Defaults are the NO-OP: ``surrogate_coef: 0.0`` + ``use_surrogate: false`` makes the module
+    bitwise identical to ``EnergyFF_BoltzmannMoE``, so this ``mlp_type`` is safe to put in a
+    config before deciding to train the head.
+
+    ``sparse_forward`` IS supported, but only via ``surrogate_replaces_proxy: true`` (2026-09-19):
+    that path never calls ``_route``, so the head reaches it by BEING the module's cheap all-K
+    router (it overrides ``_proxy_energies``). The head then NOMINATES p = ``sparse_candidates``
+    experts and the EXACT energies of those p re-rank to the final ``top_k`` and set every
+    weight -- it is a selector, never a gate. Without the flag ``sparse_forward`` is still
+    refused, because the head would be computed and silently ignored. See section (d) of
+    ``energy_ff_surrogate.py``.
+    """
+
+    mlp_type: str = "EnergyFF_SurrogateBoltzmannMoE"
+    # weight of the distillation loss; 0 = the head is built but never trained or read
+    surrogate_coef: float = 0.0
+    # route with the head at EVAL (never in training -- it must be distilled against the
+    # exact router, so the exact router has to run)
+    use_surrogate: bool = False
+    surrogate_kind: str = "linear"          # "linear" (d->K) or "mlp" (d->h->K)
+    surrogate_hidden: int = 0               # h; required > 0 for surrogate_kind="mlp"
+    surrogate_kl_direction: str = "forward"  # "forward" = KL(exact || head)
+    surrogate_detach_input: bool = True     # keep the head off the backbone's gradient path
+    surrogate_init_std: float = 0.01
+    surrogate_track_agree: bool = True      # log surrogate_topk_agree / surrogate_kl
+    # --- sparse selection (2026-09-19). Default off: the head is dense-only until asked. ---
+    # the head becomes the module's single cheap all-K router (overrides _proxy_energies), so it
+    # drives NOMINATION in _forward_sparse and (with proxy_route) selection in _forward_fused
+    surrogate_replaces_proxy: bool = False
+    # release the rank-r proxy tensors, which are then never read, from model.parameters()
+    surrogate_free_proxy: bool = True
+    # deliberately accept renormalize_topk: false (the head completes the softmax denominator
+    # over the K-p experts it never evaluated). Needed by the p = n_experts exactness self-test.
+    surrogate_sparse_allow_proxy_denominator: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        assert self.mlp_type == "EnergyFF_SurrogateBoltzmannMoE"
+        assert self.expert_kind in ("w1w2", "hopfield")
+        assert self.n_experts >= 2
+        assert self.intermediate_size % self.n_experts == 0, (
+            f"intermediate_size ({self.intermediate_size}) must be divisible by "
+            f"n_experts ({self.n_experts})"
+        )
+        assert self.temperature > 0
+        assert self.repulsion_form in ("squared", "abs", "hinge", "signed")
+        assert self.routing_norm in ("none", "zscore", "sqrt_width")
+        assert self.hopfield_grad_scale in ("mean", "inv_sqrt", "sqrt_consistent")
+        assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
+        assert self.proxy_mu_convention in ("legacy", "pre_mu")
+        # the head's own
+        assert self.surrogate_kind in ("linear", "mlp")
+        assert self.surrogate_kl_direction in ("forward", "reverse")
+        assert self.surrogate_coef >= 0.0
+        assert self.surrogate_init_std > 0.0
+        if self.surrogate_kind == "mlp":
+            assert self.surrogate_hidden > 0, (
+                "surrogate_kind='mlp' needs surrogate_hidden > 0"
+            )
+        # Mirrors of the mixin's build-time asserts, at CONFIG PARSE time -- before any GPU is
+        # allocated. Every one of them is reachable only with surrogate_* fields set, so a
+        # config that does not use the head is unaffected.
+        assert not self.sparse_backproj, (
+            "sparse_backproj is untested with the surrogate head and is redundant with "
+            "sparse_forward"
+        )
+        assert self.surrogate_replaces_proxy or not self.sparse_forward, (
+            "sparse_forward with the surrogate head needs surrogate_replaces_proxy: true -- "
+            "_forward_sparse never calls _route, so without it the head is computed and then "
+            "IGNORED (a silent no-op). With it the head is the cheap all-K router: it NOMINATES "
+            "sparse_candidates experts and the exact energies of those re-rank to top_k."
+        )
+        if self.surrogate_replaces_proxy:
+            assert not self.use_surrogate, (
+                "surrogate_replaces_proxy and use_surrogate are mutually exclusive: "
+                "use_surrogate hands the head's pseudo-energies to _route, i.e. the head would "
+                "set the mixture WEIGHTS (a Switch-style gate). Use proxy_route: true for "
+                "'head selects, exact energy weights' in the dense path."
+            )
+            assert self.proxy_mu_convention == "pre_mu", (
+                "surrogate_replaces_proxy requires proxy_mu_convention: pre_mu, so the dense "
+                "phase and the sparse phase distil the head against the SAME (pre-mu) "
+                "correspondence and mu is not counted twice on the selection path."
+            )
+            assert self.proxy_iters == 1, (
+                "proxy_iters > 1 indexes the rank-r proxy's per-iteration tensors, which the "
+                "head override never reads -- it would be a silent no-op."
+            )
+            if self.sparse_forward:
+                _p = self.sparse_candidates or int(self.top_k)
+                assert (self.renormalize_topk or _p == self.n_experts
+                        or self.surrogate_sparse_allow_proxy_denominator), (
+                    "sparse_forward + surrogate_replaces_proxy with renormalize_topk: false "
+                    "completes the softmax denominator from the HEAD over the K-p experts it "
+                    "never evaluated (measured: wikitext bits/byte 1.1161 -> 3.4346), and lets "
+                    "lm_loss train the head directly. Set renormalize_topk: true, or "
+                    "surrogate_sparse_allow_proxy_denominator: true to accept it deliberately."
+                )
 
 
 class _SurrogateBoltzmannMoEMLPArgs(BaseArgs):
