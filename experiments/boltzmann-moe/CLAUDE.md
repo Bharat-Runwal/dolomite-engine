@@ -384,6 +384,23 @@
 > because a row was misaligned, and `avg9`/`avg10`/`Avg11` figures differing by ~3pp were mixed
 > in one table because nobody said which convention each row used.
 
+> ## 📐 WIDE TABLES GO IN `\resizebox` — AND `graphicx` MUST BE LOADED
+>
+> Any table with **7 or more columns overflows the ICLR text width** and LaTeX will let it run into
+> the margin rather than error. Wrap every such `tabular` in
+> `\resizebox{\textwidth}{!}{% ... %}` (note the trailing `%` on both lines, or the box picks up
+> stray spaces).
+>
+> **`\resizebox` comes from `graphicx`, and the ICLR template does NOT load it** — the two
+> `\usepackage{graphicx}` lines in `iclr2027_conference.tex` are inside COMMENTS. Adding a
+> `\resizebox` without `\usepackage{graphicx}` in `main.tex` fails with `Undefined control
+> sequence`, and since `pdflatex` cannot run in this environment (`eso-pic.sty` is missing, it fails
+> on an unmodified tree) that error is only discovered on Overleaf. It is loaded as of 2026-09-20 —
+> do not remove it.
+>
+> Find unwrapped wide tables by counting `l`/`c`/`r`/`p` in each `\begin{tabular}{...}` spec and
+> checking whether `resizebox` appears in the preceding ~700 characters.
+
 > ## ⚠ METRIC CONVENTION — READ BEFORE QUOTING ANY "Avg" IN THIS FILE
 >
 > **CANONICAL (2026-09-14 onward): `Avg11`**, the paper `tab:scaling` recipe, the
