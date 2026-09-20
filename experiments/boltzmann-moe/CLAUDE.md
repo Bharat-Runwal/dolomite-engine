@@ -1,5 +1,39 @@
 # Boltzmann MoE — Experiment Guide
 
+> ## 💾 TOKEN MILESTONES: VERIFY HOURLY THAT THE MACHINERY IS ALIVE. LOSS IS PERMANENT.
+>
+> **User instruction, 2026-09-20: "it is very important to check that the milestone script is still
+> running every hour."** A missed milestone CANNOT be recovered — `max_to_keep: 2` has already
+> deleted the weights. On 2026-09-20 the 8B and 16B anchors of five arms were found gone, because
+> the milestone cadence had been a **session-scoped `CronCreate` job that died silently with its
+> session**. At `save_interval: 200` + `max_to_keep: 2`, a 400M checkpoint survives only ~400 steps
+> ≈ **17 minutes**, so there is almost no margin.
+>
+> **Primary mechanism is now IN THE TRAINER** — `SaveArgs.token_milestones_b` (default
+> `[8, 16, 24, 32]`) → `_preserve_token_milestones()` in `lm_engine/checkpointing/__init__.py`, which
+> runs in the same save call that wrote the checkpoint, BEFORE pruning. It uses the EXACT
+> tokens/step (`WORLD_SIZE x mbs x ga x seq`) and captures the first checkpoint at or after each
+> crossing, so it cannot race pruning and needs no tolerance heuristic. Hard links cost no extra
+> space until pruning would have removed the original.
+>
+> **Backstop** is `scripts/milestone_ckpt_backup.sh`, now invoked every cycle by
+> `watchdog/watchdog_loop.sh` — which SELF-RESUBMITS and therefore outlives any session. It is a
+> bridge for arms already running from before the in-trainer change; drop it once every live arm has
+> restarted.
+>
+> **Hourly check — all three must hold:**
+> ```bash
+> bjobs -J boltz_moe_watchdog                       # must be RUN
+> tail -5 experiments/boltzmann-moe/scripts/watchdog/watchdog.log
+> find experiments/boltzmann-moe/results -type d -name "tok*B_step*_actual*" | wc -l
+> ```
+>
+> **NEVER trust a milestone directory's NAME.** Until 2026-09-20 the backup script picked the
+> earliest *surviving* checkpoint at or after the target, so once an arm ran on it hard-linked
+> `tok8B_step122000_actual31.98B` — a directory named for 8B holding **32B** weights. 15 such
+> anchors existed and were renamed to `orphan_*`. Always read the `_actualXX.XXB` suffix, and treat
+> an anchor whose actual is more than a few percent off its nominal as invalid.
+
 > ## 🚦 NEW CONFIGS: CONFIRM WITH THE USER **BEFORE** SUBMITTING. NO EXCEPTIONS.
 >
 > **User instruction, 2026-09-20.** For any NEW run config (not a plain resume of a config that has
@@ -25,10 +59,12 @@
 > Report those five, wait, then submit. A wrong datamix or a wrong `layer_iterations` is not
 > recoverable — it is a wasted multi-day run against a deadline.
 
-> ## ⏱ WATCH EVERY NEW RUN OR RESUME: EVERY MINUTE FOR 10 MIN, THEN EVERY 30 MIN
+> ## ⏱ WATCH EVERY RUN: 1 MIN x 10, THEN 5 MIN FOR THE FIRST HOUR, THEN 30 MIN
 >
-> **User instruction, 2026-09-20.** After ANY submission (new run OR resume), check at ~1-minute
-> intervals for the first 10 minutes, then every 30 minutes.
+> **User instruction, 2026-09-20 (revised).** After ANY submission (new run OR resume):
+> **every minute for the first 10 minutes, then every 5 minutes until the run is 1 hour old,
+> then every 30 minutes.** The 5-minute band exists because arms have died at 15-40 minutes
+> in -- past the first-10-minute window but long before a 30-minute check would notice.
 >
 > **THE STEP LINES GO TO STDERR, NOT STDOUT.** `$HOME/bsub_logs/<job>_<id>.stderr` carries
 > `step = N, train-loss = ...`; stdout holds only the launcher echo, `ninja:` and the NCCL banner.

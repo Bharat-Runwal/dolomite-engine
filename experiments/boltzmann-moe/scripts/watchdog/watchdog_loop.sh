@@ -227,6 +227,20 @@ INNER
 }
 
 while true; do
+    # ---- TOKEN MILESTONE BACKUP (added 2026-09-20) -------------------------------------------
+    # Runs here, inside the watchdog, because the watchdog SELF-RESUBMITS and therefore survives
+    # the death of any Claude session. The previous milestone cadence was a session-scoped
+    # CronCreate job: it died silently with its session, and by the time anyone looked, the 8B and
+    # 16B checkpoints of five arms had been pruned and were UNRECOVERABLE. At save_interval 200 with
+    # max_to_keep 2 a 400M checkpoint survives only ~400 steps (~17 min), so nothing less frequent
+    # than this 5-minute loop is safe.
+    #
+    # NOTE this is now a BRIDGE, not the primary mechanism. The trainer itself preserves milestones
+    # at save time (SaveArgs.token_milestones_b -> _preserve_token_milestones), which is exact and
+    # cannot race pruning. This covers arms that are ALREADY RUNNING from before that change and so
+    # have not picked it up yet; it can be dropped once every live arm has restarted.
+    bash "$DIR/../milestone_ckpt_backup.sh" 2>&1 | grep -E "hard-linked|FAILED" >> "$LOG"
+
     # Self-walltime check
     elapsed=$(($(date +%s) - START_TS))
     remaining=$((WALLTIME_SEC - elapsed))

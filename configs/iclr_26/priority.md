@@ -53,6 +53,24 @@ unmeasured. This is the gate on P3.1/P3.2 (whether 400M gets rebuilt on w1w2).
 
 ---
 
+**P0.4 ⚠ NEW 2026-09-20 — SEEDS. Two headline margins are now smaller than the unmeasured noise.**
+`abl_D` (six dense GPT layers, NO MoE, NO energy block, NO recurrence) scored **Avg11 45.55 / ppl
+39.94** at 32.00B — the best 134M arm on both, at **5.2% FEWER parameter-applications per token**
+than the energy hybrid (44.82 / 41.06). So the two claims the paper would rest on are:
+
+  * §14.1: the FLOP-matched learned gate leads the energy router by **0.61pp**;
+  * §15.7: **no router at all** leads both, by **0.73pp** over the hybrid and 0.12pp over Switch.
+
+**Both are single-seed, and the multi-seed arms have been PAUSED in `watchdog_jobs.conf` since
+2026-09-12, so seed spread at this scale is UNQUANTIFIED.** A sub-1pp ordering among three arms
+cannot be asserted without it, and this is not a point in favour of either side — it makes the
+Switch-leads sentence as unsupported as the dense-leads one.
+
+A 134M arm costs ~5.3 h at 4 GPUs (abl_D's measured wall clock), so **2 extra seeds of the hybrid
+and of `abl_B_134M_6G1x6S` is ~21 GPU-hours x 4 and fits before Sep 24.** That buys an error bar on
+the single comparison the paper is actually about. Prefer it over any new architecture arm.
+If the seeds are not run, the paper must state the ordering as within-noise rather than as a result.
+
 ## P1 — needed for the ablation section to be honest
 
 **P1.1 `abl_D_134M_6G_dense_isototal` — 116,000/122,070 (95%), RUN.** ~6,000 steps.

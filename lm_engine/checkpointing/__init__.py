@@ -2,8 +2,10 @@
 # Copyright (c) 2025, Mayank Mishra
 # **************************************************
 
+import glob
 import json
 import logging
+import math
 import os
 import random
 import shutil
@@ -191,6 +193,9 @@ def save_checkpoint(
 
         log_rank_0(logging.INFO, f"checkpoint saved at {iteration}")
 
+        # Preserve token-milestone checkpoints BEFORE pruning can remove them.
+        run_rank_n(_preserve_token_milestones)(args, iteration)
+
         # Prune old checkpoints if max_to_keep is set
         max_to_keep = args.save_args.max_to_keep
         if max_to_keep is not None and max_to_keep > 0:
@@ -208,6 +213,68 @@ def save_checkpoint(
         if os.path.exists(os.path.join(args.save_args.save_path, _KILLSWITCH)):
             ProcessGroupManager.destroy_process_groups()
             exit()
+
+
+def _tokens_per_step(args: TrainingArgs) -> int | None:
+    """Exact tokens/step: ``WORLD_SIZE x micro_batch_size x gradient_accumulation_steps x seq``.
+
+    GPUS IS NOT IN THE CONFIG -- it comes from the launcher -- which is why every previous attempt
+    to recover a run's token budget after the fact was guesswork. ``WORLD_SIZE`` is set by torchrun,
+    so at save time the figure is exact. Mirrors the computation `pretrain.py` logs to wandb.
+    """
+    seq = args.datasets[0].class_args.get("sequence_length") if args.datasets else None
+    if not seq:
+        return None
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    tp = args.training_parameters
+    return world * tp.micro_batch_size * tp.gradient_accumulation_steps * int(seq)
+
+
+def _preserve_token_milestones(args: TrainingArgs, iteration: int) -> None:
+    """Hard-link this checkpoint into ``milestones/`` if it is the first one past a token milestone.
+
+    Called BEFORE pruning, in the same save call that wrote ``global_step{iteration}``, so the
+    checkpoint is guaranteed to still exist and no tolerance heuristic is needed: this checkpoint is
+    the first at or after milestone ``m`` exactly when
+    ``iteration >= want > iteration - save_interval``.
+    """
+    milestones = args.save_args.token_milestones_b
+    if not milestones:
+        return
+    tps = _tokens_per_step(args)
+    if not tps:
+        return
+    base = args.save_args.save_path
+    src = os.path.join(base, f"global_step{iteration}")
+    if not os.path.isdir(src):
+        return
+    mdir = os.path.join(base, "milestones")
+    interval = max(1, int(args.save_args.save_interval or 1))
+
+    for m in milestones:
+        # FLOOR, not ceil. 32e9/262144 = 122070.3125 while the 134M arms END at step 122070, so
+        # ceil() makes the final milestone unreachable and it is silently never captured -- the
+        # exact bug the old cron script had to fix in 2026-09-18. Floor costs at most a fraction
+        # of one step of tokens.
+        want = int(float(m) * 1e9 / tps)
+        # only the FIRST checkpoint at or after the crossing, and never re-link one already taken
+        if not (iteration >= want > iteration - interval):
+            continue
+        if glob.glob(os.path.join(mdir, f"tok{float(m):g}B_*")):
+            continue
+        actual = iteration * tps
+        dst = os.path.join(mdir, f"tok{float(m):g}B_step{iteration}_actual{actual / 1e9:.2f}B")
+        try:
+            os.makedirs(mdir, exist_ok=True)
+            # hard links: no extra bytes until pruning would have removed the original
+            shutil.copytree(src, dst, copy_function=os.link, dirs_exist_ok=False)
+            log_rank_0(
+                logging.INFO,
+                f"token milestone {float(m):g}B preserved: step {iteration} "
+                f"({actual / 1e9:.2f}B actual) hard-linked to {os.path.basename(dst)}",
+            )
+        except Exception as e:  # never let bookkeeping kill a training run
+            log_rank_0(logging.WARN, f"could not preserve {float(m):g}B milestone at {iteration}: {e}")
 
 
 def load_checkpoint_for_training(

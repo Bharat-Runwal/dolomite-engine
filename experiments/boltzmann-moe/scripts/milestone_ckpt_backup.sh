@@ -40,7 +40,11 @@ def gpus_for(arm, mbs, ga):
             return round(tps/(mbs*ga*4096))
     return None
 
-for f in sorted(glob.glob('configs/cmix/cmix*.yml')):
+# GLOB WIDENED 2026-09-20: the abl_* arms live in configs/iclr_26/ablations/ and were getting NO
+# milestone anchors at all -- the same omission that made auto_eval skip abl_B and made the health
+# check miss abl_B_400M. Any new config tree must be added here too.
+for f in sorted(glob.glob('configs/cmix/cmix*.yml')
+                + glob.glob('configs/iclr_26/**/*.yml', recursive=True)):
     arm = os.path.basename(f)[:-4]
     if any(t in arm for t in ('bsprobe','feas','fixtest','tcptest','bisect','smoke','spmddiag')):
         continue
@@ -52,6 +56,8 @@ for f in sorted(glob.glob('configs/cmix/cmix*.yml')):
     g = gpus_for(arm, tp['micro_batch_size'], tp['gradient_accumulation_steps'])
     if not g: continue
     tps = g * tp['micro_batch_size'] * tp['gradient_accumulation_steps'] * 4096
+    # one save_interval is the largest legitimate gap between a milestone and its checkpoint
+    save_interval = int((c.get('save_args') or {}).get('save_interval') or 0) or 2000
     have = sorted(int(m.group(1)) for d in glob.glob(f'{sp}/global_step*')
                   if (m := re.search(r'global_step(\d+)$', d)))
     if not have: continue
@@ -73,6 +79,22 @@ for f in sorted(glob.glob('configs/cmix/cmix*.yml')):
         if not cand: continue
         s = min(cand)
         tok = s * tps
+        # ---- TOLERANCE GUARD (2026-09-20). WITHOUT THIS THE ANCHOR NAME LIES. ----------------
+        # `have` only holds the checkpoints STILL ON DISK, and max_to_keep: 2 prunes everything
+        # else, so once an arm runs well past a milestone `min(cand)` is not "the checkpoint at
+        # the milestone" -- it is simply the oldest surviving checkpoint. Before this guard the
+        # script hard-linked `tok8B_step122000_actual31.98B` and
+        # `tok16B_step57000_actual29.88B`: directories NAMED for 8B/16B holding 32B/30B weights.
+        # Anything evaluating milestones/tok8B_* would then report a 32B number as an 8B number,
+        # which is precisely the class of error that already put a wiki-ppl in a GSM8K column.
+        # An unpruned checkpoint can be at most ONE save_interval past the crossing step, so
+        # anything beyond that means the real milestone is GONE. Say so; do not invent an anchor.
+        if s - want > max(save_interval, 1):
+            print(f'  {arm}: milestone {tgt/1e9:.0f}B MISSED -- earliest surviving ckpt is step '
+                  f'{s} ({tok/1e9:.2f}B), {s-want} steps past the crossing step {want} '
+                  f'(save_interval {save_interval}). Checkpoint was pruned; NOT linking a '
+                  f'mislabelled anchor.')
+            continue
         dst = f'{mdir}/tok{tgt/1e9:.0f}B_step{s}_actual{tok/1e9:.2f}B'
         os.makedirs(mdir, exist_ok=True)
         r = subprocess.run(['cp','-al',f'{sp}/global_step{s}',dst], capture_output=True, text=True)

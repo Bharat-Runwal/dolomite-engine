@@ -115,6 +115,24 @@ class SaveArgs(BaseArgs):
     save_interval: int = None
     # keep only the N most recent checkpoints (None = keep all)
     max_to_keep: int | None = None
+    # Token milestones (in BILLIONS) whose checkpoint must survive `max_to_keep` pruning, so
+    # iso-token evaluation stays possible for the whole run. At each save the trainer computes the
+    # EXACT tokens/step (WORLD_SIZE x micro_batch_size x gradient_accumulation_steps x
+    # sequence_length) and hard-links the FIRST checkpoint at or after each crossing into
+    # <save_path>/milestones/tok<N>B_step<it>_actual<T>B.
+    #
+    # This replaces a post-hoc cron script that INFERRED tokens/step from log lines
+    # (billion_tokens_per_day * 1e9 * step_time / 86400) and then picked the earliest SURVIVING
+    # checkpoint at or after the target. Both halves were unsound: the inference was a median over
+    # noisy 1 s-resolution timestamps, and with max_to_keep: 2 the "earliest surviving" checkpoint
+    # drifts arbitrarily far past the target once the run moves on -- it produced directories named
+    # tok8B_* holding 32B weights (2026-09-20). Doing it here is exact and cannot race pruning,
+    # because the link is made in the same call that wrote the checkpoint.
+    #
+    # Hard links cost no extra space while the original still exists; they only start occupying
+    # space once pruning would have removed it, which is the entire point. Bounded by
+    # len(token_milestones_b) checkpoints per run.
+    token_milestones_b: list[float] | None = [8, 16, 24, 32]
     # whether to save optimizer
     save_optimizer: bool = True
     # whether to use async checkpointing
