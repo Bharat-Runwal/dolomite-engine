@@ -78,6 +78,63 @@ swiglu MoE block. **Run a ~150-step smoke test before any long run.**
 
 ---
 
+### C. Boltzmann MoE → BASE (non-MoE) EGPT energy FFN, iso-active and iso-FLOP
+Isolates **the mixture itself**. Same skeleton (`6G1x6E`), same energy attention, same
+`psd_anti` projection, same 6x recurrence, same datamix, same schedule, same 32.0B budget. The
+energy block's FFN goes from `EnergyFF_BoltzmannMoE` (K=16 hopfield experts, top-2, Sinkhorn,
+sparse proxy selection) to `EnergyFF_Hopfield` — one monolithic hopfield energy FFN, no experts,
+no router, no partition function, no balancing, no sparsity.
+
+Answers: **does routing over a mixture buy anything over a single energy FFN of the same
+per-token size**, or is the hybrid's advantage just "an energy block is present"? This is the
+`denseEGPT` row anticipated in section 3, built at the **iso-active** choice.
+
+- [x] **134M** — structure `6G1x6E`, single hopfield FFN **I = 2,472** — config:
+      **`abl_E_134M_6G1x6E_baseEGPT.yml`** — launched 2026-09-20, job 1796776, 4 GPUs
+      (mbs 4 x ga 4 = 262,144 tok/step), preemptable
+- [ ] **400M** — hold until the 400M hybrid/sandwich pair reports; sizing would be
+      `I = k x I_e + router/d` at K=32 k=2 I_e=5,871 — config: `________`
+
+**Verified against the reference with `energy_ff_paramcount.audit_config` AND a meta-device
+build (they agree to the byte). Columns: parameters in millions; FLOPwt = millions of
+parameter-applications per token. Both rows 134M at 32.0B tokens, 262,144 tok/step.**
+
+| arm | TOTAL | ACTIVE | FLOPwt |
+|---|---|---|---|
+| `cmix_134M_hybrid_32B_sparse` (reference) | 134.253M | 123.243M | 141.720M |
+| `abl_E_134M_6G1x6E_baseEGPT` | 123.241M | **123.241M** (-0.002%) | **141.708M** (-0.009%) |
+
+TOTAL is 8.2% lower **by construction and that is the point**: the MoE stores 16 experts and
+applies 2, so it carries 11.0M parameters it never spends on a token. This arm is iso-ACTIVE and
+iso-FLOP, deliberately NOT iso-total. Its residual -0.11% on the FFN is a *deficit*, so any win
+it posts cannot be a compute artifact.
+
+#### Why `I = 2,472` and not 2,048
+2,048 = `k x I_e` matches the active EXPERT width exactly but leaves FLOPwt **1.4% low**, because
+the MoE's 327,712 router parameters (`proxy_V`/`proxy_B`, rank 16, subspace) are applied to
+EVERY token. HANDOFF §14.1 is the cautionary tale: a 12.9% FLOP deficit in the Switch baseline
+REVERSED a headline claim. 2,472 also divides by 8 for bf16 tensor cores; 2,475 would match to
++0.012% but is odd and pads.
+
+#### `hopfield_grad_scale` WAS UNREACHABLE — code fix required (2026-09-20)
+`_EnergyFFHopfieldArgs` did not declare the field and `get_mlp_block` did not forward it, so
+`HopfieldFFEnergy` silently used `"mean"` whatever the YAML said — **consistency rule 10 in the
+wild**. At I=2,472 `"mean"` gives prefactor 0.00162 against the MoE's 0.125 at I_e=1,024, a ~77x
+weaker descent step: the regime `_hopfield_grad_prefactor`'s docstring records as "the branch was
+inert" (`||ffwd_out||` 0.005 vs `||attn_out||` 18.53). **Without the fix this ablation would have
+compared a live MoE branch against a dead single-FFN branch and "proved" the MoE wins.** Fixed in
+`config/mlp.py` (field + assert) and `mlp_blocks/__init__.py` (forward it); default stays
+`"mean"`, and no pre-existing config used `EnergyFF_Hopfield`, so nothing else is affected.
+Resolution verified on the built model: `transformer.h.6.ffwd` I=2472 grad_scale=sqrt_consistent.
+
+#### What necessarily differs (intrinsic to removing the mixture)
+No expert repulsion (a pairwise term; one FFN has no pairs), no Sinkhorn dual / temperature /
+`e_sign` (no selection to bias), no proxy router and no sparse path (nothing to select among, so
+the block is dense). `_EnergyFFHopfieldArgs` sets `extra="forbid"`, so a leftover MoE key is a
+hard parse error, not a silent no-op — which is why they are deleted rather than zeroed.
+
+---
+
 ## 2. Consistency requirements — every ablation config MUST match its reference
 
 Verified by diffing against the reference config; account for EVERY differing line.
@@ -112,6 +169,10 @@ Verified by diffing against the reference config; account for EVERY differing li
   makes the dense FFN tiny (no K to amortise: iso-active forces I ~ k*I_e), matching *total*
   gives it ~8x the active params. These answer different questions; both rows may be needed,
   clearly labelled.
+  **PARTLY DONE 2026-09-20:** the iso-active row now exists on the HYBRID skeleton as ablation C
+  (`abl_E_134M_6G1x6E_baseEGPT`). The iso-TOTAL counterpart (dense FFN at I ~ K*I_e = 16,384,
+  ~8x the active params, so ~+9.6% FLOPwt) is still unbuilt and is the row that would test
+  "is the expert BANK worth storing"; note it cannot be iso-FLOP at the same time.
 - **W1W2 experts under the Boltzmann router** (at least one 134M arm). The h1-series wins were
   all w1w2; every current arm is hopfield. `sparse_forward` is hopfield-only
   (`energy_ff.py:938`), so this is **dense unless the sparse path is extended** — extension in

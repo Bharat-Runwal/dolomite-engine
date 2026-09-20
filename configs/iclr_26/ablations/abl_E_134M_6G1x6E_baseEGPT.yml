@@ -1,0 +1,166 @@
+# abl_E_134M_6G1x6E_baseEGPT -- ABLATION E: the Boltzmann MoE replaced by the BASE (non-MoE) EGPT energy FFN.
+# *** INTENDED GPU COUNT: 4 ***   (mbs 4 x ga 4 x 4096 x 4 GPUs = 262,144 tok/step)
+#
+# WHAT THIS ISOLATES. Identical skeleton to cmix_134M_hybrid_32B_sparse: 6 GPT blocks + ONE
+# energy block applied 6x (6G1x6E), same energy_attention, same psd_anti projection, same
+# recurrence, same datamix, same schedule, same token budget. The ONLY change is inside the
+# energy block's FFN: `EnergyFF_BoltzmannMoE` (K=16 hopfield experts, top-2, Sinkhorn, sparse
+# proxy selection) -> `EnergyFF_Hopfield`, a SINGLE monolithic hopfield energy FFN with no
+# experts, no router, no partition function, no balancing, no sparsity.
+# It answers: does routing over a mixture buy anything over one energy FFN of the same
+# per-token size, or is the hybrid's advantage just "an energy block is present"?
+#
+# SIZING -- iso-ACTIVE-PARAMETER and iso-FLOP-weight (energy_ff_paramcount.audit_config):
+#   MoE energy block, per token:  experts 2/16 x 16,384 x 768 = 1,572,864
+#                                 + router (proxy_V/B, rank 16, subspace) =   327,712
+#                                 = 1,900,576 active MLP params
+#   this arm:  intermediate_size 2472 x 768               = 1,898,496  (-0.11%)
+# 2472 is chosen over the "obvious" 2048 deliberately. 2048 = k x I_e matches the ACTIVE
+# EXPERT width exactly but leaves FLOPwt 1.4% LOW, because the MoE's 327,712 router params are
+# applied to EVERY token. Section 14.1 of HANDOFF is the cautionary tale: a 12.9% FLOP deficit
+# in the Switch baseline REVERSED a headline claim. 2472 is also divisible by 8 (bf16 tensor
+# cores); 2475 would match to +0.012% but is odd and pads.
+# The residual -0.11% is a DEFICIT for this arm, so any win it posts is not a compute artifact.
+#
+# hopfield_grad_scale: sqrt_consistent IS LOAD-BEARING AND WAS UNREACHABLE BEFORE 2026-09-20.
+# `_EnergyFFHopfieldArgs` did not declare the field and `get_mlp_block` did not forward it, so
+# HopfieldFFEnergy silently used "mean" whatever the YAML said (pre-flight rule 7). At I=2472
+# "mean" gives prefactor 0.00162 against the MoE's 0.125 at I_e=1024 -- a ~77x weaker descent
+# step, which is the regime `_hopfield_grad_prefactor`'s docstring records as "the branch was
+# inert" (||ffwd_out|| 0.005 vs ||attn_out|| 18.53). Without the fix this ablation would have
+# compared a live MoE branch against a dead single-FFN branch and "proved" the MoE wins.
+# Note the prefactor rule is matched, not the numeric value: sqrt_consistent = 4/sqrt(I) is
+# evaluated at THIS block's width (0.0805 at 2472) exactly as the MoE evaluates it per expert.
+#
+# WHAT NECESSARILY DIFFERS (intrinsic to removing the mixture, not sloppiness):
+#   * no expert repulsion -- it is a pairwise term between experts; one FFN has no pairs.
+#   * no Sinkhorn/balance dual, no temperature, no e_sign -- there is no selection to bias.
+#   * no proxy router and no sparse path -- nothing to select among, so the block is DENSE.
+# `_EnergyFFHopfieldArgs` sets extra="forbid", so any MoE key left behind is a hard parse
+# error rather than a silent no-op. That is why they are deleted rather than zeroed.
+#
+# 122,070 steps x 262,144 tok/step = 32.00B, iso-token with every paper arm.
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 6
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 7
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - &id001
+      sequence_mixer_type: softmax_attention
+      num_attention_heads: 12
+      num_key_value_heads: 12
+      add_bias: false
+      attention_multiplier: 0.125
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 12
+      num_key_value_heads: 12
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - &id002
+      mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2048
+      add_bias: false
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - *id002
+    - mlp_type: EnergyFF_Hopfield
+      intermediate_size: 2472
+      hopfield_grad_scale: sqrt_consistent
+      gelu_grad_method: sigmoid
+      activation_function: gelu
+      add_bias: false
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr26_abl/abl_E_134M_6G1x6E_baseEGPT
+  save_interval: 2000
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: abl_E_134M_6G1x6E_baseEGPT
+training_parameters:
+  num_training_steps: 122070
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 120070
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
