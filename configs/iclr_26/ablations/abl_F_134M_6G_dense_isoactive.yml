@@ -7,6 +7,12 @@
 # (+0.053%). Since it is dense, total = active = FLOPwt, so it is simultaneously iso-active AND
 # iso-FLOP-weight with the hybrid's ACTIVE -- but note the hybrid's FLOPwt is 141.7M because its
 # block is applied 6x, so this arm still spends 13% fewer parameter-applications per token.
+# HEAD COUNT IS TIER-SPECIFIC: 12 heads at d=768, NOT 16. head_dim = d / num_attention_heads must
+# be >= rope_dim (64), and 768/16 = 48 < 64 raises
+#     ValueError: rope_dim should be less than head_dim
+# Job 1798100 died on this in 55 s because the first build of this file reused the 400M attention
+# template (16 heads, correct only at d=1024 where 1024/16 = 64). Attention params are 4*d*d and do
+# NOT depend on the head count, so the I=2320 sizing is unaffected.
 # *** INTENDED GPU COUNT: 4 ***  mbs 4 x ga 4 x 4096 x 4 = 262,144 tok/step; 122,070 steps = 32.0B
 datasets:
 - class_name: MegatronDataset
@@ -59,33 +65,33 @@ model_args:
     max_position_embeddings: 4096
     sequence_mixer_blocks:
     - sequence_mixer_type: softmax_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     - sequence_mixer_type: softmax_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     - sequence_mixer_type: softmax_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     - sequence_mixer_type: softmax_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     - sequence_mixer_type: softmax_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     - sequence_mixer_type: softmax_attention
-      num_attention_heads: 16
-      num_key_value_heads: 16
+      num_attention_heads: 12
+      num_key_value_heads: 12
       add_bias: false
       attention_multiplier: 0.125
     mlp_blocks:

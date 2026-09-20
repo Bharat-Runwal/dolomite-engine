@@ -99,6 +99,28 @@
 > (`billion_tokens_per_day * 1e9 * step_time / 86400`). After that, every 30 min: the step counter
 > is still advancing and the arm is still `RUN`.
 >
+> **A FROZEN STEP COUNTER IS NOT NECESSARILY A HANG — CHECK CPU TIME BEFORE KILLING ANYTHING.**
+> `abl_E` (job 1798097) sat at step 4,080 for 9 minutes with `STAT=RUN` on 2026-09-20, which is the
+> documented wedge signature, and nearly got killed. It had actually been REQUEUED by LSF: the new
+> process resumed from `global_step4000`, so the step counter went BACKWARDS (4,080 -> 4,010) and
+> then climbed again. Distinguishing the two takes one command:
+>
+> ```bash
+> bjobs -l <jobid> | tr -d '\n' | grep -oE "CPU time used is [^;]*|MEM: [^;]*"
+> grep -c 'Setting OMP_NUM_THREADS' $HOME/bsub_logs/<name>_<jobid>.stderr   # >1 = restarted
+> ```
+>
+> * **RESTART**: CPU time is small and RISING fast from ~0, memory climbing from ~2 GB, the step
+>   number JUMPS BACK to the last checkpoint, and the stderr holds more than one
+>   `Setting OMP_NUM_THREADS` banner. Nothing to do — it is resuming and loses only the steps since
+>   the last save.
+> * **HANG**: CPU time is large and FLAT, memory flat at full size, the step number does not move,
+>   and there is exactly one process banner. That is the case to kill and resubmit.
+>
+> Killing a requeued-but-healthy job throws away whatever it has redone since the checkpoint, and if
+> its first checkpoint has not been written yet it restarts from ZERO — that is how `abl_E` lost
+> 1,770 steps earlier the same day.
+>
 > `STAT=RUN` IS NOT PROGRESS. Five arms were found dead on 2026-09-20 and a sixth
 > (`abl_B_400M_6G1x6S`) stayed dead through the first sweep because it was not in
 > `scripts/health_check_arms.py`'s list. The authoritative progress source is
