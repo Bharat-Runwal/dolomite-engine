@@ -39,7 +39,25 @@
 > tail -3 $HOME/bsub_logs/<name>_<jobid>.stderr        # step lines live HERE
 > ```
 >
-> What to confirm in the first 10 minutes: `STAT=RUN`; a first `step =` line appeared; the step
+> **🔴 CHECK FOR A CPU FALLBACK FIRST — IT IS SILENT AND BURNS THE WHOLE WALLTIME.** Caught
+> 2026-09-20 on `abl_E` (job 1796776, host `p2-r03-n1`): CUDA init failed on the host, and the
+> trainer **did not abort** — it built `DeviceMesh((pp=1, ddp=4, fsdp=1, tp=1), 'cpu', ...)` and
+> proceeded to train a 134M model ON CPU. LSF showed `RUN`, 2848 s of CPU time and 69.5 GB
+> resident, and **zero steps in 20 minutes**, which is indistinguishable from a slow compile.
+> It would have held 4 GPUs for 24 h and produced nothing. This is the same host-level
+> `CUDA unknown error` documented in §14.2a, but reached WITHOUT any suspension.
+>
+> ```bash
+> e=$HOME/bsub_logs/<name>_<jobid>.stderr
+> grep -m1 "DeviceMesh" $e        # must NOT say 'cpu'
+> grep -c "CUDA unknown error\|No CUDA runtime is found" $e   # must be 0
+> ```
+>
+> If it says `'cpu'`: `bkill` and resubmit with `SUSPECT_HOSTS="<host>"` to avoid re-drawing that
+> host (`bjobs -o exec_host <jobid>` names it). Promotion to `BAD_HOSTS` needs TWO faults on the
+> same host; one fault goes to `SUSPECT_HOSTS` for the retry only.
+>
+> What else to confirm in the first 10 minutes: `STAT=RUN`; a first `step =` line appeared; the step
 > number CONTINUED FROM THE CHECKPOINT (not 0 — a missing `load_args` silently restarts from
 > scratch); and tokens/step is what you intended
 > (`billion_tokens_per_day * 1e9 * step_time / 86400`). After that, every 30 min: the step counter
