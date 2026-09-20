@@ -25,10 +25,32 @@ MEM=${5:-32G}
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/experiments/paths.sh"
 mkdir -p "$HOME/bsub_logs"
 
+# HOST EXCLUSION (added 2026-09-20). Until today this submitter passed NO -R select at all, so
+# every eval could land on a host whose CUDA init is broken. That is not a theoretical risk: the
+# gsm8k half of the w1w2-sparse eval died TWICE on p5-r09-n1 with
+#     RuntimeError: CUDA unknown error ... changing env variable CUDA_VISIBLE_DEVICES
+# and BOTH TIMES LSF REPORTED THE JOB AS `DONE`, because the inner script does not propagate the
+# python exit status. An eval that "completed" with no results file is the signature -- always
+# confirm the output file exists, never trust DONE (HANDOFF 15.2c).
+# Same promotion bar as submit_train.sh: TWO faults on one host for BAD_HOSTS, one fault goes to
+# SUSPECT_HOSTS for a retry only.
+#   p5-r09-n1: two CUDA-init failures, evals 1797724 and 1797745 (2026-09-20).
+#   p4-r10-n4: NVLink/NVSwitch fabric faults, error 401 (carried over from submit_train.sh).
+BAD_HOSTS="${BAD_HOSTS-p5-r09-n1 p4-r10-n4}"
+# p2-r03-n1: ONE CUDA-init failure (job 1796776 -- the trainer silently fell back to a CPU
+# DeviceMesh and trained nothing for 20 min). Not yet at the two-fault bar.
+SUSPECT_HOSTS="${SUSPECT_HOSTS-p2-r03-n1}"
+sel=""
+for h in $BAD_HOSTS $SUSPECT_HOSTS; do sel="$sel && hname!='$h'"; done
+sel="${sel# && }"
+RES=()
+[ -n "$sel" ] && RES=(-R "select[$sel]")
+
 bsub \
     -q preemptable -G grp_preemptable \
     -J "$JOB" \
     -gpu "num=${GPUS}/task:mode=exclusive_process" \
+    "${RES[@]}" \
     -n 1 -M "$MEM" -W "$WALL" \
     -o "$HOME/bsub_logs/${JOB}_%J.stdout" \
     -e "$HOME/bsub_logs/${JOB}_%J.stderr" \

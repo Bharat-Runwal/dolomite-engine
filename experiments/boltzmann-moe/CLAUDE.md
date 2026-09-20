@@ -75,6 +75,16 @@
 > is dated and later ones supersede earlier ones. This file (CLAUDE.md) carries the standing rules;
 > HANDOFF carries the findings, including the ones that overturn results quoted further down here.
 >
+> **As of section 15 (2026-09-20, later) the newest items are:** "sparse" is TWO mechanisms —
+> **sparse(proxy)** (rank-r subspace router, hopfield only) and **sparse(surrogate)** (KL-distilled
+> MLP head that nominates candidates, the only option for w1w2) — and the grid CANNOT separate them
+> from the expert form, because every hopfield arm is proxy and every w1w2 arm is surrogate (§15.1);
+> the first w1w2 number is **Avg11 44.16** against hopfield's 44.82 while using ~46% MORE compute,
+> and it is NOT a clean expert-form test (§15.1); three SILENT failure modes, including a trainer
+> that falls back to a **CPU DeviceMesh** and trains nothing while LSF says RUN (§15.2); and six
+> arms dead at once with no watchdog coverage (§15.3). Run priorities now live in
+> **`configs/iclr_26/priority.md`**.
+>
 > **As of section 14 (2026-09-20), the three things most likely to be misquoted:**
 > 1. **The Switch baseline `6G1S` is under-provisioned by 12.9% of FLOPs** — it applies its MoE block
 >    once where the energy block is applied six times. The FLOP-matched `6G1x6S` scores **45.43 Avg11
