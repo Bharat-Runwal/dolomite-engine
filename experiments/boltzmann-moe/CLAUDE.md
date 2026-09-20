@@ -1,5 +1,30 @@
 # Boltzmann MoE — Experiment Guide
 
+> ## 📕 READ `HANDOFF.md` FIRST — IT IS THE RUNNING RECORD, AND IT CONTRADICTS OLDER CLAIMS
+>
+> **`experiments/boltzmann-moe/HANDOFF.md` is the authoritative log of what has actually been
+> measured.** It is long, so read the LAST numbered section first and work backwards; each section
+> is dated and later ones supersede earlier ones. This file (CLAUDE.md) carries the standing rules;
+> HANDOFF carries the findings, including the ones that overturn results quoted further down here.
+>
+> **As of section 14 (2026-09-20), the three things most likely to be misquoted:**
+> 1. **The Switch baseline `6G1S` is under-provisioned by 12.9% of FLOPs** — it applies its MoE block
+>    once where the energy block is applied six times. The FLOP-matched `6G1x6S` scores **45.43 Avg11
+>    against the energy hybrid's 44.82**, so at iso-FLOP the learned gate LEADS by 0.61pp. Report
+>    competitive-but-behind, NEVER parity. (§14.1)
+> 2. **Every hand-computed parameter total in this project was LOW** — a swiglu MLP's `c_fc` is
+>    `2*intermediate_size`, so a dense swiglu block costs `3*d*I`; and `energy_attention` is `2*d*d`,
+>    not `4*d*d`. Use `energy_ff_paramcount.audit_config`, which matches a meta build to the byte.
+>    The claim that the 400M sandwich is iso-FLOP with the baseline is **RETRACTED**. (§14.7)
+> 3. **The 134M "sandwich" was MISLABELLED** — `5G1x6E1G` is the hybrid with the energy block one
+>    position earlier, not a thin-bread/thick-core sandwich. Block PLACEMENT costs 1.37pp, more than
+>    the routing mechanism's 0.05pp. The true `1G1x6E1G` was only built on 2026-09-20. (§14.1)
+>
+> Two operational rules earned the hard way: **never `bstop` a pending GPU job** (it invalidates
+> `CUDA_VISIBLE_DEVICES` and every parked eval dies on resume), and **an inherited `mbs`/`ga` written
+> for 8 GPUs gives HALF budget at 4 GPUs** — gate on budget, schedule, structure AND build before
+> launching, not on build alone. (§14.2)
+
 > ## 📄 ACTIVE PAPER — the ICLR draft is the ONLY paper we are writing right now
 >
 > **Path: `~/Code/overleaf/boltzmann-moe-ICLR-2026/`**
