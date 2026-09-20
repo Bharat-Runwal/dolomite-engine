@@ -13,9 +13,28 @@ cycles is reported even while RUN (a wedged job also holds RUN).
 import subprocess, re, os, json, statistics, time, yaml
 
 REPO = '/proj/dmfexp/nima/Code/dolomite-engine'
+# EVERY arm the paper depends on must be listed here. On 2026-09-20 five arms were found dead at
+# once and a SIXTH -- abl_B_400M_6G1x6S, the FLOP-matched Switch baseline at 400M, i.e. the arm
+# HANDOFF 14.1's headline comparison requires -- stayed dead through the first relaunch sweep
+# purely because it was absent from this list. None of these arms is in watchdog_jobs.conf either,
+# so this check is the ONLY thing that notices. Add new arms here the moment they are launched.
 ARMS = ['cmix_134M_hybrid_32B_sparse','cmix_134M_sandwich_32B_sparse','cmix_134M_pure_32B_sparse',
         'cmix_134M_gptswitch_32B','cmix_400M_hybrid_sparse','cmix_400M_sandwich_sparse',
-        'cmix_400M_baseline_switch','cmix1B_12L_gptDense_32B']
+        'cmix_400M_baseline_switch','cmix1B_12L_gptDense_32B',
+        'cmix_134M_hyb_w1w2_surrMLP_32B','cmix_134M_hyb_w1w2_sparse_surr_32B',
+        'abl_B_134M_6G1x6S','abl_B_400M_6G1x6S','abl_C_134M_1G1x6E1G_isototal',
+        'abl_D_134M_6G_dense_isototal','abl_E_134M_6G1x6E_baseEGPT']
+
+# Arms no longer live under one directory: the ablations are in configs/iclr_26/ablations/.
+# Hardcoding configs/cmix/ is what made the abl_* arms unlistable above.
+CFG_DIRS = ['configs/cmix', 'configs/iclr_26/ablations', 'configs/iclr_26']
+
+def cfg_path(name):
+    for d in CFG_DIRS:
+        c = f'{REPO}/{d}/{name}.yml'
+        if os.path.exists(c):
+            return c
+    raise FileNotFoundError(f'no config for arm {name!r} under {CFG_DIRS}')
 STATE = '/tmp/hc_state.json'
 SEEN  = '/tmp/hc_reported.txt'
 
@@ -35,7 +54,7 @@ for n in ARMS:
         # completed 32B run (cmix_134M_sandwich_32B_sparse, 2026-09-18) -- which at best wastes
         # GPUs and at worst resumes past the end of the LR schedule. Check completion FIRST.
         try:
-            cfg = yaml.safe_load(open(f'{REPO}/configs/cmix/{n}.yml'))
+            cfg = yaml.safe_load(open(cfg_path(n)))
             tot = cfg['training_parameters']['num_training_steps']
             sp = (cfg.get('save_args') or {}).get('save_path')
             it = json.load(open(f'{sp}/latest_checkpointed_iteration.json'))['latest_checkpointed_iteration']
@@ -87,7 +106,7 @@ for n in ARMS:
     if mk >= 20000 and f'{n}@{mk}' not in seen:
         miles.append(f"{n}: passed {mk:,} (now {step:,}, {stat})"); seen.add(f'{n}@{mk}')
 
-    cfg = yaml.safe_load(open(f'{REPO}/configs/cmix/{n}.yml'))
+    cfg = yaml.safe_load(open(cfg_path(n)))
     eb = [b for b in cfg['model_args']['pretrained_config']['mlp_blocks']
           if b['mlp_type'].startswith('EnergyFF')]
     if not eb: continue
