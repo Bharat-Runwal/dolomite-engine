@@ -1,0 +1,214 @@
+# ABLATION H control -- 12 dense GPT layers, no MoE, matched to abl_H_400M_6G6E_deep's ACTIVE.
+# I = 2303 -> total = active = FLOPwt = 238.015M against the deep energy arm's ACTIVE 238.022M
+# (-0.003%). This is the abl_D question asked where the MoE is actually load-bearing: at 134M the
+# expert bank is 9.4% of the model and 4% of non-embedding ACTIVE, and a plain dense GPT WON; at
+# 400M the bank is 65% of non-embedding total and 10.3% of active.
+# NOTE this arm is 238M TOTAL, not 400M -- by construction, because it matches the routed arm's
+# ACTIVE parameters. It is not a 400M model and must never be tabulated as one.
+# *** INTENDED GPU COUNT: 8 ***  mbs 2 x ga 8 x 4096 x 8 = 524,288 tok/step; 61,035 steps = 32.0B
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 12
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2303
+      add_bias: false
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr26_abl/abl_H_400M_6G6G_deep_isoactive
+  save_interval: 200
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: abl_H_400M_6G6G_deep_isoactive
+training_parameters:
+  num_training_steps: 61035
+  eval_interval: 5000
+  micro_batch_size: 2
+  gradient_accumulation_steps: 8
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 59035
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  gradient_checkpointing_method: block
+  torch_compile: true
+  stage: 0

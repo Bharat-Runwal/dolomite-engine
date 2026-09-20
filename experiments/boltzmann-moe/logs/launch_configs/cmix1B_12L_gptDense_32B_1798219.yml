@@ -1,0 +1,206 @@
+# cmix1B_12L_gptDense_32B -- FALLBACK long run, authorised by the user if the 1B single-block
+# hybrid cannot be made to fit on 16 GPUs.
+# 12 DISTINCT layers, NO recurrence: 8x (softmax attn + DENSE swiglu 4096) then 4x (energy attn
+# + our EnergyFF_BoltzmannMoE K=64 top-2, I_e 2846). No standard MoE anywhere, so gains are
+# ATTRIBUTABLE to the energy MoE. ~1.00B params.
+# 61035 steps x 524288 tok/step (16 GPU x mbs 2 x ga 4 x 4096) = 32.0B tokens. WSD 2000/53000/6035.
+#
+# WHY THIS IS THE SAFE FALLBACK: its expert parameters are spread over FOUR energy blocks, so
+# the dense-warmup intermediate is only 1.39 GiB at mbs 1 / 2.78 GiB at mbs 2 -- versus 5.90 GiB
+# for the single-block hybrid, which sits above the 5.42 GiB that already OOMed. It also has the
+# memory headroom to run mbs 2, i.e. 8192 tokens/call, which is the WINNING column for
+# sparse_forward (4096 tok/call can lose outright).
+# lr stays 2e-3: this arm is NON-recurrent and measured a healthy median grad_norm of 0.85,
+# whereas the recurrent psd_anti arms hit 1.24-1.34 against the 1.0 clip and need 1e-3.
+# NOTE: 12 distinct layers REQUIRES the raised torch._dynamo recompile_limit (default 8 is
+# exceeded at layer 7 and dynamo silently drops to eager) -- already patched in distributed.py.
+# sparse_start_step 2000 -> 2000 (2026-09-17, MEASURED): proxy_topk_agree on the 1B K=64
+# arm sits at 0.3093 median / 0.3502 last after only 200 dense steps, against 0.59-0.69 on
+# our K=16 arms and 0.79 on the K=16 reference -- which itself needed 280 DENSE steps to get
+# there. Ranking top-2 of 64 is much harder than top-2 of 16 (chance is 3.1% vs 12.5%), so
+# the distillation phase has to be LONGER at high K, not the same. 2000 dense steps costs
+# ~2.3 h extra on a ~30 h run -- cheap insurance against training on a bad router.
+# timeout_minutes: 180 (2026-09-17, MEASURED ROOT CAUSE). Inductor coordinates compilation
+# across ranks over the GLOO backend, whose default timeout is 30 min. Two 1B arms died at
+# 1884 s and 1921 s with InductorError: 'Timed out waiting 1800000ms for send/recv' -- i.e.
+# they hit the 30-minute gloo wall DURING COMPILE, with 0 steps, 0 OOM and only 39 GB of a
+# 200 GB host limit. Not memory, not graph size per se: a compile that needs longer than
+# 30 min is simply killed. The same model compiles fine at 8 GPU / 1 node; 2 nodes pushed
+# it past the wall. 180 min gives ample headroom.
+# MOVED TO 8 GPU / 1 NODE (2026-09-17). 16 GPU / 2 nodes WEDGES in inductor's spmd_check
+# pass: cpu_used flat at 746->748s over 60s across 16 ranks, 108 min, 0 steps. That pass
+# all-gathers FX graph hashes across ranks to detect non-SPMD graphs, and deadlocks here.
+# Raising timeout_minutes 30->180 did NOT fix it -- it only turned a 30-min InductorError
+# death into a 108-min hang. ga 4 -> 8 keeps tokens/step at 524288 so the 32B budget and
+# WSD schedule are unchanged; the cost is wall-clock, ~58 h instead of ~29 h.
+
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 12
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - &id001
+      sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - *id001
+    - &id002
+      sequence_mixer_type: energy_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - *id002
+    - *id002
+    - *id002
+    mlp_blocks:
+    - &id003
+      mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 4096
+      add_bias: false
+    - *id003
+    - *id003
+    - *id003
+    - *id003
+    - *id003
+    - *id003
+    - *id003
+    - &id004
+      mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 182144
+      n_experts: 64
+      top_k: 2
+      e_sign_override: pos
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 1
+      repulsion_tensor_idx: true
+      repulsion_form: abs
+      repulsion_space: output
+      repulsion_coef: 0.1
+      repulsion_subsample: 64
+      n_repulsion_pairs: 4
+      cos_probe_interval: 100
+      renormalize_topk: true
+      fused_experts: true
+      sparse_forward: true
+      sparse_start_step: 2000
+      sparse_candidates: 2
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      gelu_grad_method: sigmoid
+      activation_function: gelu
+      add_bias: false
+    - *id004
+    - *id004
+    - *id004
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/cmix/cmix1B_12L_gptDense_32B
+  save_interval: 1000
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: cmix1B_12L_gptDense_32B
+training_parameters:
+  num_training_steps: 61035
+  eval_interval: 2000
+  micro_batch_size: 2
+  gradient_accumulation_steps: 8
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1e-8
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 53000
+  num_decay_steps: 6035
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
+  gradient_checkpointing_method: block
+  timeout_minutes: 180

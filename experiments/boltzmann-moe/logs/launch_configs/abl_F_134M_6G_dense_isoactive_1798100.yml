@@ -1,0 +1,155 @@
+# ABLATION F -- GPT-only dense at ISO-ACTIVE, the control abl_D could not be.
+# 6 dense GPT layers, no MoE, no energy block, no recurrence. I = 2320.
+# abl_D was iso-TOTAL and therefore carried +9% ACTIVE params than the routed arms (134.3M vs
+# 123.2M) while spending FEWER parameter-applications per token -- two advantages pulling in
+# opposite directions, so its +0.73pp over the hybrid was not a single-variable result.
+# This arm is iso-ACTIVE: total = active = 123.308M against the 134M hybrid's 123.243M ACTIVE
+# (+0.053%). Since it is dense, total = active = FLOPwt, so it is simultaneously iso-active AND
+# iso-FLOP-weight with the hybrid's ACTIVE -- but note the hybrid's FLOPwt is 141.7M because its
+# block is applied 6x, so this arm still spends 13% fewer parameter-applications per token.
+# *** INTENDED GPU COUNT: 4 ***  mbs 4 x ga 4 x 4096 x 4 = 262,144 tok/step; 122,070 steps = 32.0B
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 768
+    num_layers: 6
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2320
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2320
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2320
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2320
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2320
+      add_bias: false
+    - mlp_type: MLP
+      activation_function: swiglu
+      intermediate_size: 2320
+      add_bias: false
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr26_abl/abl_F_134M_6G_dense_isoactive
+  save_interval: 2000
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: abl_F_134M_6G_dense_isoactive
+training_parameters:
+  num_training_steps: 122070
+  eval_interval: 5000
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 120070
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
