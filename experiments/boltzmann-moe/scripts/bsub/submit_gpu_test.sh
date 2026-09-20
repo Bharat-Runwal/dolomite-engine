@@ -34,12 +34,20 @@ mkdir -p "$HOME/bsub_logs"
 # confirm the output file exists, never trust DONE (HANDOFF 15.2c).
 # Same promotion bar as submit_train.sh: TWO faults on one host for BAD_HOSTS, one fault goes to
 # SUSPECT_HOSTS for a retry only.
-#   p5-r09-n1: two CUDA-init failures, evals 1797724 and 1797745 (2026-09-20).
+#   p2-r03-n1: THREE CUDA-init faults on 2026-09-20 -- job 1796776 (trainer fell back to a CPU
+#     DeviceMesh and trained nothing for 20 min) and evals 1797724 + 1797745 (both
+#     'CUDA unknown error ... CUDA_VISIBLE_DEVICES', both reported DONE having written nothing).
 #   p4-r10-n4: NVLink/NVSwitch fabric faults, error 401 (carried over from submit_train.sh).
-BAD_HOSTS="${BAD_HOSTS-p5-r09-n1 p4-r10-n4}"
-# p2-r03-n1: ONE CUDA-init failure (job 1796776 -- the trainer silently fell back to a CPU
-# DeviceMesh and trained nothing for 20 min). Not yet at the two-fault bar.
-SUSPECT_HOSTS="${SUSPECT_HOSTS-p2-r03-n1}"
+#
+# ⚠ HOW THE HOST WAS IDENTIFIED, AND A TRAP THAT GOT IT WRONG FIRST. **LSF RECYCLES JOB IDS**, so
+# `bhist -l <jobid>` can return a MONTHS-OLD job: bhist for 1797724/1797745/1797747 all returned
+# records dated `Sat Jun 27 2026`, and reading a hostname out of those wrongly accused p5-r09-n1
+# (which has no evidence against it at all and is NOT excluded here). Attribute a host from
+# `bjobs -o exec_host` WHILE THE JOB IS LIVE, or from the hostname recorded in the job's own
+# stdout under $HOME/bsub_logs -- never from bhist on a recycled id. Cross-check the bhist record's
+# DATE before believing anything it says.
+BAD_HOSTS="${BAD_HOSTS-p2-r03-n1 p4-r10-n4}"
+SUSPECT_HOSTS="${SUSPECT_HOSTS-}"
 sel=""
 for h in $BAD_HOSTS $SUSPECT_HOSTS; do sel="$sel && hname!='$h'"; done
 sel="${sel# && }"
