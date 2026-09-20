@@ -1,5 +1,74 @@
 # Boltzmann MoE — TODO
 
+## 2026-09-20: BASE-EGPT ABLATION (no MoE) — launched; 400M variant deferred
+
+- [x] Expose `hopfield_grad_scale` on `_EnergyFFHopfieldArgs` and FORWARD it in `get_mlp_block`.
+      It was unreachable from YAML, so a non-MoE Hopfield baseline silently ran a ~77x weaker
+      descent step than the MoE it ablates against ("the branch was inert" regime). Default
+      unchanged at `"mean"`; no pre-existing config used `EnergyFF_Hopfield`.
+- [x] `configs/iclr_26/ablations/abl_E_134M_6G1x6E_baseEGPT.yml` — I=2,472, iso-ACTIVE -0.002%,
+      iso-FLOPwt -0.009%, TOTAL -8.2% by construction. Verified by `audit_config` AND a
+      meta-device build (agree to the byte), plus knob resolution on the built module.
+- [x] Launched: job 1796776, 4 GPUs, mbs 4 x ga 4 = 262,144 tok/step, 122,070 steps = 32.0B.
+- [ ] **Confirm it reached a first step and is stepping at 262,144 tok/step** (monitor armed).
+- [ ] When it lands: add to `gen_status_table.py` and the paper's `app:status`, and state in the
+      table caption that it is iso-active/iso-FLOP but NOT iso-total.
+- [ ] **400M base-EGPT variant — HOLD** until the 400M hybrid/sandwich pair reports, per the same
+      reasoning as the W1W2 400M decision. Sizing rule: `I = k*I_e + router_params/d`.
+- [ ] Optional second row: the **iso-TOTAL** dense-EGPT arm (I ~ K*I_e = 16,384, ~8x active,
+      ~+9.6% FLOPwt). Tests "is the expert BANK worth storing"; cannot be iso-FLOP simultaneously.
+
+## 2026-09-20: FOUR ARMS WERE DEAD — relaunched, three into free grp_ebm
+
+- [x] `grp_ebm` found at 8/32 (24 free). Relaunched 400M sandwich (1796722), 400M hybrid
+      (1796723), 1B (1796724) there NON-PREEMPTABLY; 134M pure (1796726) to preemptable.
+- [ ] **Register the `cmix_*` / `abl_*` arms in `watchdog_jobs.conf`, or accept that they are
+      hand-managed.** The conf holds only the older grid arms, so the arms the paper depends on
+      have NO automatic resubmission — that is why four of them sat dead.
+- [ ] Re-check `grp_ebm` when the 1B finishes (~92% done) and move a preemptable arm in.
+
+## 2026-09-19: W1W2 SPARSE PATH REGISTERED — landed, default-off, nothing launched
+
+Details in `PROGRESS.md` (2026-09-19 "reachable from YAML" entry); checks in
+`scripts/test_w1w2_sparse_registration_20260919.py` (`--phase baseline|check|new|fields`).
+
+- [x] Relax `energy_ff.py`'s `fused_spec["kind"]` assert to `("hopfield", "w1w2")`, plus a second
+      clause requiring `_forward_fused` to be genuinely overridden (so it refuses a base-class
+      instance that would silently compute the Hopfield energy on W1). Verified it still rejects
+      `kind="gaussian"` AND `kind="w1w2"` on the base class.
+- [x] Delete the `_KIND_SHIM`; `fused_spec["kind"]` is now the true `"w1w2"`.
+- [x] Dispatch `expert_kind: w1w2` + `fused_experts: true` to `build_boltzmann_moe_w1w2_sparse`
+      inside the existing `EnergyFF_BoltzmannMoE` branch (no new `mlp_type` — the combination
+      hard-asserted before today, so no buildable config changes meaning).
+- [x] Bitwise A/B of all 50 blocks of the 7 named configs against a pristine `git archive HEAD`
+      tree: max|diff| `0.000e+00`. `git stash` NOT used (six jobs re-import this tree).
+- [x] All 44 `_EnergyFFBoltzmannMoEArgs` fields machine-checked in both directions + 27 resolved
+      off the built `.moe`.
+- [x] `configs/cmix/cmix_134M_hyb_w1w2_sparse_surr_32B.yml` — 32.0B at 4 GPUs, audited
+      134.126M / 123.116M / 140.960M, param count verified against a real build (delta 0).
+
+### 🔴 BLOCKERS BEFORE LAUNCHING THAT ARM
+- [ ] **No GPU evidence of any kind.** Not the speedup, not multi-node stability, not the
+      overflow rate at the real T. `fused_experts` is the mechanism HANDOFF 12.27 isolated as the
+      long-standing **2-node wedge**, and `repulsion_space: output` + `repulsion_subsample: 64`
+      (which this config uses) is the multi-node-safe combination only by argument, not by
+      measurement, on the w1w2 line. Launch at **4 GPUs on ONE node first**.
+- [ ] **Per-call token count decides the SIGN of the sparsity speedup** (CLAUDE.md §TRUE
+      SPARSITY point 2): `sparse_forward` LOSES at 4096 tokens/call and wins 2.1-2.4x at 16384.
+      This arm is `micro_batch_size: 4` x `sequence_length: 4096` = **16384 tokens/call**, i.e. the
+      winning column — but that was measured on the HOPFIELD block shape, and w1w2 does 2x the
+      projections at equal `I_e`. Re-measure with `scripts/bsub/bench_sparse.sh` before quoting a
+      number.
+- [ ] **Capacity is sized on the CANDIDATE count, not `top_k`**: `_dispatch_plan` uses
+      `C = ceil(cf * T * p_cand / K)` with `p_cand = sparse_candidates (+ sparse_explore in
+      training)`, so p=4 + explore=2 at cf=1.25 leaves 25% headroom over a *balanced* load of
+      T*6/K. Measured 15/256 pairs dropped at a toy T=64 with a random router (a small-sample
+      imbalance artifact). **Watch `_sparse_overflow` in the first 500 steps** and raise
+      `sparse_capacity_factor` if it is not ~0.
+- [ ] **Nomination recall of the mlp-256 head on TRAINED w1w2 weights is unmeasured.** The 0.898
+      / 0.992 top-2 figures are on RANDOM weights. This arm's `sparse_start_step: 300` dense phase
+      is what has to earn it; check `proxy_topk_agree` plateaus before step 300 and extend if not.
+
 ## 2026-09-19: SURROGATE HEAD AS THE SPARSE SELECTOR — landed, and two defects it exposed
 
 Code + measurements in `PROGRESS.md` (2026-09-19 entry) and

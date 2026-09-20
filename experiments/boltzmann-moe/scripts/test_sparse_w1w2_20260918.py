@@ -368,5 +368,11 @@ if h == EXPECTED:
 else:
     print(f"  *** CHANGED (recorded {EXPECTED}). Re-read the COPIED BLOCK in")
     print("      energy_ff_w1w2_sparse.py against energy_ff.py and update this hash. ***")
-shim = "the w1w2 line still uses the loop" in inspect.getsource(BoltzmannMoEFFEnergy.__init__)
-print(f"  base class still rejects fused w1w2 (so the _KIND_SHIM is still needed): {shim}")
+# 2026-09-19: the base class's assert now accepts "w1w2" (and additionally requires that
+# `_forward_fused` really was overridden), so the `_KIND_SHIM` is gone and `fused_spec["kind"]`
+# carries the true kind. If either line below prints False, the shim has come back.
+src = inspect.getsource(BoltzmannMoEFFEnergy.__init__)
+print("  base class accepts fused w1w2:", 'in ("hopfield", "w1w2")' in src)
+import importlib
+print("  _KIND_SHIM removed from the w1w2 module:", "_KIND_SHIM = " not in inspect.getsource(
+    importlib.import_module(build_boltzmann_moe_w1w2_sparse.__module__)))

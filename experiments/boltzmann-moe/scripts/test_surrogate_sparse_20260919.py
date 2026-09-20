@@ -474,10 +474,21 @@ print("  NOTE the head's advantage is LARGER here: the w1w2 subspace proxy is fo
 print("       m = I_e (its m-row subsample has relative error ~sqrt(I_e/m) because the")
 print("       bilinear energy's terms cancel), at which point the proxy costs MORE per token")
 print("       than the sparse mixture it exists to make cheap. The head's cost has no I_e.")
-print("  BLOCKER FOR A RUNNABLE w1w2 SPARSE ARM: SurrogateBoltzmannMoEW1W2 (and")
-print("       BoltzmannMoEW1W2Sparse) are NOT registered in get_mlp_block -- there is no")
-print("       mlp_type that reaches them. build_surrogate_boltzmann_moe picks the class from")
-print("       expert_kind + fused_experts, so registration is the only missing piece.")
+# RESOLVED 2026-09-19. The claim below ("not registered in get_mlp_block") was half right:
+# SurrogateBoltzmannMoEW1W2 was ALREADY reachable, because get_mlp_block's
+# EnergyFF_SurrogateBoltzmannMoE branch forwards expert_kind + fused_experts and
+# build_surrogate_boltzmann_moe picks the class from that pair. It was the NON-surrogate
+# BoltzmannMoEW1W2Sparse that no mlp_type could reach: build_boltzmann_moe emitted
+# fused_spec={"kind": "w1w2"} and the base class asserted "hopfield". Both are now reachable --
+# the assert accepts "w1w2" and get_mlp_block dispatches EnergyFF_BoltzmannMoE with
+# expert_kind: w1w2 + fused_experts: true to build_boltzmann_moe_w1w2_sparse. Ready-to-launch
+# config: configs/cmix/cmix_134M_hyb_w1w2_sparse_surr_32B.yml. Checked by
+# test_w1w2_sparse_registration_20260919.py.
+print("  w1w2 SPARSE ARM IS NOW REACHABLE FROM YAML (2026-09-19):")
+print("       mlp_type: EnergyFF_SurrogateBoltzmannMoE + expert_kind: w1w2 + fused_experts:")
+print("       true + sparse_forward: true + surrogate_replaces_proxy: true  ->  this class.")
+print("       The non-surrogate BoltzmannMoEW1W2Sparse is reached the same way from")
+print("       mlp_type: EnergyFF_BoltzmannMoE. See configs/cmix/cmix_134M_hyb_w1w2_sparse_surr_32B.yml.")
 
 print("\n" + "=" * 94)
 print("done")

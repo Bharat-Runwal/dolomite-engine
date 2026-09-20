@@ -1,5 +1,55 @@
 # Boltzmann MoE — Experiment Guide
 
+> ## 🚦 NEW CONFIGS: CONFIRM WITH THE USER **BEFORE** SUBMITTING. NO EXCEPTIONS.
+>
+> **User instruction, 2026-09-20.** For any NEW run config (not a plain resume of a config that has
+> already been running), present these points to the user and get an explicit go-ahead **before**
+> `bsub`. Do not submit first and verify after.
+>
+> 1. **DATAMIX — is it the `configs/cmix/` mix, WITH the math sets?** The correct block is
+>    `0.35 web-nemotron-cc-hq-p2_0` + `0.35 ..._p2_1` + **`0.15 megamath-web-pro_0`** +
+>    **`0.15 finemath-3plus-rewritten_0`**, `split: 99,0.5,0.5`, and
+>    `data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix`. Our older configs are 100% web /
+>    0% math and are NOT comparable on any task. Prove it, do not assume:
+>    `diff <(sed -n '/^datasets:/,/^tokenizer_args:/p' configs/cmix/cmix_134M_hybrid_32B_sparse.yml) <(sed -n '/^datasets:/,/^tokenizer_args:/p' NEW.yml)`
+>    must be EMPTY.
+> 2. **DID YOU COPY THE RIGHT PARENT?** Name the parent config explicitly and diff against it with
+>    pre-flight rule 10, accounting for EVERY line.
+> 3. **LAYER STRUCTURE AND RECURRENCE.** State `num_layers`, the full `layer_iterations` list, the
+>    per-block `sequence_mixer_type` and `mlp_type`, and the structural name (`6G1x6E` etc.).
+>    `1x6E` = ONE block applied SIX times; six distinct blocks is a different model.
+> 4. **Token budget and GPU count** — `GPUS x mbs x ga x seq`, and GPUS IS NOT IN THE CONFIG.
+> 5. **Params**: `energy_ff_paramcount.audit_config` TOTAL / ACTIVE / FLOPwt against the arm it
+>    will be compared with, and say which of the three are matched and which are not.
+>
+> Report those five, wait, then submit. A wrong datamix or a wrong `layer_iterations` is not
+> recoverable — it is a wasted multi-day run against a deadline.
+
+> ## ⏱ WATCH EVERY NEW RUN OR RESUME: EVERY MINUTE FOR 10 MIN, THEN EVERY 30 MIN
+>
+> **User instruction, 2026-09-20.** After ANY submission (new run OR resume), check at ~1-minute
+> intervals for the first 10 minutes, then every 30 minutes.
+>
+> **THE STEP LINES GO TO STDERR, NOT STDOUT.** `$HOME/bsub_logs/<job>_<id>.stderr` carries
+> `step = N, train-loss = ...`; stdout holds only the launcher echo, `ninja:` and the NCCL banner.
+> Grepping stdout shows nothing and **looks exactly like a silent hang** — this wasted a
+> diagnosis on 2026-09-20 when three healthy 400M/1B arms were read as wedged at NCCL init.
+>
+> ```bash
+> tail -3 $HOME/bsub_logs/<name>_<jobid>.stderr        # step lines live HERE
+> ```
+>
+> What to confirm in the first 10 minutes: `STAT=RUN`; a first `step =` line appeared; the step
+> number CONTINUED FROM THE CHECKPOINT (not 0 — a missing `load_args` silently restarts from
+> scratch); and tokens/step is what you intended
+> (`billion_tokens_per_day * 1e9 * step_time / 86400`). After that, every 30 min: the step counter
+> is still advancing and the arm is still `RUN`.
+>
+> `STAT=RUN` IS NOT PROGRESS. Five arms were found dead on 2026-09-20 and a sixth
+> (`abl_B_400M_6G1x6S`) stayed dead through the first sweep because it was not in
+> `scripts/health_check_arms.py`'s list. The authoritative progress source is
+> `<save_path>/latest_checkpointed_iteration.json`, not `bjobs`.
+
 > ## 📕 READ `HANDOFF.md` FIRST — IT IS THE RUNNING RECORD, AND IT CONTRADICTS OLDER CLAIMS
 >
 > **`experiments/boltzmann-moe/HANDOFF.md` is the authoritative log of what has actually been

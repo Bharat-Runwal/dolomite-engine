@@ -24,6 +24,114 @@
 >
 > Legacy avg9→avg10: `restate_avg9_to_avg10_20260912.py --md` / `AVG10_RESTATED.md`.
 
+## 2026-09-19 — the W1W2 sparse path is REACHABLE FROM YAML (it was dead code)
+
+`energy_ff_w1w2_sparse.py` had been verified exact since 2026-09-18 but **no config could reach
+it**. Two separate gates, and only one of them was the one everybody was talking about:
+
+1. `energy_ff.py`'s `assert fused_spec["kind"] == "hopfield"` (now line ~951) rejected the w1w2
+   fused spec, so `mlp_type: EnergyFF_BoltzmannMoE` + `expert_kind: w1w2` + `fused_experts: true`
+   raised at construction. The module worked around it with a `_KIND_SHIM` that passed the
+   literal `"hopfield"` and hid the real kind under `kind_real`.
+2. `get_mlp_block` had no branch that called `build_boltzmann_moe_w1w2_sparse` at all.
+
+**Correction to the note left in `test_surrogate_sparse_20260919.py`:** it claimed BOTH w1w2
+sparse classes were unregistered. `SurrogateBoltzmannMoEW1W2` was **already reachable** —
+`get_mlp_block`'s `EnergyFF_SurrogateBoltzmannMoE` branch forwards `expert_kind` +
+`fused_experts` and `build_surrogate_boltzmann_moe` picks the class from that pair. Only the
+NON-surrogate `BoltzmannMoEW1W2Sparse` was unreachable.
+
+### What changed
+
+| file | change |
+|---|---|
+| `.../mlp_blocks/energy_ff.py:947-971` | assert accepts `("hopfield", "w1w2")`, **plus** a second clause requiring that `_forward_fused` was actually overridden |
+| `.../mlp_blocks/energy_ff_w1w2_sparse.py` | `_KIND_SHIM` deleted; `fused_spec["kind"]` is now the true `"w1w2"`; builder accepts+asserts `fused_experts` |
+| `.../mlp_blocks/__init__.py:179-270` | one shared kwargs dict, dispatched on `expert_kind == "w1w2" and fused_experts` |
+| `configs/cmix/cmix_134M_hyb_w1w2_sparse_surr_32B.yml` | new, ready to launch, NOT launched |
+
+**The assert is still meaningful, not a no-op.** A plain `BoltzmannMoEFFEnergy` handed
+`kind="w1w2"` would find `weight_fn` present (the w1w2 builder sets it to W1) and would compute
+the HOPFIELD energy `mean(gelu(W1 x)^2)` on it — the wrong model, silently, with no shape error.
+Verified refused: `kind="w1w2"` on the base class AND `kind="gaussian"` both raise.
+
+**Dispatch decision: `expert_kind == "w1w2" and fused_experts`, NOT a new `mlp_type`.** The usual
+objection — "it changes the meaning of an existing mlp_type" — does not bite here, because the
+combination **hard-asserted at construction** before today. No config that can be built changes
+behaviour, and a new mlp_type would have needed a pydantic args class, a `_MLP_CONFIG_CLASSES`
+entry and an `audit_config` branch, each of which is a fresh pre-flight-rule-7 surface.
+
+**`fused_experts` is sign-neutral, deliberately.** `build_boltzmann_moe` defaults w1w2 to
+`e_sign="pos"` (the documented INVERTED sign) while `build_boltzmann_moe_w1w2_sparse` defaults to
+the corrected `"neg"`. Left implicit, flipping an *acceleration* flag would have silently flipped
+the *router*. The dispatch therefore passes `"pos"` explicitly when `e_sign_override` is absent;
+measured both ways, `e_sign` is `'pos'` at `fused_experts` false AND true.
+
+### Validation (CPU only, no GPU used)
+
+**A — nothing existing changed.** All 50 `mlp_blocks` entries of the five live configs plus
+`cmix_134M_hyb_w1w2_surrMLP_32B` and `abl_B_134M_6G1x6S` built through the real `get_mlp_block`
+and forwarded in float64: **bitwise identical** (compared as raw int64 bit patterns; max|diff|
+exactly `0.000e+00`) against a pristine `git archive HEAD` checkout in `/tmp`, i.e. the two runs
+differed in nothing but the code. `git stash` was deliberately NOT used — six jobs re-import this
+tree on preemption restart.
+
+> **METHOD TRAP, measured here.** The first comparison showed ~1e-16 diffs on blocks the edit
+> cannot touch (plain `MLP`!). Cause: a float64 CPU GEMM's reduction order depends on the THREAD
+> COUNT, and the two runs had different `OMP_NUM_THREADS`. Determinism is a property of
+> (code, seed, **threads**) — `test_w1w2_sparse_registration_20260919.py` now pins
+> `torch.set_num_threads(1)`. Any future bitwise A/B must do the same or it will report phantom
+> regressions.
+
+**Pre-flight rule 7, machine-checked BOTH directions.** All **44** fields of
+`_EnergyFFBoltzmannMoEArgs` set to distinguishable non-default values and captured at the
+builder: 41 arrive with their exact value at BOTH builders; `expert_kind` and
+`hopfield_grad_scale` are correctly DROPPED for w1w2 (forwarding the latter would `TypeError`);
+`mlp_type` / `activation_function` / `dropout` are skipped on purpose. Backward: 0 unreachable
+knobs on either builder, and all 33 `**moe_kwargs` pass-through keys are accepted downstream.
+Then RESOLVED — 27 knobs read back off the built `.moe` (not the container, per pre-flight 7),
+all correct, including `_fused_spec["kind"] == "w1w2"`.
+
+**B — the new path works.**
+
+| combination | class built | oracle-proxy sparse vs dense |
+|---|---|---|
+| `EnergyFF_BoltzmannMoE` + w1w2 + `sparse_forward` | `BoltzmannMoEW1W2Sparse` | **2.757e-16** |
+| `EnergyFF_BoltzmannMoE` + w1w2 + fused only | `BoltzmannMoEW1W2Sparse` | (dense path) |
+| `EnergyFF_BoltzmannMoE` + hopfield + sparse | `BoltzmannMoEFFEnergy` (regression guard) | — |
+| `EnergyFF_SurrogateBoltzmannMoE` + w1w2 + sparse + head | `SurrogateBoltzmannMoEW1W2` | **2.757e-16** |
+
+On the REAL 134M block shape (K=16, I_e=512, p=4, d=768) the sparse path runs finite after
+`set_training_step(400)` opens the gate, and the oracle-head `p=K` exactness is **1.236e-15**.
+
+### The launchable arm — `configs/cmix/cmix_134M_hyb_w1w2_sparse_surr_32B.yml` (NOT launched)
+
+Derived from `cmix_134M_hyb_w1w2_surrMLP_32B.yml`. 122,070 steps, mbs 4 / ga 4 = **262,144
+tok/step at 4 GPUs = 32.0B**, schedule sums to 122,070 (pre-flight 1 OK), K=16, k=2, I_total=8192,
+`expert_kind: w1w2`, `e_sign_override: neg`, `surrogate_kind: mlp` / `surrogate_hidden: 256`,
+`sinkhorn_persist_mu: true`, `sinkhorn_mu_iters: 6`, `proxy_mu_convention: pre_mu`,
+`sparse_candidates: 4`, fresh `save_path`.
+
+`audit_config`, verified against a REAL build of the block (**delta 0** parameters):
+
+| | TOTAL | ACTIVE | FLOPwt |
+|---|---|---|---|
+| `cmix_134M_hyb_w1w2_sparse_surr_32B` (new) | **134.126M** | **123.116M** | **140.960M** |
+| `cmix_134M_hybrid_32B_sparse` (hopfield ref) | 134.253M | 123.243M | 141.720M |
+| difference | −0.127M | −0.127M | −0.760M |
+
+The gap is **entirely the router** and is fully accounted: hopfield carries a rank-16 subspace
+proxy (327,712 = `proxy_V` 196,608 + `proxy_B` 131,072 + 32) where this arm carries only the
+mlp-256 head (200,976); 327,712 − 200,976 = **126,736**, and ×6 iterations = 760,416 on FLOPwt.
+The **experts are identical** at 12,582,912 either way (hopfield 1 matrix × I=16384 vs w1w2 2
+matrices × I=8192) — this is an iso-expert-parameter A/B of the two energy forms.
+
+Two config fields are required for reasons a reader would not guess, both commented in the file:
+`proxy_kind: subspace` (the pydantic default `"quad"` is asserted-out by the w1w2 sparse class,
+which implements only subspace/bilinear — and it fires BEFORE the mixin frees the tensors), and
+`use_surrogate: false` (mutually exclusive with `surrogate_replaces_proxy`, which is what makes
+the head a SELECTOR rather than a Switch-style gate).
+
 ## 2026-09-19 — the KL-distilled surrogate head now drives SPARSE selection
 
 `surrogate_replaces_proxy: true` on `mlp_type: EnergyFF_SurrogateBoltzmannMoE`. Until today the
@@ -1775,3 +1883,62 @@ sandwich, 1B); they are fine, so the trigger is not universal, but the failure m
 omit `sinkhorn_persist_mu`. For a DENSE arm the penalty is ~0.003 nats at 6 iterations. For a SPARSE
 arm the dual is solved on the cheap router's logits, so untilted eval changes **which experts run**,
 not merely how they are weighted. `cmix_134M_pure_32B_sparse` is live with 12 iterations.
+
+---
+
+## 2026-09-20 (later): four arms found DEAD and relaunched into free `grp_ebm`; base-EGPT ablation built
+
+**`grp_ebm` had 24 of its 32 GPUs FREE** — the first time since the quota was documented as
+routinely 32/32 (which is why CLAUDE.md sends evals to `preemptable`). `blimits` read `8/32`, and
+the 8 in use were OUR OWN two 4-GPU ablation arms. **The health check simultaneously reported four
+arms with NO LIVE JOB**, none of them registered in `watchdog_jobs.conf`, so nothing was going to
+bring them back:
+
+| arm | resumed at | queue now | job |
+|---|---|---|---|
+| `cmix_400M_sandwich_sparse` | 15,800/61,035 (25.9%) | **normal/grp_ebm** | 1796722 |
+| `cmix_400M_hybrid_sparse` | 35,400/61,035 (58.0%) | **normal/grp_ebm** | 1796723 |
+| `cmix1B_12L_gptDense_32B` | 56,000/61,035 (91.8%) | **normal/grp_ebm** | 1796724 |
+| `cmix_134M_pure_32B_sparse` | 108,000/122,070 (88.5%) | preemptable | 1796726 |
+
+The two 400M arms are the critical path, so they took non-preemptable slots; the 1B is at 92% and
+will release its 8 GPUs quickly. All four passed the four-part launch gate (budget, schedule,
+structure, build) at 8 GPUs: tok/step 524,288 / 524,288 / 524,288 / 262,144, every one 32.00B.
+Node shape forced to 2x4, the shape all four have already run for tens of thousands of steps —
+deliberately NOT changed to 1x8 at the same time as the queue, even though 1x8 would retire the
+multi-node `sinkhorn_persist_mu` hazard, because changing two variables at once under deadline is
+how a silent hang becomes unattributable.
+
+**LESSON: the health check found these, the watchdog could not.** `watchdog_jobs.conf` contains
+only the older grid arms; every `cmix_*` and `abl_*` arm is hand-managed. There is no automatic
+resubmission for the arms the paper actually depends on.
+
+### Ablation E — Boltzmann MoE -> BASE (non-MoE) EGPT energy FFN, iso-active and iso-FLOP
+
+`configs/iclr_26/ablations/abl_E_134M_6G1x6E_baseEGPT.yml`, job 1796776, 4 GPUs, 32.0B. Identical
+`6G1x6E` skeleton to `cmix_134M_hybrid_32B_sparse` — only the energy block's FFN changes, from
+K=16 hopfield experts + top-2 + Sinkhorn + sparse proxy to ONE `EnergyFF_Hopfield` at I=2,472.
+Asks whether routing over a mixture buys anything over a single energy FFN of the same per-token
+size. Iso-ACTIVE to **-0.002%** and iso-FLOPwt to **-0.009%**; TOTAL is 8.2% lower by construction
+(the MoE stores 16 experts and applies 2, carrying 11.0M params it never spends on a token).
+Both `audit_config` and a meta-device build agree to the byte. I=2,472 rather than the obvious
+2,048 because the MoE's 327,712 router params are applied to EVERY token, and 2,048 would leave
+FLOPwt 1.4% low — §14.1's 12.9% FLOP deficit is the cautionary tale.
+
+**A CODE FIX WAS REQUIRED AND IT IS THE INTERESTING PART.** `hopfield_grad_scale` was
+**unreachable from YAML** for the non-MoE class: `_EnergyFFHopfieldArgs` never declared the field
+and `get_mlp_block`'s `EnergyFF_Hopfield` branch never forwarded it, so `HopfieldFFEnergy` used
+`"mean"` regardless — pre-flight rule 7 in the wild, and invisible because NO config had ever used
+`EnergyFF_Hopfield` (0 hits across `configs/`). At I=2,472 `"mean"` gives prefactor 0.00162 against
+the MoE's 0.125 at I_e=1,024, a **~77x weaker descent step** — precisely the regime
+`_hopfield_grad_prefactor`'s own docstring records as "the branch was inert" (`||ffwd_out||` 0.005
+vs `||attn_out||` 18.53). **The ablation would have compared a live MoE branch against a dead
+single-FFN branch and "proved" that the MoE wins.** Fixed in `config/mlp.py` (field + assert) and
+`mlp_blocks/__init__.py` (forward it), default still `"mean"`, and verified by resolving on the
+built model: `transformer.h.6.ffwd` I=2472 grad_scale=sqrt_consistent. `get_metrics()` also
+confirmed present, so this arm will not hit §14.7's Switch-MoE crash-on-first-logged-step trap.
+
+Caveat to note when reading its wandb: `_log_norms` is gated behind
+`not torch.compiler.is_compiling()` and this arm sets `torch_compile: true`, so `output_norm` —
+the direct check that the FF branch is live — will NOT appear. Judge branch health from the loss
+curve against the hybrid instead.

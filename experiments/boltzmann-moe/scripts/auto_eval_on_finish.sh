@@ -45,7 +45,11 @@ def newest(pat):
 # (observed 2026-09-18 for cmix_134M_sandwich_32B_sparse). Keep the shortest name = the canonical
 # arm, so the '_4gpu' variant never wins.
 seen_sp = {}
-for f in sorted(glob.glob('configs/cmix/cmix*.yml')):
+# GLOB WIDENED 2026-09-19: ablation arms live in configs/iclr_26/ablations/, so the old
+# configs/cmix/cmix*.yml glob silently skipped abl_B_134M_6G1x6S -- the FLOP-matched baseline --
+# after it completed. Any new config tree must be added here or its arms are never evaluated.
+for f in sorted(glob.glob('configs/cmix/cmix*.yml')
+                + glob.glob('configs/iclr_26/**/*.yml', recursive=True)):
     n = os.path.basename(f)[:-4]
     # 'probe' catches bsprobe/proxysvd-style throwaways: a 120-step batch probe technically
     # 'finishes', so without this the watcher spends a GPU evaluating a diagnostic.
