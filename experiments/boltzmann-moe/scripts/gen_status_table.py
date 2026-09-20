@@ -20,14 +20,45 @@ ROLES = {
  'cmix_134M_pure_32B_sparse':          ('134M pure recurrent',    'main'),
  'cmix_134M_gptswitch_32B':            ('134M Switch (unmatched)','baseline'),
  'abl_B_134M_6G1x6S':                  ('134M Switch (FLOP-matched)','ABLATION B'),
- 'cmix_134M_hyb_w1w2_surrMLP_32B':     ('134M w1w2 dense + head', 'ABLATION: expert form'),
- 'cmix_134M_hyb_w1w2_sparse_surr_32B': ('134M w1w2 sparse + head','ABLATION: expert form + router'),
+ 'cmix_134M_hyb_w1w2_surrMLP_32B':     ('134M w1w2', 'ABLATION: expert form'),
+ 'cmix_134M_hyb_w1w2_sparse_surr_32B': ('134M w1w2','ABLATION: expert form + router'),
  'cmix_400M_hybrid_sparse':            ('400M hybrid',            'main'),
  'cmix_400M_sandwich_sparse':          ('400M sandwich',          'main'),
  'cmix_400M_baseline_switch':          ('400M Switch (unmatched)','baseline'),
  'abl_B_400M_6G1x6S':                  ('400M Switch (FLOP-matched)','ABLATION B'),
  'cmix1B_12L_gptDense_32B':            ('1B stacked 8G4E',        'scale'),
+ 'abl_C_134M_1G1x6E1G_isototal':       ('134M true sandwich, iso-total','ABLATION C'),
+ 'abl_D_134M_6G_dense_isototal':       ('134M GPT-only dense, iso-total','ABLATION D'),
+ 'abl_E_134M_6G1x6E_baseEGPT':         ('134M base EGPT, iso-active','ABLATION E'),
 }
+
+# WHICH SPARSE MECHANISM -- DERIVED FROM THE CONFIG, NEVER HAND-LABELLED (2026-09-20).
+# The paper had been writing "sparse" unqualified, which conflates two different contributions:
+#   sparse(proxy)     the router's weight matrices are replaced by a rank-r subspace projection
+#                     with a small output dim, so selection costs O(K d r) not O(K d I_e).
+#                     hopfield ONLY -- for w1w2 the bilinear energy's terms cancel
+#                     (|sum|/sum|term| = 0.0254 vs 1.000), so an m-row subsample needs m = I_e,
+#                     where it costs MORE than the mixture it exists to cheapen.
+#   sparse(surrogate) a small MLP head is KL-distilled to reproduce the RANKING of the exact
+#                     energies and nominates p >= k candidates; the exact energy re-ranks to k.
+#                     Works for both expert kinds, and is the only option for w1w2.
+# Derived rather than typed because every hopfield arm happens to be proxy and every w1w2 arm
+# surrogate -- so a hand-written label would silently encode that confound as if it were a choice.
+def sparse_mech(pc):
+    blocks = pc.get('mlp_blocks') or []
+    for b in blocks:
+        t = b.get('mlp_type')
+        if t == 'MoE':
+            return 'learned gate'
+        if t and str(t).startswith('EnergyFF_') and ('BoltzmannMoE' in t):
+            if b.get('sparse_forward'):
+                return 'sparse(surrogate)' if b.get('surrogate_replaces_proxy') else 'sparse(proxy)'
+            # dense: all K experts evaluated per token. If the head supplies the ROUTING WEIGHTS
+            # (use_surrogate) that is a different thing again -- say so rather than just "dense".
+            return 'dense, surrogate router' if b.get('use_surrogate') else 'dense'
+        if t == 'EnergyFF_Hopfield' or t == 'EnergyFF_W1W2':
+            return 'no MoE'
+    return None
 
 def cfgpath(a):
     for p in (f'{REPO}/configs/cmix/{a}.yml',):
@@ -86,10 +117,21 @@ for a,(label,role) in ROLES.items():
     except Exception: totp=act=fl=None
     eb=[m for m in pc['mlp_blocks'] if str(m.get('mlp_type','')).startswith('EnergyFF')]
     sb=[m for m in pc['mlp_blocks'] if m.get('mlp_type')=='MoE']
-    if eb:  kind,K,k=eb[0].get('expert_kind'),eb[0]['n_experts'],eb[0]['top_k']
+    # .get, not [] -- the non-MoE energy FFNs (EnergyFF_Hopfield / EnergyFF_W1W2, e.g.
+    # abl_E) have no n_experts/top_k at all, and indexing raised KeyError on them.
+    if eb:
+        kind,K,k=eb[0].get('expert_kind'),eb[0].get('n_experts'),eb[0].get('top_k')
+        # A non-MoE energy FFN carries no `expert_kind` -- the FORM is the mlp_type itself.
+        # Leaving kind=None crashed the text renderer's %s formatting.
+        if kind is None:
+            _t=str(eb[0].get('mlp_type',''))
+            kind='hopfield' if _t.endswith('Hopfield') else ('w1w2' if _t.endswith('W1W2') else '?')
     elif sb: kind,K,k='swiglu',sb[0]['num_experts'],sb[0]['num_experts_per_tok']
     else:   kind,K,k='dense',None,None
     mt=metrics(sp) or {}
+    _m = sparse_mech(pc)
+    if _m:
+        label = f"{label}, {_m}"
     rows.append(dict(arm=a,label=label,role=role,arch=arch(pc),kind=kind,K=K,k=k,
                      tot=totp,act=act,fl=fl,state=state,**mt))
 
