@@ -33,6 +33,65 @@ that separates them.
 
 ---
 
+## ⚠ REVISION 2026-09-20 (later) — THE 134M TIER IS DIAGNOSTIC, NOT EVIDENTIAL. GO DEEPER AT 400M.
+
+**Why the plan changed.** At 134M the MoE is too small to be the thing under test:
+
+| 134M hybrid | params |
+|---|---|
+| total | 134.25M |
+| **embedding (tied)** | **77.07M — 57% of the model** |
+| non-embedding total | 57.18M |
+| non-embedding ACTIVE | 46.17M |
+| **energy expert bank (total)** | **12.58M = 9.4% of the model** |
+| **expert params ACTIVE per token** | **1.57M** |
+| + router (proxy) | 0.33M |
+| **MoE share of non-embedding ACTIVE** | **~4%** |
+
+So the routed component is ~4% of the active non-embedding parameters. The user's read is correct and
+stronger than the guess: **at 134M the MoE cannot express a large effect, and the measured effect is
+slightly NEGATIVE** — `abl_D` (six dense GPT layers, no MoE, no energy block) scores **45.55 / 39.94**
+against the hybrid's **44.82 / 41.06** while spending 5.2% FEWER parameter-applications per token.
+At 400M the picture is different: the expert bank is 192.4M of 297.0M non-embedding total (65%) and
+12.02M of 116.7M active (10.3%) — an order of magnitude more of the model.
+
+**Consequence: stop adding 134M architecture arms. Spend the GPUs at 400M and DECIDE AT THE 8B
+MILESTONE** rather than paying 32B for each arm.
+
+### NEW ARMS — SPECS READY, NOT SUBMITTED (awaiting confirmation per the CLAUDE.md rule)
+
+All 400M arms: d=1024, 61,035 steps x 524,288 tok/step for the full 32B, but **judged at the 8B
+anchor (step 15,258, ~10.6 h at 8 GPUs)** before committing further.
+
+| # | arm | structure | sizing | purpose |
+|---|---|---|---|---|
+| N1 | `abl_F_134M_6G_dense_isoactive` | `6G` | **I = 2320** → total=active=**123.308M**, +0.053% vs the MoE's 123.243M active | closes the abl_D loophole: abl_D was iso-TOTAL and carried +9% active params. This is iso-ACTIVE. ~6.8 h at 4 GPUs. |
+| N2 | `abl_G_400M_6G1x6E1x6E` | 6 GPT + **two** energy blocks, each applied 6x | `I_total` = **93,952** per block (K=32, `I_e`=2936) so the two blocks together hold the same 192.4M bank and 12.02M active as today's single block | doubles energy DEPTH (12 applications) at unchanged parameters |
+| N3 | `abl_G_400M_6G1x6S1x6S` | same skeleton, E→Switch | `I_s` = `I_e`/3 = **979** per block | N2's FLOP-matched learned-gate baseline |
+| N4 | `abl_H_400M_6G6E_deep` | 6 GPT + **6 distinct** energy blocks, NO recurrence | `I_total` = **31,296** per block (K=32, `I_e`=978) → bank 192.2M, active 12.01M | tests whether DISTINCT depth beats recurrent depth at equal params and equal applications |
+| N5 | `abl_H_400M_6G6S_deep` | same, E→Switch | `I_s` = **326** per block | N4's learned-gate baseline |
+| N6 | `abl_H_400M_6G6G_deep` | 12 dense GPT layers, no MoE | size to match N4's **ACTIVE** (~200M, exact figure to be audited) | the abl_D question at the scale where the MoE is 10% of active, not 4% |
+
+**Every one needs the five-point confirmation before `bsub`:** datamix diff empty against
+`configs/cmix/cmix_400M_hybrid_sparse.yml`, parent named and diffed line-by-line, `num_layers` +
+full `layer_iterations` + per-block mixer/mlp types stated, `GPUS x mbs x ga x seq`, and
+`audit_config` TOTAL/ACTIVE/FLOPwt against the comparison arm.
+
+### KILL LIST — what to stop to make room
+
+| arm | state | verdict |
+|---|---|---|
+| `cmix_400M_sandwich_sparse` | **DIED** at 17,400/61,035 (28.5%), ~30 h remaining | **DO NOT RELAUNCH.** Its 134M sibling is the WORST arm measured (43.45, −1.37pp vs hybrid); the true sandwich `abl_C` is not close either. 30 h of 8 GPUs for a shape that loses. Its 8 grp_ebm GPUs are already free. |
+| `abl_C_134M_1G1x6E1G_isototal` | RUN, 52,000/122,070 (42.6%), ~3.9 h | **KILL.** 134M sandwich variant — the tier is diagnostic-only now and sandwiches underperform. Frees 4 GPUs. |
+| `abl_E_134M_6G1x6E_baseEGPT` | RUN, 0/122,070, ~6.8 h | **KEEP** but demote. It is the mixture-isolation middle term between abl_D and the hybrid, and it is the cheapest way to finish the 134M decomposition. Reconsider if 400M needs the 4 GPUs. |
+| `cmix_134M_pure_32B_sparse` | RUN, 93.4%, **~0.8 h** | let it finish |
+| `cmix1B_12L_gptDense_32B` | RUN, 95.0%, **~1.7 h** | let it finish; releases 8 grp_ebm GPUs |
+| `cmix_400M_hybrid_sparse` | RUN, 60.0%, ~25 h | **KEEP — P0.2** |
+| `abl_B_400M_6G1x6S` | RUN, 60.6%, ~16 h | **KEEP — P0.1** |
+
+Freed within ~2 h: 8 (dead sandwich) + 4 (abl_C) + 8 (1B) + 8 (pure) = **28 GPUs**, enough for three
+8-GPU 400M arms plus a 4-GPU 134M arm.
+
 ## P0 — the headline cannot be stated without these
 
 **P0.1 `abl_B_400M_6G1x6S` — 35,800/61,035 (58.7%), job 1796831 PEND (preemptable).**
