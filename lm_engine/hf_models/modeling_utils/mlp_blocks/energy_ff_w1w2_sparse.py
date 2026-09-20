@@ -4,14 +4,18 @@
 """True-sparsity path for ``expert_kind="w1w2"``, the second expert type.
 
 ``energy_ff.py`` implements ``sparse_forward`` (skip the forward AND back projection of the
-K-k experts a token was not routed to) for **Hopfield experts only** — its own assert says so:
+K-k experts a token was not routed to) for **Hopfield experts only**; this module adds the
+w1w2 line as a subclass. Everything here is either a subclass override or an import.
 
-    assert fused_spec["kind"] == "hopfield", (
-        "fused_experts is implemented for expert_kind='hopfield' only "
-        "... the w1w2 line still uses the loop")
-
-This module adds the w1w2 line. NOTHING IN ``energy_ff.py`` IS MODIFIED: eight long training
-runs import it. Everything here is either a subclass override or an import.
+UPDATE 2026-09-19 — REACHABLE FROM YAML. Two things changed on that date:
+  * ``energy_ff.py``'s ``assert fused_spec["kind"] == "hopfield"`` now accepts ``"w1w2"`` too,
+    AND additionally requires that the instance actually overrode ``_forward_fused`` (which
+    only this class and its surrogate subclass do). So the ``_KIND_SHIM`` that used to pass the
+    literal ``"hopfield"`` with the real kind hidden under ``kind_real`` is GONE.
+  * ``get_mlp_block`` routes ``mlp_type: EnergyFF_BoltzmannMoE`` with ``expert_kind: w1w2`` and
+    ``fused_experts: true`` to ``build_boltzmann_moe_w1w2_sparse`` below. Before that, this
+    module was dead code from a config's point of view.
+Nothing else in ``energy_ff.py`` is modified: six long training runs import it.
 
 ===============================================================================================
 IS THE EXTENSION MECHANICAL? MOSTLY YES, WITH ONE STEP THAT GENUINELY FAILS.
@@ -128,16 +132,6 @@ from .energy_ff import (
 )
 
 
-# The frozen base class validates the fused spec with a literal string compare,
-#     assert fused_spec["kind"] == "hopfield"
-# and `"kind"` is read NOWHERE ELSE in energy_ff.py (verified by grep: the only other reads of
-# the spec are `weight_fn`, `gelu_grad_method`, `hopfield_grad_scale`, all inside methods this
-# class overrides). So we satisfy the assert with the literal and carry the true kind under
-# `kind_real`. This is a shim around a frozen file, not a claim about the expert type.
-# WHEN energy_ff.py IS NEXT EDITABLE: relax that assert to accept "w1w2" and delete this.
-_KIND_SHIM = "hopfield"
-
-
 class BoltzmannMoEW1W2Sparse(BoltzmannMoEFFEnergy):
     """``BoltzmannMoEFFEnergy`` with the fused + sparse paths implemented for w1w2 experts.
 
@@ -184,8 +178,12 @@ class BoltzmannMoEW1W2Sparse(BoltzmannMoEFFEnergy):
             proxy_out_dim=base_out_dim,
             fused_experts=True,
             fused_spec={
-                "kind": _KIND_SHIM,          # see _KIND_SHIM
-                "kind_real": "w1w2",
+                # The TRUE kind. Until 2026-09-19 this had to be the literal "hopfield" (a
+                # `_KIND_SHIM`) because the base class compared it with `==`; that assert now
+                # accepts "w1w2" and additionally checks that `_forward_fused` really is
+                # overridden, which this class does -- so the shim is gone and the spec no
+                # longer lies about the expert type.
+                "kind": "w1w2",
                 "weight_fn": w1_fn,          # base `_fused_W()` -> W1; `_fused_W2()` added here
                 "weight_fn_2": w2_fn,
                 "gelu_grad_method": gelu_grad_method,
@@ -736,6 +734,13 @@ def build_boltzmann_moe_w1w2_sparse(
     add_bias: bool = False,
     gelu_grad_method: str = "sigmoid",
     e_sign_override: str | None = None,
+    # CONSUMED, NOT FORWARDED (2026-09-19). `BoltzmannMoEW1W2Sparse.__init__` passes
+    # `fused_experts=True` to its super() itself -- this whole module IS the fused w1w2 path --
+    # so letting the caller's `fused_experts` fall through `**moe_kwargs` raises
+    # "got multiple values for keyword argument 'fused_experts'". It is accepted here (and
+    # asserted) rather than ignored, because `get_mlp_block` forwards a config's every field
+    # by name and a config that says `fused_experts: true` must not crash the build.
+    fused_experts: bool = True,
     layer_idx: int | None = None,
     **moe_kwargs,
 ) -> FusedMoEContainer:
@@ -755,6 +760,10 @@ def build_boltzmann_moe_w1w2_sparse(
     # `x @ W.t()`), so a True here would be a SILENT no-op that makes the parameter count
     # disagree with the function. The Hopfield path has the same hazard; refuse it explicitly.
     assert not add_bias, "add_bias is not read by the fused/sparse w1w2 paths; keep it False"
+    assert fused_experts, (
+        "build_boltzmann_moe_w1w2_sparse IS the fused w1w2 path; fused_experts=False would be a "
+        "silent lie. For the looped w1w2 path call build_boltzmann_moe(expert_kind='w1w2')."
+    )
     holder = _FusedW1W2Holder(
         hidden_size=hidden_size, intermediate_size=intermediate_size,
         n_experts=n_experts, init_method=init_method,

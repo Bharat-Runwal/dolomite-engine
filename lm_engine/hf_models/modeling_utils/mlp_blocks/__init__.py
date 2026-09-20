@@ -173,6 +173,13 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             num_layers=config.num_layers,
             add_bias=block.add_bias,
             gelu_grad_method=getattr(block, "gelu_grad_method", "sigmoid"),
+            # 2026-09-20: MUST be forwarded. HopfieldFFEnergy.__init__ has accepted this
+            # since 2026-09-12 but this builder never passed it, so the class silently fell
+            # back to "mean" no matter what the YAML said -- pre-flight rule 7 ("a field can
+            # parse onto the pydantic args object and never reach the builder"). That makes a
+            # non-MoE Hopfield baseline's descent step ~45x weaker than the MoE arms it is
+            # meant to ablate against, which all ship sqrt_consistent.
+            hopfield_grad_scale=getattr(block, "hopfield_grad_scale", "mean"),
             layer_idx=layer_idx,
         )
 
@@ -180,7 +187,13 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
         # 2026-06-28 refactor: composable Boltzmann-MoE over W1W2 OR Hopfield
         # experts. Restores repulsion + τ + n_repulsion_pairs that the
         # standalone BoltzmannMoE_Hopfield_Energy_MLP was missing.
-        mlp = build_boltzmann_moe(
+        #
+        # ONE kwargs dict, TWO builders (2026-09-19). `expert_kind: w1w2` with
+        # `fused_experts: true` goes to build_boltzmann_moe_w1w2_sparse; everything else to
+        # build_boltzmann_moe, exactly as before. The field list is spelled out ONCE and shared
+        # (pre-flight rule 7: two copies of a 40-field list is how a field ends up reaching one
+        # builder and silently not the other).
+        _moe_kw = dict(
             expert_kind=block.expert_kind,
             hidden_size=config.hidden_size,
             intermediate_size=block.intermediate_size,
@@ -228,6 +241,38 @@ def get_mlp_block(config: CommonConfig, use_padding_free_transformer: bool, laye
             gelu_grad_method=getattr(block, "gelu_grad_method", "sigmoid"),
             layer_idx=layer_idx,
         )
+        if _moe_kw["expert_kind"] == "w1w2" and _moe_kw["fused_experts"]:
+            # THE W1W2 FUSED + SPARSE LINE (2026-09-19). Until today this combination was
+            # UNBUILDABLE: build_boltzmann_moe emits fused_spec={"kind": "w1w2"} and the base
+            # class asserted the kind was "hopfield", so no YAML could reach
+            # energy_ff_w1w2_sparse.py at all. Dispatching here rather than on a new mlp_type
+            # therefore changes the behaviour of NO config that can be built today, and it
+            # matches what build_surrogate_boltzmann_moe already does for its own mlp_type
+            # (pick the class from expert_kind + fused_experts).
+            #
+            # LAZY IMPORT, same reason as the surrogate branch below: a config that does not ask
+            # for this never pulls the module into its import graph.
+            from .energy_ff_w1w2_sparse import build_boltzmann_moe_w1w2_sparse
+            _kw = dict(_moe_kw)
+            # Not parameters of the w1w2 builder / BoltzmannMoEFFEnergy:
+            #   expert_kind         -- implied by the builder
+            #   hopfield_grad_scale -- a Hopfield-only prefactor; forwarding it would TypeError
+            #                          (and configs DO carry it on w1w2 blocks, where the frozen
+            #                          builder likewise drops it)
+            _kw.pop("expert_kind")
+            _kw.pop("hopfield_grad_scale")
+            # ROUTING SIGN: `fused_experts` MUST NOT change it. build_boltzmann_moe defaults
+            # w1w2 to "pos" (the documented INVERTED sign, ROUTING_SIGN_BUG_20260915.md) while
+            # build_boltzmann_moe_w1w2_sparse defaults to the CORRECTED "neg". Left implicit,
+            # flipping an acceleration flag would silently flip the router. So the frozen
+            # builder's default is passed explicitly here; a config that wants the corrected
+            # sign says `e_sign_override: neg` (CLAUDE.md pre-flight check 8), exactly as the
+            # looped w1w2 arms already must.
+            if _kw.get("e_sign_override") is None:
+                _kw["e_sign_override"] = "pos"
+            mlp = build_boltzmann_moe_w1w2_sparse(**_kw)
+        else:
+            mlp = build_boltzmann_moe(**_moe_kw)
 
     elif mlp_type == "EnergyFF_SurrogateBoltzmannMoE":
         # 2026-09-18: EnergyFF_BoltzmannMoE + a KL-distilled d->K router head that replaces

@@ -39,9 +39,58 @@ from transformers import AutoModelForCausalLM as _AMCLM
 _orig_from_pretrained = _AMCLM.from_pretrained.__func__
 
 
+def _load_without_dispatch(cls, path, args, kwargs):
+    """Reload without accelerate's device_map dispatch, then move the model by hand.
+
+    WHY THIS EXISTS (2026-09-20). `surrogate_free_proxy: true` (the default on
+    `EnergyFF_SurrogateBoltzmannMoE`) converts `proxy_V/B/V2/B2/bias/scale` into
+    NON-PERSISTENT buffers, so they are deliberately absent from the state_dict -- nothing
+    reads their values once `surrogate_replaces_proxy` overrides `_proxy_energies`. But when
+    lm_eval passes a `device_map`, accelerate builds the model under `init_empty_weights`, so
+    those buffers are created on META and no checkpoint entry ever fills them. The subsequent
+    `dispatch_model -> model.to(device)` then dies with
+
+        NotImplementedError: Cannot copy out of meta tensor; no data!
+
+    killing BOTH halves of the eval (`ev_` exit 1; `evg_` reported DONE while writing nothing).
+    Loading without a device_map skips `init_empty_weights`, the buffers get real storage in
+    `__init__`, and 0 meta buffers remain -- verified on
+    `cmix_134M_hyb_w1w2_sparse_surr_32B/unsharded_step122070`.
+
+    Only arms that actually hit the error take this path, so no currently-working arm changes.
+    Safe for our sizes: every arm here fits on one GPU (largest is 1.0B), which is all
+    `device_map` was buying.
+    """
+    import torch
+    dm = kwargs.pop("device_map", None)
+    kwargs.pop("low_cpu_mem_usage", None)
+    model = _orig_from_pretrained(cls, path, *args, **kwargs)
+    dev = None
+    if isinstance(dm, dict):
+        dev = next((v for v in dm.values() if v is not None), None)
+    elif isinstance(dm, str) and dm not in ("auto", "balanced", "balanced_low_0", "sequential"):
+        dev = dm
+    if dev is None:
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    if isinstance(dev, int):
+        dev = f"cuda:{dev}"
+    remaining = [n for n, b in model.named_buffers() if b.is_meta]
+    assert not remaining, (
+        "buffers still on meta after a dispatch-free reload, so the device_map was not the "
+        f"cause and moving the model would corrupt it: {remaining}")
+    print(f"[eval_harness] reloaded without device_map and moved to {dev} "
+          f"(meta-buffer workaround)", flush=True)
+    return model.to(dev)
+
+
 @classmethod  # type: ignore[misc]
 def _patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-    model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
+    try:
+        model = _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
+    except NotImplementedError as exc:
+        if "meta tensor" not in str(exc):
+            raise
+        model = _load_without_dispatch(cls, pretrained_model_name_or_path, args, dict(kwargs))
     proj_state_path = Path(pretrained_model_name_or_path) / "proj_state.pt"
     if not proj_state_path.exists():
         return model

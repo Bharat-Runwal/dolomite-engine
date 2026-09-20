@@ -948,10 +948,28 @@ class BoltzmannMoEFFEnergy(FFEnergyBase):
             assert fused_spec is not None, "fused_experts=True needs fused_spec"
             widths = {e.intermediate_size for e in experts}
             assert len(widths) == 1, f"fused path needs equal expert widths, got {widths}"
-            assert fused_spec["kind"] == "hopfield", (
-                "fused_experts is implemented for expert_kind='hopfield' only "
-                f"(got {fused_spec['kind']!r}); the w1w2 line still uses the loop"
+            # 2026-09-19: "w1w2" accepted as well. THIS CLASS still implements the HOPFIELD
+            # arithmetic only -- the w1w2 fused/sparse algebra lives in
+            # `energy_ff_w1w2_sparse.BoltzmannMoEW1W2Sparse`, which overrides `_forward_fused`,
+            # `_forward_sparse`, `_proxy_energies` and `_svd_refit_proxy`. The second clause is
+            # what keeps the assert MEANINGFUL rather than a no-op: a plain
+            # BoltzmannMoEFFEnergy handed kind="w1w2" would find `weight_fn` present (the w1w2
+            # builder sets it to W1) and would happily compute the HOPFIELD energy
+            # mean(gelu(W1 x)^2) on it -- the wrong model, silently, with no shape error. So
+            # "w1w2" is admitted only for a subclass that actually replaced the arithmetic.
+            assert fused_spec["kind"] in ("hopfield", "w1w2"), (
+                "fused_experts is implemented for expert_kind in ('hopfield', 'w1w2') "
+                f"(got {fused_spec['kind']!r})"
             )
+            if fused_spec["kind"] == "w1w2":
+                assert type(self)._forward_fused is not BoltzmannMoEFFEnergy._forward_fused, (
+                    "fused_experts with expert_kind='w1w2' needs a subclass that overrides the "
+                    "fused arithmetic (energy_ff_w1w2_sparse.BoltzmannMoEW1W2Sparse). "
+                    f"{type(self).__name__} inherits this class's HOPFIELD _forward_fused, "
+                    "which would compute mean(gelu(W1 x)^2) instead of the bilinear energy "
+                    "-- silently. Build it through build_boltzmann_moe_w1w2_sparse (or "
+                    "build_surrogate_boltzmann_moe, which picks the class for you)."
+                )
             self._expert_I = experts[0].intermediate_size
 
         # ------------------------------------------------------------------ #

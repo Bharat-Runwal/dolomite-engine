@@ -244,10 +244,20 @@ class _EnergyFFHopfieldArgs(BaseArgs):
     dropout: float = 0
     add_bias: bool = False
     gelu_grad_method: str = "sigmoid"
+    # 2026-09-20: EXPOSED so a non-MoE Hopfield FF can be compared against a Boltzmann-MoE
+    # arm on equal footing. The MoE arms all ship `hopfield_grad_scale: sqrt_consistent`;
+    # leaving this at the "mean" default while the MoE runs sqrt_consistent makes the
+    # baseline's descent step ~45x SMALLER at I=2048 vs the MoE's I_e=1024 (0.00195 vs
+    # 0.125), which is the exact regime `_hopfield_grad_prefactor`'s docstring records as
+    # "the branch was inert" (||ffwd_out|| 0.005 vs ||attn_out|| 18.53). An ablation run
+    # that way would compare a live MoE branch against a dead single-FFN branch.
+    # Default kept at "mean" for backward compatibility; ablation configs set it explicitly.
+    hopfield_grad_scale: str = "mean"
 
     def model_post_init(self, __context: Any) -> None:
         assert self.mlp_type == "EnergyFF_Hopfield"
         assert self.gelu_grad_method in ("sigmoid", "tanh_exact", "erf_exact")
+        assert self.hopfield_grad_scale in ("mean", "inv_sqrt", "sqrt_consistent")
 
 
 class _EnergyFFBoltzmannMoEArgs(BaseArgs):
