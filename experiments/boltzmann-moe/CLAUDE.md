@@ -110,12 +110,24 @@
 > grep -c 'Setting OMP_NUM_THREADS' $HOME/bsub_logs/<name>_<jobid>.stderr   # >1 = restarted
 > ```
 >
-> * **RESTART**: CPU time is small and RISING fast from ~0, memory climbing from ~2 GB, the step
->   number JUMPS BACK to the last checkpoint, and the stderr holds more than one
->   `Setting OMP_NUM_THREADS` banner. Nothing to do — it is resuming and loses only the steps since
->   the last save.
-> * **HANG**: CPU time is large and FLAT, memory flat at full size, the step number does not move,
->   and there is exactly one process banner. That is the case to kill and resubmit.
+> **⚠ USE STDERR MTIME AS THE PRIMARY SIGNAL, NOT THE CPU DELTA.** LSF samples
+> `CPU time used` COARSELY, so a 20-30 s window can report a delta of ZERO on a perfectly healthy
+> job. Measured 2026-09-20: `abl_F` showed `CPU 21564 -> 21564` over 25 s while it was actively
+> logging step 34,550 — a false wedge verdict that would have killed a healthy arm. The wedged
+> `abl_G` had a **34-minute-stale stderr**; healthy arms are 0-1 min. So:
+>
+> ```bash
+> e=$HOME/bsub_logs/<name>_<jobid>.stderr
+> echo $(( ($(date +%s) - $(stat -c %Y "$e")) / 60 )) min stale    # 0-2 = healthy, >10 = suspect
+> ```
+>
+> * **HEALTHY**: stderr mtime within a couple of minutes, step number advancing over a 10-min window.
+> * **RESTART**: the step number JUMPS BACK to the last checkpoint, CPU time is small and rising from
+>   ~0, memory climbing from ~2 GB, and the stderr holds more than one `Setting OMP_NUM_THREADS`
+>   banner. Nothing to do — it is resuming and loses only the steps since the last save.
+> * **HANG**: stderr stale for MANY minutes, step number unchanged over that whole span, one process
+>   banner, and CPU time flat when sampled over minutes (not seconds). That is the case to kill —
+>   with `bkill -r`, see below.
 >
 > Killing a requeued-but-healthy job throws away whatever it has redone since the checkpoint, and if
 > its first checkpoint has not been written yet it restarts from ZERO — that is how `abl_E` lost
