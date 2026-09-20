@@ -121,6 +121,15 @@
 > its first checkpoint has not been written yet it restarts from ZERO — that is how `abl_E` lost
 > 1,770 steps earlier the same day.
 >
+> **A WEDGED JOB IGNORES `bkill` — USE `bkill -r`.** On 2026-09-20 the hung `abl_G` (job 1798098)
+> was sent a plain `bkill`, which printed `Job <1798098> is being terminated` and did NOTHING: a
+> process stuck inside a compiled region does not service SIGTERM. It stayed `RUN` for 20 more
+> minutes holding 8 GPUs, and because its 4-GPU replacement targeted the same `grp_ebm` quota, the
+> corpse blocked its own replacement from ever scheduling. `bkill -r` (force, bypasses the
+> application) killed it instantly. **After killing a wedged job, VERIFY it left the queue** —
+> `bjobs <jobid>` must say EXIT or be empty — and never assume a kill succeeded because LSF
+> acknowledged the request.
+>
 > `STAT=RUN` IS NOT PROGRESS. Five arms were found dead on 2026-09-20 and a sixth
 > (`abl_B_400M_6G1x6S`) stayed dead through the first sweep because it was not in
 > `scripts/health_check_arms.py`'s list. The authoritative progress source is

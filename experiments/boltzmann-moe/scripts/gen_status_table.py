@@ -79,10 +79,31 @@ def arch(pc):
         out.append(f"{n}{ch}" if it==1 else f"{n}x{it}{ch}"); i+=n
     return "".join(out)
 
-def metrics(sp):
-    """Newest COMPLETE result for the end-of-run checkpoint."""
-    cands = glob.glob(f'{sp}/unsharded*/harness_results_merged_*.json') or \
-            glob.glob(f'{sp}/unsharded*/harness_results_2*.json')
+def metrics(sp, tot=None):
+    """Newest COMPLETE result for the END-OF-RUN checkpoint, and ONLY that one.
+
+    2026-09-20: this used to glob `unsharded*`, which matches ANY step's unsharded directory. The
+    1B arm had a single stale eval under `unsharded_step4000` -- 4,000 x 524,288 = 2.10B tokens --
+    and this function happily reported it as the arm's result. It reached the paper as
+    "1B stacked 8G4E ... complete, Avg11 41.78, ppl 63.55" inside a table whose caption says every
+    arm trains on 32.0B tokens. The perplexity of 63.55 was the only hint, and it was read as the
+    architecture being weak rather than as 15x too few tokens.
+
+    So: when `tot` (the arm's num_training_steps) is known, accept results ONLY from
+    `unsharded_step{tot}` or a legacy plain `unsharded/`. A result from any other step is NOT this
+    arm's number -- return None so the row shows as unevaluated, which is true, instead of showing a
+    number that is wrong.
+    """
+    pats = []
+    if tot is not None:
+        pats = [f'{sp}/unsharded_step{tot}', f'{sp}/unsharded']
+    else:
+        pats = [f'{sp}/unsharded*']
+    cands = []
+    for d in pats:
+        cands = glob.glob(f'{d}/harness_results_merged_*.json') or \
+                glob.glob(f'{d}/harness_results_2*.json')
+        if cands: break
     if not cands: return None
     f = max(cands, key=os.path.getmtime)
     r = json.load(open(f)).get('results',{})
@@ -128,7 +149,7 @@ for a,(label,role) in ROLES.items():
             kind='hopfield' if _t.endswith('Hopfield') else ('w1w2' if _t.endswith('W1W2') else '?')
     elif sb: kind,K,k='swiglu',sb[0]['num_experts'],sb[0]['num_experts_per_tok']
     else:   kind,K,k='dense',None,None
-    mt=metrics(sp) or {}
+    mt=metrics(sp, tot) or {}
     _m = sparse_mech(pc)
     if _m:
         label = f"{label}, {_m}"

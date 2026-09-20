@@ -67,9 +67,14 @@ for f in sorted(glob.glob('configs/cmix/cmix*.yml')
     except Exception: continue
     if it != tot:                      # NOT finished -- the whole point
         continue
-    # check EVERY unsharded* dir, not just unsharded_step<N>: earlier evals wrote to a plain
-    # `unsharded/`, and looking only at the suffixed path queued duplicate jobs for two arms.
-    main = newest(f'{sp}/unsharded*/harness_results*.json')
+    # Accept the FINAL step's dir, or a legacy plain `unsharded/` -- but NOT some other step.
+    # The old glob was `unsharded*`, which matches ANY step. The 1B arm had one stale eval under
+    # unsharded_step4000 (2.10B tokens), so this function concluded the arm was already evaluated
+    # and NEVER QUEUED the real 32B eval after it finished -- while gen_status_table reported the
+    # 2.10B number as the arm's result in the paper. Widening this glob to fix a duplicate-submission
+    # bug is what created a silent wrong-number bug; keep both cases explicit instead.
+    main = newest(f'{sp}/unsharded_step{it}/harness_results*.json') \
+           or newest(f'{sp}/unsharded/harness_results*.json')
     need_like = '0' if main else '1'
     need_gsm = '1'
     if glob.glob(f'{sp}/gsm8k_step*/gsm8k_raw_*.json'):
