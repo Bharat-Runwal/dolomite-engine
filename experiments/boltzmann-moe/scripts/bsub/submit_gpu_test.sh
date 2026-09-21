@@ -54,8 +54,18 @@ sel="${sel# && }"
 RES=()
 [ -n "$sel" ] && RES=(-R "select[$sel]")
 
+# QUEUE OVERRIDE (added 2026-09-21). Default stays preemptable -- that is correct while grp_ebm is
+# at 32/32, which CLAUDE.md documents as the normal case. But when grp_ebm IS genuinely free the rule
+# explicitly allows using it, and preemption is not cheap for evals: a suspended eval RESTARTS FROM
+# SCRATCH rather than resuming. Measured 2026-09-21 on abl_B_400M's benchmark -- it was at
+# 42,135/138,807 likelihood requests when preempted and came back at 2,284, losing ~30 min. At a
+# fairshare priority of 0.0030 that can loop indefinitely and an eval may never finish.
+#   EVAL_QUEUE=ebm bash scripts/bsub/submit_gpu_test.sh ...
+EVAL_QUEUE="${EVAL_QUEUE:-preemptable}"
+if [ "$EVAL_QUEUE" = "ebm" ]; then Q="-q normal -G grp_ebm"; else Q="-q preemptable -G grp_preemptable"; fi
+
 bsub \
-    -q preemptable -G grp_preemptable \
+    $Q \
     -J "$JOB" \
     -gpu "num=${GPUS}/task:mode=exclusive_process" \
     "${RES[@]}" \

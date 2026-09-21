@@ -37,18 +37,32 @@ only WITHIN a scale.**
 
 ### 400M / 1B tier — in flight except where noted
 
-| config | status | 8B `lm_loss` | 32B Avg11 |
-|---|---|---|---|
-| `abl_B_400M_6G1x6S` | ~93% | **2.6571** | — |
-| `abl_H_400M_6G6S_deep` | 25%, stopped | 2.6583 | — |
-| `abl_H_400M_6G6G_deep_isoactive` | 27%, stopped | 2.6812 | — |
-| `abl_H_400M_6G6E_deep` | 33%, stopped | 2.7280 | — |
-| `cmix_400M_hybrid_sparse` | ~81% | 2.7319 | — |
-| `cmix_400M_baseline_switch` | complete | — | 47.44 / ppl 28.82 |
-| `cmix1B_12L_gptDense_32B` | complete | — | **47.79 / ppl 29.46** |
-| `abl_G_400M_6G1x6S1x6S` | 24% | — | — |
-| `abl_G_400M_6G1x6E1x6E(_4gpu)` | 9% | — | — |
-| `cmix_400M_sandwich_sparse` | 28%, retired | — | — |
+| config | status | 8B `lm_loss` | 32B Avg11 | ppl | MMLU | GSM8K |
+|---|---|---|---|---|---|---|
+| `abl_B_400M_6G1x6S` | **COMPLETE** | **2.6571** | **48.24** | **28.27** | **26.74** | **3.26** |
+| `abl_H_400M_6G6S_deep` | 25%, stopped | 2.6583 | — | — | — | — |
+| `abl_H_400M_6G6G_deep_isoactive` | 27%, stopped | 2.6812 | — | — | — | — |
+| `abl_H_400M_6G6E_deep` | 33%, stopped | 2.7280 | — | — | — | — |
+| `cmix_400M_hybrid_sparse` | ~85% RUNNING | 2.7319 | — | — | — | — |
+| `cmix_400M_baseline_switch` | complete | — | 47.44 | 28.82 | 26.55 | 2.73 |
+| `cmix1B_12L_gptDense_32B` | complete | — | 47.79 | 29.46 | 26.50 | 1.74 |
+| `abl_G_400M_6G1x6S1x6S` | 31% RUNNING | — | — | — | — | — |
+| `abl_G_400M_6G1x6E1x6E(_4gpu)` | 12% RUNNING, cannot finish by Sep 24 (13.8 s/step) | — | — | — | — | — |
+| `cmix_400M_sandwich_sparse` | 28%, retired | — | — | — | — | — |
+
+**THE FLOP-MATCHED SWITCH BASELINE IS THE STRONGEST ARM IN THE PROJECT.** `abl_B_400M_6G1x6S` at
+48.24 / 28.27 / 26.74 / 3.26 leads every column, including the 1B arm (47.79 / 29.46) at 40% of its
+parameters. Two consequences:
+
+1. **HANDOFF 14.1's correction is confirmed at 400M with full benchmarks, not just FLOP arithmetic.**
+   Restoring recurrence to the Switch baseline is worth **+0.80pp Avg11 and 0.55 ppl** over the
+   unmatched `6G1S` (48.24 vs 47.44). The unmatched baseline really was under-provisioned, so any
+   comparison against it understates the learned gate.
+2. **The 400M energy-vs-gate comparison is still INCOMPLETE.** `cmix_400M_hybrid_sparse` has not
+   finished. Until it does, that comparison rests only on the 8B losses (energy 2.7319 vs Switch
+   2.6571, a 0.0748-nat gap). Given that `abl_I`'s 6-sigma 8B lead REVERSED by 32B, do not state the
+   400M conclusion from 8B loss alone -- though the direction has been consistent across the 8B loss
+   and every 134M benchmark, so a reversal of that size would be surprising.
 
 `lm_loss` is the windowed median over the 8B crossing (steps 14,500-16,000 at 524,288 tok/step),
 n=101-151 points, median SE ~0.001. LOWER better.
