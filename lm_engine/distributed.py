@@ -156,6 +156,16 @@ def _set_parameter_marker_maps(model_container: ModelContainer, marker_maps: lis
                 setattr(parameter, marker, value)
 
 
+def _has_aten_dist_opts() -> bool:
+    """torch._inductor.config.aten_distributed_optimizations landed in torch 2.9; on 2.8 the
+    attribute raises AttributeError via the config module's __getattr__."""
+    try:
+        torch._inductor.config.aten_distributed_optimizations
+        return True
+    except AttributeError:
+        return False
+
+
 def wrap_model_container_for_distributed_training(
     args: TrainingArgs, model_container: ModelContainer
 ) -> tuple[ModelContainer, _PipelineSchedule]:
@@ -422,9 +432,12 @@ def wrap_model_container_for_distributed_training(
         # so a bisect gets a diagnostic rather than a 108-minute wedge. Debug only.
         spmd_diag = os.environ.get("DOLOMITE_SPMD_DIAG", "0") == "1"
         if spmd_diag:
-            torch._inductor.config.aten_distributed_optimizations.spmd_check = True
-            torch._inductor.config.aten_distributed_optimizations.spmd_mismatch = "error"
-            log_rank_0(logging.INFO, "DOLOMITE_SPMD_DIAG=1: spmd_check ON, mismatch=error (fail fast)")
+            if _has_aten_dist_opts():
+                torch._inductor.config.aten_distributed_optimizations.spmd_check = True
+                torch._inductor.config.aten_distributed_optimizations.spmd_mismatch = "error"
+                log_rank_0(logging.INFO, "DOLOMITE_SPMD_DIAG=1: spmd_check ON, mismatch=error (fail fast)")
+            else:
+                log_rank_0(logging.INFO, "DOLOMITE_SPMD_DIAG=1 ignored: no aten_distributed_optimizations on this torch")
         elif world > 1:
             # WIDENED 2026-09-19 from `n_nodes > 1` to `world > 1`. The claim above that "single
             # node is unaffected (all ranks on one host agree)" is DISPROVEN: abl_B_134M_6G1x6S
@@ -439,7 +452,10 @@ def wrap_model_container_for_distributed_training(
             # ourselves at :63) and nothing else. DOLOMITE_SPMD_DIAG=1 still restores it, failing
             # fast rather than hanging, for bisects.
             torch._inductor.config.reorder_for_compute_comm_overlap = False
-            torch._inductor.config.aten_distributed_optimizations.spmd_check = False
+            # torch < 2.9 has no aten_distributed_optimizations namespace at all, so there is no
+            # spmd_check to disable there -- the deadlock this guards against cannot occur.
+            if _has_aten_dist_opts():
+                torch._inductor.config.aten_distributed_optimizations.spmd_check = False
             log_rank_0(
                 logging.INFO,
                 f"world_size {world} ({n_nodes} node(s)): disabled reorder_for_compute_comm_overlap "
