@@ -30,6 +30,13 @@ ROLES = {
  'abl_C_134M_1G1x6E1G_isototal':       ('134M true sandwich, iso-total','ABLATION C'),
  'abl_D_134M_6G_dense_isototal':       ('134M GPT-only dense, iso-total','ABLATION D'),
  'abl_E_134M_6G1x6E_baseEGPT':         ('134M base EGPT, iso-active','ABLATION E'),
+ 'abl_F_134M_6G_dense_isoactive':      ('134M GPT-only, iso-active','ABLATION F'),
+ 'abl_I_134M_w1w2_sparse_surr_projUncon': ('134M w1w2, unconstrained proj','ABLATION I'),
+ 'abl_G_400M_6G1x6E1x6E':              ('400M two recurrent energy blocks','ABLATION G'),
+ 'abl_G_400M_6G1x6S1x6S':              ('400M two recurrent Switch blocks','ABLATION G'),
+ 'abl_H_400M_6G6E_deep':               ('400M deep energy, no recurrence','ABLATION H'),
+ 'abl_H_400M_6G6S_deep':               ('400M deep Switch, no recurrence','ABLATION H'),
+ 'abl_H_400M_6G6G_deep_isoactive':     ('400M 12G dense, iso-active','ABLATION H'),
 }
 
 # WHICH SPARSE MECHANISM -- DERIVED FROM THE CONFIG, NEVER HAND-LABELLED (2026-09-20).

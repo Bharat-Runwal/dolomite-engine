@@ -1,0 +1,404 @@
+# 1B BoltzMoE for Bharat -- 8S4E: 8 softmax+Switch-MoE layers, then 4 energy+BoltzmannMoE layers.
+# NOT a copy of s8e4_stdmoe_fh2_boltz_topk2.yml. Built from OUR cmix1B skeleton + the PROVEN 400M
+# hybrid energy block (configs/cmix/cmix_400M_hybrid_sparse.yml), so every routing knob is one we
+# have actually trained: hopfield experts, e_sign_override pos, sinkhorn_iters 3, sparse_forward with
+# the rank-16 subspace PROXY, repulsion output+subsample, renormalize_topk.
+#
+# WHY K=32 k=8 AND NOT K=8 or K=64 k=2.
+#   * Our existing 1B (cmix1B_12L_gptDense_32B) is K=64 k=2: it stores a 746.1M expert bank and
+#     activates 23.3M of it -- 3.1%. Total 1002.1M but ACTIVE only 279.3M, just +27% over the 400M
+#     arms' 220M. That is exactly why it scores 47.79 and LOSES to the 400M FLOP-matched Switch
+#     (48.24). A 1B that activates like a 400M performs like a 400M.
+#   * K=8 (the colleague's setting) gives too few experts to route among at this width.
+#   * K=32 k=8 activates 25% of the bank. ACTIVE = 364.0M = 1.66x the 400M arms.
+#   * I_e = 96000/32 = 3000, close to the 400M hybrid's proven I_e=5871 and far above the 134M
+#     arm's I_e=1024 which was flagged as too narrow for sparsity to pay.
+#
+# SCHEDULE IS COSINE over the full run, deliberately. We have NO controlled WSD-vs-cosine A/B at
+# 32B; the WSD design was confirmed only on short probes (HANDOFF 12.17-12.18). Cosine is standard
+# and is what the whole 134M tier used. The BASELINE uses the identical schedule -- that matching is
+# what matters, not which shape.
+#
+# *** INTENDED GPU COUNT: 8 ***  mbs 2 x ga 8 x 4096 x 8 = 524,288 tok/step; 61,035 steps = 32.0B.
+# For a 128B-token run multiply num_training_steps by 4 (244,140) and set num_decay_steps to match.
+#
+# sparse_candidates=10 / sparse_explore=2 -> p = 12 of K=32. The assert
+# `top_k <= p <= n_experts` REJECTED the inherited sparse_candidates: 2, which was written for a
+# top_k=2 arm -- a good catch by the code, and a reminder that top_k and the candidate count move
+# together.
+#
+# THE TENSION THIS EXPOSES, AND IT IS A REAL DESIGN CONSTRAINT AT 1B. active_bank = (k/K) x bank,
+# and bank cannot exceed ~700M inside a 1B budget. So high ACTIVE parameters force high k/K, which
+# is exactly what shrinks the sparsity win: at k=8,p=12 of K=32 the ceiling on expert-compute saving
+# is K/p = 2.7x, against 8x for the 400M hybrid's p=4 of 32. Our existing 1B sits at the opposite
+# extreme -- k/K = 3.1%, superb sparsity, and it performs like a 400M model because it activates
+# like one. This config picks the middle: 25% activation, 2.7x sparsity ceiling, 1.66x the 400M
+# arms' active parameters. If Bharat has GPUs to spare, k=16 (50% activation) would reach 2.0x
+# active but forfeit most of the sparsity story.
+datasets:
+- class_name: MegatronDataset
+  data_name: Megatron
+  data_sampling_ratio: 1
+  class_args:
+    eval_steps: 2
+    data_cache_path: /proj/dmfexp/nima/.cache/megatron_cmix
+    data_path:
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_0
+    - 0.35
+    - /proj/datasets/granite-4-datasets-megatron-merged/web-nemotron-cc-hq-p2_1
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/megamath-web-pro_0
+    - 0.15
+    - /proj/datasets/granite-4-datasets-megatron-merged/finemath-3plus-rewritten_0
+    split: 99,0.5,0.5
+    sequence_length: 4096
+tokenizer_args:
+  tokenizer_name: /proj/datasets/tokenizers/granite-4.0-tiktoken
+model_args:
+  model_class: AutoModelForCausalLM
+  pretrained_config:
+    model_type: energy
+    initializer_range: 0.02
+    layer_norm_epsilon: 1.0e-05
+    normalization_function: rmsnorm
+    position_embedding_type: rope
+    rope_dim: 64
+    hidden_size: 1024
+    num_layers: 12
+    num_iterations: 1
+    num_pre_layers: 0
+    num_post_layers: 0
+    layer_iterations:
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    - 1
+    init_method: normal
+    tie_word_embeddings: true
+    energy_proj_type: psd_anti
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
+    vocab_size: 100352
+    max_position_embeddings: 4096
+    sequence_mixer_blocks:
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: softmax_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    - sequence_mixer_type: energy_attention
+      num_attention_heads: 16
+      num_key_value_heads: 16
+      add_bias: false
+      attention_multiplier: 0.125
+    mlp_blocks:
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: MoE
+      intermediate_size: 576
+      num_experts: 32
+      num_experts_per_tok: 8
+      activation_function: swiglu
+      normalized_topk: true
+      shared_expert_gating: false
+      use_interleaved_weights: false
+      add_bias: false
+    - mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 96000
+      n_experts: 32
+      top_k: 8
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      repulsion_space: output
+      cos_probe_interval: 100
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 1
+      repulsion_tensor_idx: true
+      renormalize_topk: true
+      fused_experts: true
+      sparse_start_step: 300
+      sparse_forward: true
+      sparse_candidates: 10
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      activation_function: gelu
+      add_bias: false
+      repulsion_subsample: 64
+      proxy_init: svd
+    - mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 96000
+      n_experts: 32
+      top_k: 8
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      repulsion_space: output
+      cos_probe_interval: 100
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 1
+      repulsion_tensor_idx: true
+      renormalize_topk: true
+      fused_experts: true
+      sparse_start_step: 300
+      sparse_forward: true
+      sparse_candidates: 10
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      activation_function: gelu
+      add_bias: false
+      repulsion_subsample: 64
+      proxy_init: svd
+    - mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 96000
+      n_experts: 32
+      top_k: 8
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      repulsion_space: output
+      cos_probe_interval: 100
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 1
+      repulsion_tensor_idx: true
+      renormalize_topk: true
+      fused_experts: true
+      sparse_start_step: 300
+      sparse_forward: true
+      sparse_candidates: 10
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      activation_function: gelu
+      add_bias: false
+      repulsion_subsample: 64
+      proxy_init: svd
+    - mlp_type: EnergyFF_BoltzmannMoE
+      expert_kind: hopfield
+      intermediate_size: 96000
+      n_experts: 32
+      top_k: 8
+      hopfield_grad_scale: sqrt_consistent
+      routing_norm: zscore
+      temperature: 1.0
+      repulsion_form: abs
+      repulsion_coef: 0.1
+      repulsion_space: output
+      cos_probe_interval: 100
+      n_repulsion_pairs: 4
+      gelu_grad_method: sigmoid
+      e_sign_override: pos
+      sinkhorn_iters: 3
+      sinkhorn_persist_mu: true
+      sinkhorn_mu_iters: 1
+      repulsion_tensor_idx: true
+      renormalize_topk: true
+      fused_experts: true
+      sparse_start_step: 300
+      sparse_forward: true
+      sparse_candidates: 10
+      sparse_explore: 2
+      proxy_rank: 16
+      proxy_kind: subspace
+      proxy_out_dim: 512
+      proxy_iters: 1
+      proxy_loss_coef: 0.01
+      activation_function: gelu
+      add_bias: false
+      repulsion_subsample: 64
+      proxy_init: svd
+tuning_args:
+  tuning_method: pretraining
+save_args:
+  save_path: /proj/dmfexp/nima/Code/dolomite-engine/experiments/boltzmann-moe/results/iclr26_bharat/bharat_1B_8S4E_boltz
+  save_interval: 1000
+  max_to_keep: 2
+logging_args:
+  log_interval: 10
+  experiments_tracker_name: wandb
+  wandb_args:
+    project: energy-inference-large
+    name: bharat_1B_8S4E_boltz
+training_parameters:
+  num_training_steps: 61035
+  eval_interval: 2000
+  micro_batch_size: 2
+  gradient_accumulation_steps: 8
+  eval_during_training: false
+  gradient_clipping: 1
+optimizer_args:
+  class_name: TorchAdamW
+  class_args:
+    lr: 2e-3
+    weight_decay: 0.1
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1e-8
+lr_scheduler_args:
+  lr_decay_style: cosine
+  lr_decay_factor: 0.1
+  num_warmup_steps: 2000
+  num_constant_steps: 0
+  num_decay_steps: 59035
+mixed_precision_args:
+  dtype: bf16
+distributed_args:
+  fsdp_algorithm: 2
+  torch_compile: true
+  stage: 0
+  gradient_checkpointing_method: block
+  timeout_minutes: 180
