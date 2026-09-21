@@ -45,3 +45,51 @@ bash experiments/boltzmann-moe/scripts/bsub/submit_train.sh \
    peer`, `lsb_launch(): Failed`, or a wandb `ServiceStartTimeoutError` all mean *resubmit*, not
    *debug*. Only investigate if the same arm fails the same way three times. And a genuinely wedged
    job ignores plain `bkill` — use `bkill -r`.
+
+---
+
+# ALSO HERE: the four 400M arms we are running right now
+
+If you have spare capacity, running any of these in parallel with ours is pure insurance — they are
+the arms the paper's 400M tier depends on, and ours keep getting preempted. **Use a DIFFERENT
+`save_path` and wandb `name` if you run one concurrently with ours**, or the two jobs will fight over
+the same checkpoint directory.
+
+| config | GPUs | our progress | s/step |
+|---|---|---|---|
+| `cmix_400M_hybrid_sparse.yml` | 8 | ~53,500/61,035 | 3.9 |
+| `abl_H_400M_6G6E_deep.yml` | 8 | ~23,300/61,035 | 1.7 |
+| `cmix_400M_sandwich_sparse.yml` | 8 | ~20,300/61,035 | 2.5 |
+| `abl_H_400M_6G6S_deep.yml` | 8 | ~18,600/61,035 | 1.5 |
+
+`cmix_400M_hybrid_sparse` is the single highest-value one — it is the energy side of the headline
+comparison and the only 400M energy arm without a 32B number yet.
+
+---
+
+# THEN: SEEDS. This is the most valuable thing left, and nobody has done it.
+
+**Every margin in the paper except one is sub-1pp on a SINGLE seed.** That includes the claim the
+headline rests on (the FLOP-matched Switch leading the energy hybrid by 0.61pp at 134M) and the
+counter-claim (a plain dense GPT leading by 0.73pp). Neither is assertable without error bars, and
+this cuts against us and for us equally.
+
+**`seed` lives at `random_args.seed` and defaults to 42. It is NOT set in any of our configs**, so
+every arm to date is seed 42. To make a seed variant, add to any config:
+
+```yaml
+random_args:
+  seed: 1234        # or 7
+```
+
+…and give it a distinct `save_args.save_path` and `logging_args.wandb_args.name` (append `_s1234`).
+
+**Priority order** — 2 extra seeds of these two 134M arms answers the headline question. ~5.3 h each
+on 4 GPUs, so ~21 GPU-hours per seed-pair:
+
+1. `configs/iclr_26/scaling/cmix_134M_hybrid_32B_sparse.yml` — the energy hybrid (44.82)
+2. `configs/iclr_26/scaling/abl_B_134M_6G1x6S.yml` — the FLOP-matched Switch (45.43)
+
+If there is room for a third, `abl_E_134M_6G1x6E_baseEGPT` (45.87) — it is the arm that currently
+looks like it beats the hybrid, and it is the one comparison with no confound, so an error bar on it
+matters.
