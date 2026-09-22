@@ -167,9 +167,9 @@ model_args:
     layer_iterations: [{', '.join(['1'] * LAYERS)}]
     tie_word_embeddings: true
     vocab_size: {VOCAB}
-    bos_token_id: 0
-    eos_token_id: 0
-    pad_token_id: 0
+    bos_token_id: 100257
+    eos_token_id: 100257
+    pad_token_id: 100256
     max_position_embeddings: {SEQ}
     position_embedding_type: rope
     rope_dim: 64          # REQUIRED: mixed softmax/energy mixers -> rope_dim cannot be inferred

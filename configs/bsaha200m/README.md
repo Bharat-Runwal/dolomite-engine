@@ -134,6 +134,21 @@ all five arms. At 200M/15.7B **every downstream benchmark will be noise**. Rank 
 hypothesis, not a result. Note also **n=1 per arm** — no seeds, so a <0.5pp difference between two
 arms here is not resolvable.
 
+## Pre-flight: run `_verify_params.py` before submitting
+
+It instantiates every config AND loads the real tokenizer, then compares
+`bos/eos/pad_token_id` and `vocab_size` against the config. A green run ends with
+`tokenizer ids: all OK`.
+
+This exists because the first submission of all 12 died at step 0, ~25 s in, on
+
+    assert self.tokenizer.bos_token_id == self.config.bos_token_id
+
+The configs carried `0/0/0` (copied from a template) while granite-4.0-tiktoken uses
+**100257 / 100257 / 100256**. Building the model does NOT catch this — model construction never
+touches token ids, only the trainer does. So "the config builds and the param count is right" is
+not sufficient evidence that a config will train.
+
 ## Requirements
 
 Needs three infra commits absent from `nima/main` (cherry-picked onto this branch):
