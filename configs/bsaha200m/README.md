@@ -117,9 +117,31 @@ repulsion-pair device fix, and the torch<2.9 `aten_distributed_optimizations` gu
 otherwise blocks all multi-GPU). Run on `.venv-nima` (transformers 4.57.1) — 5.1.0 silently
 clobbers the tied `wte`, and every config sets `tie_word_embeddings: true`.
 
-Data paths point at `/proj/datasets/ndehmamy-dataset-rescue` (hard links to the full corpus; the
-original `granite-4-datasets-megatron-merged` was purged 2026-09-22). `data_cache_path` is a fresh
-`cache-bsaha200m` — a new tokenizer/seq combination must not reuse a cache built for another.
+### Data: Nima's subset, not the rescue links
+
+Paths point at **`/proj/dmfexp/datasets-shared/granite-4-cmix-subset`** (and its own bundled
+tokenizer). The original `granite-4-datasets-megatron-merged` was purged 2026-09-22; two
+replacements exist and they are NOT interchangeable.
+
+| | rescue (`/proj/datasets/ndehmamy-dataset-rescue`) | subset (`/proj/dmfexp/datasets-shared`) |
+|---|---|---|
+| web shards | full, 1.07 TB, 380.0M docs | 200 GB, 58.2M docs |
+| math shards | full | **byte-identical to full** |
+| volume | `/proj/datasets` — being actively cleaned | `/proj/dmfexp` — safer |
+| web tokens vs our 11.0B need | ~49-98x | **~9-18x** |
+
+Verified: the rescue files are genuine hard links (same inode, `links=2`, same 1,074,869,046,028
+bytes as the deleted originals), so they are bit-identical — but they live on the volume whose
+owners are freeing space. They survive the owners deleting their copy, NOT the fileset being swept.
+The subset still carries 9-18x the web tokens a 15.73B run consumes, so **nothing repeats**, and its
+math shards are byte-identical. For a fresh sweep the safer volume wins.
+
+**Use the RESCUE dir instead for**: any resume from checkpoint, and anything compared against
+published numbers. The subset's web shards hold a different document count (58.2M vs 380.0M), hence
+a different `shuffle_index` — swapping mid-run changes the data distribution silently.
+
+`data_cache_path` is a fresh `cache-bsaha200m`: a new tokenizer/seq/dataset combination must never
+reuse a cache built for another.
 
 Submit on `-q normal -G grp_ebm`, **not** `-q preemptable` (which burned ~30h with zero steps on
 the FET runs). Check `bqueues` before submitting all 12 — the queue has been saturated recently.

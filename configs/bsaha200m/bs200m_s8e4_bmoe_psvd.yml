@@ -16,18 +16,18 @@ datasets:
       data_cache_path: /proj/dmfexp/energy-gpt/cache-bsaha200m
       data_path:
         - 0.35
-        - /proj/datasets/ndehmamy-dataset-rescue/web-nemotron-cc-hq-p2_0
+        - /proj/dmfexp/datasets-shared/granite-4-cmix-subset/web-nemotron-cc-hq-p2_0
         - 0.35
-        - /proj/datasets/ndehmamy-dataset-rescue/web-nemotron-cc-hq-p2_1
+        - /proj/dmfexp/datasets-shared/granite-4-cmix-subset/web-nemotron-cc-hq-p2_1
         - 0.15
-        - /proj/datasets/ndehmamy-dataset-rescue/megamath-web-pro_0
+        - /proj/dmfexp/datasets-shared/granite-4-cmix-subset/megamath-web-pro_0
         - 0.15
-        - /proj/datasets/ndehmamy-dataset-rescue/finemath-3plus-rewritten_0
+        - /proj/dmfexp/datasets-shared/granite-4-cmix-subset/finemath-3plus-rewritten_0
       split: 99,0.5,0.5
       sequence_length: 4096
 
 tokenizer_args:
-  tokenizer_name: /proj/datasets/ndehmamy-dataset-rescue/tokenizers/granite-4.0-tiktoken
+  tokenizer_name: /proj/dmfexp/datasets-shared/granite-4-cmix-subset/tokenizers/granite-4.0-tiktoken
 
 model_args:
   model_class: AutoModelForCausalLM

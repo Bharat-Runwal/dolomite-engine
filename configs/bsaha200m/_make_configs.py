@@ -17,8 +17,17 @@ STD_IPE_S12  = 427     # PER-EXPERT width
 ENERGY_IPE   = 12256   # 32 experts x 383 (solved against the real builder)
 STEPS, MB, GA, GPUS, SEQ = 30000, 4, 8, 4, 4096
 
-DATA = "/proj/datasets/ndehmamy-dataset-rescue"
-TOK = f"{DATA}/tokenizers/granite-4.0-tiktoken"
+# Nima's subset on /proj/dmfexp, NOT the rescue hard links on /proj/datasets.
+# Rationale: the rescue dir is hard links into the volume its owners are actively
+# cleaning (verified same inode/links=2 as the deleted originals) -- it survives their
+# delete but NOT the fileset being swept. The subset lives on a safer volume, its math
+# shards are BYTE-IDENTICAL to the full corpus, and its 200GB web shards still hold
+# ~9-18x the web tokens a 15.73B run needs, so nothing repeats. New runs only: a resume
+# or any comparison against published numbers must use the rescue dir instead, because
+# the web shards are a different document count (58.2M vs 380.0M docs) and therefore a
+# different shuffle_index.
+DATA = "/proj/dmfexp/datasets-shared/granite-4-cmix-subset"
+TOK = "/proj/dmfexp/datasets-shared/granite-4-cmix-subset/tokenizers/granite-4.0-tiktoken"
 SAVE_ROOT = "/proj/dmfexp/energy-gpt/checkpoints-bsaha/bsaha200m"
 
 HEADER = """# {name} -- 200M HP sweep, {arch}
