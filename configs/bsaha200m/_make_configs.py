@@ -15,7 +15,13 @@ H, LAYERS, VOCAB = 768, 12, 100352
 STD_IPE_S8E4 = 384     # PER-EXPERT width (MoE intermediate_size is per-expert)
 STD_IPE_S12  = 427     # PER-EXPERT width
 ENERGY_IPE   = 12256   # 32 experts x 383 (solved against the real builder)
-STEPS, MB, GA, GPUS, SEQ = 30000, 4, 8, 4, 4096
+# mb x ga = 32 is FIXED: it sets the global batch, hence 524,288 tok/step and 15.73B at 30k.
+# mb=8/ga=4 chosen over mb=4/ga=8: half as many sequential micro-steps per optimizer step,
+# so less per-launch overhead, and identical math. Estimated peak ~27 GB of 80 GB per GPU
+# during the DENSE warmup (steps 1..499, before sparse_start_step) -- that phase, not the
+# sparse phase, is what sets the ceiling because it materializes all K=32 experts.
+# mb=16/ga=2 would also fit (~52 GB) but leaves little headroom and halves ga to 2.
+STEPS, MB, GA, GPUS, SEQ = 30000, 8, 4, 4, 4096
 
 # Nima's subset on /proj/dmfexp, NOT the rescue hard links on /proj/datasets.
 # Rationale: the rescue dir is hard links into the volume its owners are actively
@@ -222,7 +228,12 @@ mixed_precision_args:
 
 distributed_args:
   fsdp_algorithm: 2
-  stage: 3
+  # stage 0 = ZeRO-0 / plain DDP: no sharding, one gradient all-reduce per step.
+  # At 200M the whole training state is ~2.5 GB/GPU replicated (bf16 params + fp32 AdamW
+  # moments) against 80 GB, so sharding would buy memory we do not need at the cost of
+  # re-gathering parameters twice per step. Mathematically identical to stage 3.
+  # NOTE this makes wall-clock NOT comparable to the 400M runs, which used stage 3.
+  stage: 0
   torch_compile: true
 """
     return head + body

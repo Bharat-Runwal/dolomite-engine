@@ -3,7 +3,7 @@
 #
 # proxy_loss_coef 0.01->0.05. Distils the proxy 5x harder against the exact routing.
 #
-# Geometry: 4 GPUs x mb=4 x ga=8 x seq=4096 = 524,288 tok/step
+# Geometry: 4 GPUs x mb=8 x ga=4 x seq=4096 = 524,288 tok/step
 #           x 30000 steps = 15.73B tokens
 # Params:   total 199,983,108  active 122,218,500 (61.1%)
 
@@ -133,8 +133,8 @@ logging_args:
 training_parameters:
   num_training_steps: 30000
   eval_interval: 1000000
-  micro_batch_size: 4
-  gradient_accumulation_steps: 8
+  micro_batch_size: 8
+  gradient_accumulation_steps: 4
   eval_during_training: false
 
 optimizer_args:
@@ -156,5 +156,10 @@ mixed_precision_args:
 
 distributed_args:
   fsdp_algorithm: 2
-  stage: 3
+  # stage 0 = ZeRO-0 / plain DDP: no sharding, one gradient all-reduce per step.
+  # At 200M the whole training state is ~2.5 GB/GPU replicated (bf16 params + fp32 AdamW
+  # moments) against 80 GB, so sharding would buy memory we do not need at the cost of
+  # re-gathering parameters twice per step. Mathematically identical to stage 3.
+  # NOTE this makes wall-clock NOT comparable to the 400M runs, which used stage 3.
+  stage: 0
   torch_compile: true

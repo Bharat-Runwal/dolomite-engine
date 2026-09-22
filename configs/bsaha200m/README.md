@@ -19,8 +19,33 @@ MoE is present. Every layer of every arm is a mixture; there is no dense FFN any
 
 ## Geometry (identical for all 12)
 
-4 GPUs x `micro_batch_size: 4` x `gradient_accumulation_steps: 8` x `sequence_length: 4096`
+4 GPUs x `micro_batch_size: 8` x `gradient_accumulation_steps: 4` x `sequence_length: 4096`
 = **524,288 tok/step** x **30,000 steps** = **15.73B tokens**.
+
+`mb x ga = 32` is fixed — it sets the global batch and therefore the token budget. mb=8/ga=4 is
+preferred over mb=4/ga=8 (half as many sequential micro-steps per optimizer step, identical math).
+
+`stage: 0` (ZeRO-0 / plain DDP), not stage 3. At 200M the replicated training state is only ~2.5 GB
+per GPU, so sharding buys memory we do not need while paying to re-gather parameters twice per step.
+Mathematically identical to stage 3. **Wall-clock is therefore NOT comparable to the 400M runs**,
+which used stage 3; within-sweep comparisons are unaffected.
+
+### Why the DENSE warmup sets the memory ceiling
+
+`sparse_start_step: 500` runs the **dense** path for the first 499 steps so the proxy can distil
+against exact all-K energies. That phase materialises all K=32 experts, not just 2, so it — not the
+sparse phase — decides the largest usable micro-batch. Estimated per-GPU peak during warmup:
+
+| mb | ga | activations | logits (+fp32 CE) | state | total | of 80 GB |
+|---|---|---|---|---|---|---|
+| 4 | 8 | 2.5 GB | 3.3 + 6.6 GB | 2.5 GB | ~14.9 GB | 19% |
+| **8** | **4** | 5.0 GB | 6.6 + 13.2 GB | 2.5 GB | **~27.3 GB** | **34%** |
+| 16 | 2 | 10.1 GB | 13.2 + 26.3 GB | 2.5 GB | ~52.0 GB | 65% |
+
+The `(mb, seq, vocab)` logits tensor dominates, not the model — vocab is 100352, so one bf16 logits
+tensor is 3.3 GB at mb=4 and the fp32 cross-entropy upcast doubles it again. mb=16 fits on paper but
+leaves thin headroom and drops ga to 2; mb=8 is the balance. These are estimates, not measurements —
+if a run OOMs during warmup, drop to mb=4/ga=8 (same tokens, same math).
 
 `ga=8` is forced: a true 16.0B at 30k steps would need `ga=8.14`, which is not an integer.
 Cosine LR, 500 warmup steps, identical across all 12 — the paper's own `tab:status` warns that a
