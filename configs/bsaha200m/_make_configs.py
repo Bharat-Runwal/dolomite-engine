@@ -204,10 +204,17 @@ logging_args:
 
 training_parameters:
   num_training_steps: {STEPS}
-  eval_interval: 1000000
   micro_batch_size: {MB}
   gradient_accumulation_steps: {GA}
   eval_during_training: false
+  # eval_interval must be a LARGE INT, not null, even though eval is off:
+  #   - pretrain.py short-circuits on `eval_during_training`, so it never gates an eval here;
+  #   - BUT data/megatron sizes the validation split with
+  #     `(num_training_steps // eval_interval + 1) * eval_steps * mb * ga * dp`
+  #     UNCONDITIONALLY, and `null` would raise on the floor-divide.
+  # A big value makes that term 1, reserving 256 val samples instead of ~7,936 at
+  # eval_interval=1000, so more of the 99/0.5/0.5 split stays available for training.
+  eval_interval: 1000000
 
 optimizer_args:
   class_name: TorchAdamW
