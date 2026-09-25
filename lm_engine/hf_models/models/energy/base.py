@@ -23,5 +23,12 @@ class EnergyPreTrainedModel(PreTrainedModelMixin):
             return []
         return ["EnergyBlock"]
 
+    @_no_split_modules.setter
+    def _no_split_modules(self, value):
+        # transformers < 5 does `self._no_split_modules = self._no_split_modules or []`
+        # in PreTrainedModel.__init__; a read-only property raises there. Accept and
+        # discard so this model works on both transformers 4.57.x and 5.x.
+        pass
+
 
 class EnergyModel(EnergyPreTrainedModel, BaseModelMixin): ...
