@@ -3,7 +3,7 @@
 # Base configs are Nima's Table-1 d=768 arms, untouched:
 #   G6 = 6S6E Boltzmann-MoE deep (K=4 k=2), trained at lr 1e-3
 #   E3 = 6G1x6S Switch-MoE baseline (K=8 k=2), trained at lr 2e-3 (NOTE: not 1e-3 as the paper says)
-# All runs: 8 GPUs (1 node), seq 4096, 524288 tok/step, 7629 steps = 4.00B tokens, seed 42, warmup 500.
+# All runs: 524288 tok/step (G6_lr5e-4 on 8 GPUs; the other five on 4 GPUs, ga doubled), seq 4096, 524288 tok/step, 7629 steps = 4.00B tokens, seed 42, warmup 500.
 #   W4a (learning rate):  G6 @5e-4, E3 @5e-4, E3 @1e-3  -> both arms at {5e-4, 1e-3} (+ existing G6@1e-3, E3@2e-3)
 #   W4b (Sinkhorn batch):  G6 micro-batch 1/2/8 at fixed global batch (existing G6 = micro-batch 4)
 set -euo pipefail

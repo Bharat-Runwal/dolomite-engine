@@ -1,4 +1,4 @@
-# ICLR27 rebuttal run reb_E3_lr5e-4 (base: fwe_sweep/fineweb_E3_switch_K8.yml; lr=5e-4 mbs=4 ga=4 on 8 GPUs)
+# ICLR27 rebuttal run reb_E3_lr5e-4 (base: fwe_sweep/fineweb_E3_switch_K8.yml; lr=5e-4 mbs=4 ga=8 on 4 GPUs)
 # E3: Switch MoE 6G1x6S K=8 k=2. Iso-total with E1/E2. The learned-gate baseline.
 datasets:
 - class_name: MegatronDataset
@@ -79,10 +79,10 @@ logging_args:
     name: reb_E3_lr5e-4
 training_parameters:
   num_training_steps: 7629
-  # LAUNCH: 8 GPUs (mbs 4 x ga 4), tok/step=524288, total=4.00B tokens
+  # LAUNCH: 4 GPUs (mbs 4 x ga 8), tok/step=524288, total=4.00B tokens
   eval_interval: 2000
   micro_batch_size: 4
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 8
   eval_during_training: false
   gradient_clipping: 1
 optimizer_args:

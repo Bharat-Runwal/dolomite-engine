@@ -10,7 +10,8 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=256G
-#SBATCH --time=10:00:00
+#SBATCH --time=12:00:00
+#SBATCH --requeue
 #SBATCH --output=/proj/dmfexp/energy-gpt/logs/rebuttal/%x-%j.out
 #SBATCH --error=/proj/dmfexp/energy-gpt/logs/rebuttal/%x-%j.err
 set -euo pipefail
@@ -36,4 +37,4 @@ else
 fi
 nvidia-smi -L
 echo "host $(hostname)  commit $(git -C $REPO rev-parse --short HEAD)  cfg $CFG"
-torchrun --standalone --nproc_per_node=8 -m lm_engine.pretrain --config "$CFG"
+torchrun --standalone --nproc_per_node=${SLURM_GPUS_ON_NODE:-8} -m lm_engine.pretrain --config "$CFG"

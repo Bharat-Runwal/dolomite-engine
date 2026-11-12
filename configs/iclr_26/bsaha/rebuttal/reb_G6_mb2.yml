@@ -1,4 +1,4 @@
-# ICLR27 rebuttal run reb_G6_mb2 (base: fwe_sweep/fineweb_G6_6S6E_isoact_d768.yml; lr=1e-3 mbs=2 ga=8 on 8 GPUs)
+# ICLR27 rebuttal run reb_G6_mb2 (base: fwe_sweep/fineweb_G6_6S6E_isoact_d768.yml; lr=1e-3 mbs=2 ga=16 on 4 GPUs)
 # G6: 6S6E K=4 k=2, d=768, active=132M (iso-active with Switch E3). 4.0B tokens.
 # tokens = 4096 × 4 × 8 × 4 × 7629 = 4.00B
 datasets:
@@ -108,10 +108,10 @@ logging_args:
     name: reb_G6_mb2
 training_parameters:
   num_training_steps: 7629
-  # LAUNCH: 8 GPUs (mbs 2 x ga 8), tok/step=524288, total=4.00B tokens
+  # LAUNCH: 4 GPUs (mbs 2 x ga 16), tok/step=524288, total=4.00B tokens
   eval_interval: 5000
   micro_batch_size: 2
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 16
   eval_during_training: false
   gradient_clipping: 1
 optimizer_args:
